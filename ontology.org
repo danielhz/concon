@@ -1,0 +1,309 @@
+#+TITLE: MLIPE Ontology Design
+
+* Prefixes
+
+#+begin_src omn
+Prefix: mlipe: <https://mlipe.2mia.org/ontology#>
+Prefix: schema: <https://schema.org/>
+Prefix: foaf: <http://xmlns.com/foaf/0.1/>
+Prefix: xsd: <http://www.w3.org/2001/XMLSchema#>
+#+end_src
+
+* Classes
+
+** User
+
+A user is identified by an IRI. Additional information such as username, email,
+and display name can be attached to the user IRI.
+
+#+begin_src omn
+Class: mlipe:User
+    SubClassOf: foaf:Agent
+#+end_src
+
+** Team
+
+Teams are organized in a tree structure. The root of the tree is a distinguished
+team that contains all other teams. Every user belongs to the root team.
+
+#+begin_src omn
+Class: mlipe:Team
+#+end_src
+
+#+begin_src omn
+Class: mlipe:RootTeam
+    SubClassOf: mlipe:Team
+    EquivalentTo: mlipe:Team and (not (mlipe:hasParentTeam some mlipe:Team))
+#+end_src
+
+A team can have subteams. Subteams inherit permissions from their parent team.
+Permissions can only be extended in subteams, never restricted.
+
+** Dataset
+
+A dataset is a separate Oxigraph store that can contain named graphs. Datasets
+are owned by teams.
+
+#+begin_src omn
+Class: mlipe:Dataset
+#+end_src
+
+** Role
+
+A role has a name and is associated with a set of actions.
+
+#+begin_src omn
+Class: mlipe:Role
+#+end_src
+
+** Action
+
+Actions represent operations that can be performed in the system.
+
+#+begin_src omn
+Class: mlipe:Action
+#+end_src
+
+** Visibility
+
+The visibility of a dataset determines who can see and access it.
+
+#+begin_src omn
+Class: mlipe:Visibility
+#+end_src
+
+* Properties
+
+** Team structure
+
+#+begin_src omn
+ObjectProperty: mlipe:hasParentTeam
+    Domain: mlipe:Team
+    Range: mlipe:Team
+
+ObjectProperty: mlipe:hasSubTeam
+    Domain: mlipe:Team
+    Range: mlipe:Team
+    InverseOf: mlipe:hasParentTeam
+
+ObjectProperty: mlipe:hasMember
+    Domain: mlipe:Team
+    Range: mlipe:User
+
+ObjectProperty: mlipe:hasAdmin
+    Domain: mlipe:Team
+    Range: mlipe:User
+    SubPropertyOf: mlipe:hasMember
+#+end_src
+
+** Dataset ownership
+
+#+begin_src omn
+ObjectProperty: mlipe:ownsDataset
+    Domain: mlipe:Team
+    Range: mlipe:Dataset
+
+ObjectProperty: mlipe:hasVisibility
+    Domain: mlipe:Dataset
+    Range: mlipe:Visibility
+#+end_src
+
+** Roles and actions
+
+#+begin_src omn
+ObjectProperty: mlipe:hasRole
+    Domain: mlipe:User
+    Range: mlipe:Role
+
+ObjectProperty: mlipe:roleInTeam
+    Domain: mlipe:Role
+    Range: mlipe:Team
+
+ObjectProperty: mlipe:permitsAction
+    Domain: mlipe:Role
+    Range: mlipe:Action
+#+end_src
+
+** User properties
+
+#+begin_src omn
+DatatypeProperty: mlipe:username
+    Domain: mlipe:User
+    Range: xsd:string
+    Characteristics: Functional
+
+DatatypeProperty: mlipe:email
+    Domain: mlipe:User
+    Range: xsd:string
+
+DatatypeProperty: mlipe:passwordHash
+    Domain: mlipe:User
+    Range: xsd:string
+    Characteristics: Functional
+#+end_src
+
+** Team and dataset properties
+
+#+begin_src omn
+DatatypeProperty: mlipe:teamName
+    Domain: mlipe:Team
+    Range: xsd:string
+
+DatatypeProperty: mlipe:datasetName
+    Domain: mlipe:Dataset
+    Range: xsd:string
+
+DatatypeProperty: mlipe:storePath
+    Domain: mlipe:Dataset
+    Range: xsd:string
+    Characteristics: Functional
+#+end_src
+
+* Individuals
+
+** Actions
+
+#+begin_src omn
+Individual: mlipe:QueryAction
+    Types: mlipe:Action
+
+Individual: mlipe:UpdateAction
+    Types: mlipe:Action
+
+Individual: mlipe:CreateDatasetAction
+    Types: mlipe:Action
+
+Individual: mlipe:DeleteDatasetAction
+    Types: mlipe:Action
+
+Individual: mlipe:CreateUserAction
+    Types: mlipe:Action
+
+Individual: mlipe:DeleteUserAction
+    Types: mlipe:Action
+
+Individual: mlipe:AddMemberAction
+    Types: mlipe:Action
+
+Individual: mlipe:RemoveMemberAction
+    Types: mlipe:Action
+
+Individual: mlipe:CreateSubTeamAction
+    Types: mlipe:Action
+#+end_src
+
+** Visibility levels
+
+#+begin_src omn
+Individual: mlipe:PublicVisibility
+    Types: mlipe:Visibility
+
+Individual: mlipe:LoggedUsersVisibility
+    Types: mlipe:Visibility
+
+Individual: mlipe:TeamOnlyVisibility
+    Types: mlipe:Visibility
+#+end_src
+
+* Assumptions and design rules
+
+** A1. Team tree structure
+
+The team system forms a tree rooted at a single root team. Every team except the
+root has exactly one parent team.
+
+#+begin_src omn
+Class: mlipe:Team
+    SubClassOf: mlipe:hasParentTeam max 1 mlipe:Team
+#+end_src
+
+** A2. All users belong to the root team
+
+Every user is a member of the root team. Membership in nested teams is granted
+explicitly by team admins.
+
+** A3. Root team admin privileges
+
+Admins of the root team can perform all actions in the system. In particular,
+only root team admins can create and delete users.
+
+** A4. Team admin privileges
+
+An admin of a team can:
+- Add existing users to the team
+- Remove users from the team (but not from parent teams)
+- Create datasets within the team
+- Create subteams within the team
+- Grant and revoke roles within the team
+
+An admin of a team cannot:
+- Create new users (reserved to root team admins)
+- Delete users (reserved to root team admins)
+- Modify permissions in parent teams
+
+** A4a. Subteam creation implies admin privileges in the subteam
+
+If a user is granted =mlipe:CreateSubTeamAction= in a team t1, the user can
+create a subteam t2 inside t1. The user automatically becomes an admin of t2.
+Since team admins can create datasets within their team, the user can create
+datasets in t2 even if the user is not granted =mlipe:CreateDatasetAction= in t1.
+The ability to create datasets is not a separate grant — it follows from being a
+team admin.
+
+** A5. Permission inheritance
+
+Permissions are inherited from parent teams to subteams. Subteam permissions can
+only extend the permissions granted by the parent team, never restrict them. If a
+user has write access in a parent team, the subteam cannot reduce that to
+read-only.
+
+** A6. Dataset visibility
+
+A dataset has one of three visibility levels:
+
+- =mlipe:PublicVisibility= --- readable by anyone, including non-authenticated
+  users. Write access is not granted by default but can be enabled (useful for
+  courses or collaborative scenarios).
+- =mlipe:LoggedUsersVisibility= --- visible and readable only by authenticated
+  users.
+- =mlipe:TeamOnlyVisibility= --- visible only to members of the team that owns
+  the dataset.
+
+If a user has neither query nor update permission on a dataset, the dataset is
+invisible to that user (it does not appear in listings or respond to queries).
+
+** A7. SPARQL protocol access
+
+The two SPARQL protocol actions are query and update. These are controlled per
+dataset based on the user's role:
+
+- =mlipe:QueryAction= --- allows SPARQL SELECT/ASK/CONSTRUCT/DESCRIBE queries
+- =mlipe:UpdateAction= --- allows SPARQL INSERT/DELETE updates
+
+** A8. User teams and personal datasets
+
+When a user who is allowed to create datasets in the root team creates a dataset,
+it is assigned to a new team (the "user team") whose only member and admin is
+that user. This is equivalent to the user owning the dataset. The user can later
+transfer ownership by adding members or moving the dataset to another team.
+
+** A9. Default permissions
+
+By default, in every team (including the root team):
+- Non-authenticated users cannot create datasets
+- Users cannot read nor write in the root team
+- Users can create a team where they become the admin, allowing them to read and
+  write within that team
+
+** A10. Dataset ownership transfer
+
+Dataset ownership can be transferred. This is done by changing which team owns
+the dataset (via =mlipe:ownsDataset=). The admins of the receiving team then
+become responsible for managing access to the dataset.
+
+** A11. Authentication module
+
+The authentication system is modular. The initial implementation uses
+username/password credentials. The module can be replaced by other authentication
+mechanisms (e.g., OAuth, institutional SSO) when deployed without changing the
+ontology for users and permissions.

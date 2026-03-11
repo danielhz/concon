@@ -1,0 +1,162 @@
+#+TITLE: MLIPE Planning Discussion
+
+This document records the planning discussion for the MLIPE project between
+Daniel Hernandez and Claude (AI assistant).
+
+* SPARQL Query Editor
+
+** Question: Should we integrate QLeverUI?
+
+Daniel proposed integrating [[https://github.com/qlever-dev/qlever-ui][QLeverUI]] for SPARQL query editing.
+
+** Analysis of QLeverUI
+
+- Django backend --- would require running a separate Python/Django app alongside
+  the Axum server
+- Tightly coupled to the QLever SPARQL engine --- autocompletion and suggestions
+  use QLever-specific APIs
+- Designed for exploring massive public knowledge bases like Wikidata, not for a
+  team research tool
+
+** Decision: Use YASGUI
+
+[[https://github.com/TriplyDB/Yasgui][YASGUI]] (Yet Another SPARQL GUI) was selected as the SPARQL query editor:
+
+- Pure JavaScript/TypeScript --- client-side library, no backend needed
+- Works with any standard SPARQL endpoint
+- Features: syntax highlighting, autocompletion, prefix management, multiple
+  result views (table, raw), tabbed queries
+- Easy to embed --- just serve an HTML page from Axum with the YASGUI JS/CSS
+- Widely adopted --- used by Apache Jena Fuseki, Triply, and many others
+
+Integration with Axum is straightforward: serve a static HTML page and proxy
+SPARQL requests to the appropriate Oxigraph endpoint.
+
+Other alternatives considered:
+- Oxigraph built-in UI --- basic SPARQL editor, could be enough for Phase 1
+- Sparklis --- natural language-like SPARQL builder, interesting for
+  non-technical researchers but less flexible
+
+* Development Roadmap Discussion
+
+** Current phases
+
+1. Setup the environment for a new Axum project.
+2. Define an ontology for managing users, RDF repositories, roles, permissions,
+   and teams.
+3. Integrate YASGUI as the SPARQL query editor.
+
+** Assessment
+
+Phase 1 is straightforward scaffolding. Phase 2 needs the most discussion before
+coding. Phase 3 depends on Phases 1 and 2 but is simple in itself.
+
+** Missing from the plan
+
+- Authentication mechanism --- session-based? JWT tokens? HTTP Basic Auth for
+  SPARQL protocol?
+- Data storage layout --- one Oxigraph instance per repository/dataset
+- SemASE integration --- how does SemASE connect to MLIPE? Does it authenticate
+  as a user?
+- API design --- REST API for managing repositories/users, or only a web UI?
+
+* Phase 2: Ontology Design Discussion
+
+** Users
+
+- IRI-based identity
+- Username/password module (swappable for OAuth, SSO, etc.)
+- Can attach additional info (emails, display name) to the user IRI
+
+** Naming: Dataset instead of Repository
+
+The term "repository" was borrowed from GraphDB. "Dataset" is more appropriate.
+Each dataset is a separate Oxigraph store that can contain named graphs.
+
+** Admin role scope
+
+The admin role depends on the level:
+
+- *System admin (root team admin)*: Can perform all actions, including creating
+  and deleting users.
+- *Team admin*: Can manage the team (add/remove members, create datasets, create
+  subteams, grant/revoke roles) but cannot create/delete users or modify parent
+  team permissions.
+
+The whole team system is a tree where the root is a team that contains all teams.
+Admins of the root can create users. An admin at the level of a nested team can
+add existing users to the team but not create new ones. Only root admins can
+delete users. A team admin can remove users from the team but not from parent
+teams.
+
+** Dataset creation
+
+- Admin of the root team can do all actions, including creating datasets
+- Admin of a nested team can create datasets in that specific team
+- A team admin can grant users the capacity to create datasets within the team
+- Non-authenticated users cannot create datasets in any team
+- A user allowed to create datasets in the root team creates a dataset assigned
+  to a new "user team" whose only member and admin is that user
+
+** Subteam creation and implicit admin privileges
+
+If a user is granted the CreateSubTeamAction in team t1, the user can create a
+subteam t2 inside t1. The user automatically becomes admin of t2. Since admins
+can create datasets within their team, the user can create datasets in t2 even
+without explicit CreateDatasetAction in t1. Dataset creation ability follows from
+being a team admin, not from a separate grant.
+
+** Teams
+
+- Teams own datasets (similar to GitHub: repos assigned to teams or individuals)
+- Teams have one or more admins who can grant access to team datasets
+- Teams can have subteams (similar to Dataverse)
+- All users belong to the root team but not necessarily to nested teams
+
+** Permission inheritance
+
+Permissions in subteams are inherited from the parent team and can only be
+extended, never restricted. If a user has write access in a parent team, the
+subteam cannot reduce that to read-only.
+
+** Permissions model
+
+Start with read/write/admin per dataset. Fine-grained permissions (per-graph,
+per-query) deferred to a future stage.
+
+** Dataset visibility
+
+Three levels:
+- *Public* --- readable by anyone including non-authenticated users. Write access
+  not granted by default but can be enabled (useful for courses).
+- *Logged users only* --- visible and readable only by authenticated users.
+- *Team only* --- visible only to members of the owning team.
+
+If a user has neither query nor update permission, the dataset is invisible (does
+not appear in listings or respond to queries).
+
+** SPARQL protocol access
+
+Two SPARQL protocol actions:
+- Query --- allows SELECT/ASK/CONSTRUCT/DESCRIBE
+- Update --- allows INSERT/DELETE
+
+** Dataset ownership
+
+- Owning a dataset is equivalent to being the only admin of a team (the "user
+  team") that owns the dataset
+- Ownership can be transferred by changing which team owns the dataset
+- Admins of the receiving team become responsible for access management
+
+** Default permissions
+
+- Non-authenticated users cannot create datasets in any team
+- Users cannot read nor write in the root team by default
+- Users can create a team where they become admin, allowing them to read and
+  write within that team
+
+** Authentication
+
+Modular design. Initial implementation uses username/password. Can be replaced by
+OAuth, institutional SSO, etc. without changing the ontology for users and
+permissions.
