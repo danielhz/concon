@@ -1,0 +1,10 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[store]
+# Path to the Turtle file containing system data (users, teams, datasets).
+# If this file does not exist on startup, a default one is created with an
+# admin user (credentials from MLIPE_ADMIN_USER / MLIPE_ADMIN_PASS env vars,
+# or "admin" / "admin").
+system_data = "system.ttl"

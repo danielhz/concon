@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - {{ dataset_name }}{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/@triply/yasgui/build/yasgui.min.css">
+{% endblock %}
+
+{% block content %}
+<h1>{{ dataset_name }}</h1>
+<div id="yasgui"></div>
+<script src="https://unpkg.com/@triply/yasgui/build/yasgui.min.js"></script>
+<script>
+    const yasgui = new Yasgui(document.getElementById("yasgui"), {
+        requestConfig: {
+            endpoint: "/{{ dataset_name }}/_sparql"
+        },
+        copyEndpointOnNewTab: false
+    });
+</script>
+{% endblock %}

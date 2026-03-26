@@ -1,0 +1,66 @@
+#+TITLE: MLIPE Visibility Rules
+
+* Dataset visibility
+
+Every dataset has exactly one visibility level, set via the
+=mlipe:hasVisibility= property. There are three levels:
+
+** PublicVisibility
+
+- Readable by anyone, including non-authenticated users.
+- The dataset appears in public listings and responds to SPARQL queries
+  without requiring login.
+
+** LoggedUsersVisibility
+
+- Visible and readable only by authenticated users.
+- Any user who is logged in can see and query the dataset.
+- Non-authenticated users cannot see it in listings or query it.
+
+** TeamOnlyVisibility
+
+- Visible only to users who have been granted access within the owning team.
+- A user can see a TeamOnly dataset if any of the following hold:
+  - The user is an admin of the owning team (via =mlipe:hasAdmin=).
+  - The user has a role in the owning team that permits =mlipe:QueryAction=.
+- Being a member of the root team is not sufficient. Regular users cannot
+  see TeamOnly datasets in the root team unless explicitly granted access
+  through a role or admin status.
+
+** Root team admin override
+
+Users who are admins of the root team (=mlipe:hasAdmin= on the team with no
+=mlipe:hasParentTeam=) can see *all* datasets regardless of visibility level.
+This is a system-wide administrative privilege.
+
+* Visibility resolution logic
+
+The system determines which datasets a user can see as follows:
+
+#+begin_src text
+if user is root team admin:
+    show ALL datasets
+else if user is authenticated:
+    show datasets where:
+        visibility = PublicVisibility
+     OR visibility = LoggedUsersVisibility
+     OR (visibility = TeamOnlyVisibility
+         AND (user is admin of owning team
+              OR user has role with QueryAction in owning team))
+else (not authenticated):
+    show datasets where:
+        visibility = PublicVisibility
+#+end_src
+
+* User visibility
+
+Users also have visibility settings that control who can see their profiles:
+
+- *Public* -- profile visible to anyone, including non-authenticated visitors.
+- *Logged users only* -- profile visible only to authenticated users.
+- *Private* -- profile visible only to the user themselves and root team
+  admins.
+
+The users list page (=/_users=) respects these settings, filtering the
+displayed users according to the viewer's authentication status and
+privileges.

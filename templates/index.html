@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - Datasets{% endblock %}
+
+{% block content %}
+<h1>Datasets</h1>
+{% if datasets %}
+    <ul class="dataset-list">
+        {% for ds in datasets %}
+            <li><a href="/{{ ds.name }}/_query">{{ ds.name }}</a></li>
+        {% endfor %}
+    </ul>
+{% else %}
+    <p>No datasets available.</p>
+{% endif %}
+
+{% if username %}
+<h2>Create dataset</h2>
+<form method="post" action="/_datasets/new" class="create-dataset-form">
+    <input type="text" name="name" placeholder="Dataset name" required>
+    <select name="team">
+        {% for t in teams %}
+            <option value="{{ t.iri }}">{{ t.name }}</option>
+        {% endfor %}
+    </select>
+    <select name="visibility">
+        <option value="Public">Public</option>
+        <option value="LoggedUsers">Logged users only</option>
+        <option value="TeamOnly">Team only</option>
+    </select>
+    <button type="submit">Create</button>
+</form>
+{% endif %}
+{% endblock %}

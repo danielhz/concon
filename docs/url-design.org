@@ -1,0 +1,71 @@
+#+TITLE: MLIPE URL Design
+
+* Principles
+
+MLIPE uses a unified URL namespace where application views and content
+coexist. Two key ideas govern the design:
+
+1. *Application routes use the =_= prefix.* All built-in views and actions
+   live under paths starting with =_= (e.g. =/_login=, =/_health=). This
+   separates them from user-created content.
+
+2. *Content hierarchy maps directly to URL paths.* Teams and datasets form a
+   tree, and the URL mirrors that tree like a filesystem. Navigating
+   =/A/B/D/= means dataset (or team) =D= inside team =B= inside team =A=.
+
+The root team is implicit and does not appear in the URL path.
+
+* The =_= prefix convention
+
+The =_= prefix is inspired by Zope and Plone's =@@= and =++namespace++=
+conventions, which use special markers to distinguish traversal of content
+from invocation of views. MLIPE uses =_= instead of =@@= because:
+
+- It is shorter and easier to type.
+- It is a single character that is valid in URLs without encoding.
+- It is visually distinct from content names without being noisy.
+
+Because application routes occupy a separate namespace (=_=-prefixed), teams
+and datasets can freely use names like "login", "health", or "users" without
+collisions.
+
+* No name collisions within a team
+
+Within a single team, a subteam and a dataset cannot share the same name.
+This follows from the filesystem analogy: a directory and a file in the same
+parent directory cannot have the same name. The URL path must unambiguously
+resolve to either a team or a dataset.
+
+* URL table
+
+| URL                 | Meaning                                        |
+|---------------------+------------------------------------------------|
+| =/=                 | Home page (root team listing)                  |
+| =/_login=           | Login page                                     |
+| =/_logout=          | Logout action                                  |
+| =/_health=          | Health check endpoint                          |
+| =/_users=           | Users list                                     |
+| =/_users/daniel=    | Daniel's profile page                          |
+| =/A/=               | Team A listing (subteams and datasets)         |
+| =/A/B/=             | Team B listing (child of A)                    |
+| =/A/B/D/_sparql=    | SPARQL endpoint for dataset D in team B in A   |
+| =/A/B/D/_query=     | YASGUI query editor for dataset D              |
+
+* Content traversal
+
+When a URL path does not begin with =_=, the router traverses the team
+hierarchy segment by segment. Each segment is resolved as either a subteam
+or a dataset within the current team context. The final segment determines
+what is displayed:
+
+- If it resolves to a team, the team listing is shown.
+- If it resolves to a dataset, the dataset overview is shown.
+- If followed by a =_=-prefixed action (e.g. =_sparql=, =_query=), that
+  action is invoked on the resolved resource.
+
+* Summary
+
+The =_= prefix creates a clean separation between the application's own
+routes and the content namespace. Content names are never restricted by the
+application's route table, and application routes are never shadowed by
+user-created teams or datasets.

@@ -1,6 +1,10 @@
 use std::collections::HashMap;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use oxigraph::io::RdfFormat;
+use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
 /// Manages multiple Oxigraph stores, one per dataset.
@@ -9,25 +13,84 @@ pub struct StoreManager {
     pub system: Store,
     /// Dataset stores, keyed by dataset name.
     datasets: RwLock<HashMap<String, Store>>,
+    /// Base directory for dataset storage.
+    data_dir: PathBuf,
 }
 
 impl StoreManager {
-    /// Create a new StoreManager with in-memory stores.
+    /// Create a new StoreManager with in-memory stores (for tests).
     pub fn new_in_memory() -> Result<Self, Box<dyn std::error::Error>> {
         let system = Store::new()?;
         Ok(Self {
             system,
             datasets: RwLock::new(HashMap::new()),
+            data_dir: PathBuf::new(),
         })
     }
 
-    /// Create a new dataset with an in-memory store.
+    /// Create a new StoreManager with persistent stores on disk.
+    pub fn new_persistent(data_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let data_path = Path::new(data_dir);
+        std::fs::create_dir_all(data_path.join("system"))?;
+        std::fs::create_dir_all(data_path.join("datasets"))?;
+
+        let system = Store::open(data_path.join("system"))?;
+
+        Ok(Self {
+            system,
+            datasets: RwLock::new(HashMap::new()),
+            data_dir: data_path.to_path_buf(),
+        })
+    }
+
+    /// Open dataset stores for all datasets registered in the system store.
+    pub fn open_existing_datasets(&self) -> Result<(), String> {
+        let query = r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            SELECT ?name WHERE {
+                ?ds a mlipe:Dataset ;
+                    mlipe:datasetName ?name .
+            }
+        "#;
+
+        let mut names = Vec::new();
+        if let Ok(QueryResults::Solutions(solutions)) = self.system.query(query) {
+            for solution in solutions.flatten() {
+                if let Some(name) = solution.get("name") {
+                    let name = crate::auth::strip_literal(&name.to_string());
+                    names.push(name);
+                }
+            }
+        }
+
+        let mut datasets = self.datasets.write().map_err(|e| e.to_string())?;
+        for name in names {
+            let path = self.data_dir.join("datasets").join(&name);
+            let store = Store::open(&path)
+                .map_err(|e| format!("Failed to open dataset '{}': {}", name, e))?;
+            datasets.insert(name.clone(), store);
+            tracing::info!("Opened dataset: {}", name);
+        }
+
+        Ok(())
+    }
+
+    /// Create a new dataset with a persistent store.
     pub fn create_dataset(&self, name: &str) -> Result<(), String> {
         let mut datasets = self.datasets.write().map_err(|e| e.to_string())?;
         if datasets.contains_key(name) {
             return Err(format!("Dataset '{}' already exists", name));
         }
-        let store = Store::new().map_err(|e| e.to_string())?;
+
+        let store = if self.data_dir.as_os_str().is_empty() {
+            // In-memory mode (tests)
+            Store::new().map_err(|e| e.to_string())?
+        } else {
+            let path = self.data_dir.join("datasets").join(name);
+            std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+            Store::open(&path).map_err(|e| e.to_string())?
+        };
+
         datasets.insert(name.to_string(), store);
         Ok(())
     }
@@ -50,6 +113,93 @@ impl StoreManager {
         datasets
             .remove(name)
             .ok_or_else(|| format!("Dataset '{}' not found", name))?;
+
+        // Remove dataset files from disk
+        if !self.data_dir.as_os_str().is_empty() {
+            let path = self.data_dir.join("datasets").join(name);
+            if path.exists() {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+
+        // Remove dataset metadata from system store
+        let update = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            DELETE WHERE {{
+                ?ds a mlipe:Dataset ;
+                    mlipe:datasetName "{name}" .
+                ?ds ?p ?o .
+            }}
+            "#,
+        );
+        let _ = self.system.update(&update);
         Ok(())
+    }
+
+    /// Insert dataset metadata triples into the system store with default public visibility
+    /// and root team ownership.
+    pub fn insert_dataset_metadata(&self, name: &str) -> Result<(), String> {
+        self.insert_dataset_metadata_full(
+            name,
+            "PublicVisibility",
+            "https://mlipe.2mia.org/teams/root",
+        )
+    }
+
+    /// Insert dataset metadata triples with a specific visibility (defaults to root team).
+    pub fn insert_dataset_metadata_with_visibility(
+        &self,
+        name: &str,
+        visibility: &str,
+    ) -> Result<(), String> {
+        self.insert_dataset_metadata_full(
+            name,
+            visibility,
+            "https://mlipe.2mia.org/teams/root",
+        )
+    }
+
+    /// Insert dataset metadata triples with visibility and team ownership.
+    pub fn insert_dataset_metadata_full(
+        &self,
+        name: &str,
+        visibility: &str,
+        team_iri: &str,
+    ) -> Result<(), String> {
+        let update = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {{
+                <https://mlipe.2mia.org/datasets/{name}> a mlipe:Dataset ;
+                    mlipe:datasetName "{name}" ;
+                    mlipe:hasVisibility mlipe:{visibility} .
+                <{team_iri}> mlipe:ownsDataset <https://mlipe.2mia.org/datasets/{name}> .
+            }}
+            "#,
+        );
+        self.system.update(&update).map_err(|e| e.to_string())
+    }
+
+    /// Check whether the system store has any triples.
+    pub fn is_system_empty(&self) -> bool {
+        self.system
+            .query("ASK { ?s ?p ?o }")
+            .ok()
+            .and_then(|r| match r {
+                QueryResults::Boolean(b) => Some(!b),
+                _ => None,
+            })
+            .unwrap_or(true)
+    }
+
+    /// Load a Turtle file into the system store.
+    pub fn load_system_data(&self, path: &str) -> Result<(), String> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("Cannot open system data file '{}': {}", path, e))?;
+        let reader = BufReader::new(file);
+        self.system
+            .load_from_reader(RdfFormat::Turtle, reader)
+            .map_err(|e| format!("Failed to parse system data '{}': {}", path, e))
     }
 }

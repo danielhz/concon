@@ -1,0 +1,61 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, sans-serif; color: #222; background: #fafafa; }
+a { color: #0057b7; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.navbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.6rem 1.2rem; background: #0057b7; color: #fff;
+}
+.navbar .brand { color: #fff; font-weight: 700; font-size: 1.1rem; }
+.nav-right { display: flex; align-items: center; gap: 1rem; }
+.nav-right a { color: #fff; }
+.nav-user { font-weight: 500; }
+.nav-form button {
+    background: transparent; border: 1px solid #fff; color: #fff;
+    padding: 0.25rem 0.6rem; border-radius: 4px; cursor: pointer;
+}
+.nav-form button:hover { background: rgba(255,255,255,0.15); }
+
+main { max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+h1 { margin-bottom: 1rem; }
+
+.dataset-list { list-style: none; }
+.dataset-list li { padding: 0.5rem 0; border-bottom: 1px solid #e0e0e0; }
+
+.login-form { max-width: 320px; display: flex; flex-direction: column; gap: 0.5rem; }
+.login-form label { font-weight: 600; }
+.login-form input { padding: 0.4rem; border: 1px solid #ccc; border-radius: 4px; }
+.login-form button {
+    margin-top: 0.5rem; padding: 0.5rem; background: #0057b7; color: #fff;
+    border: none; border-radius: 4px; cursor: pointer; font-size: 1rem;
+}
+.login-form button:hover { background: #004a9e; }
+
+.error { color: #c00; margin-bottom: 1rem; }
+
+.create-dataset-form { display: flex; gap: 0.5rem; align-items: center; }
+.create-dataset-form input {
+    padding: 0.4rem; border: 1px solid #ccc; border-radius: 4px;
+}
+.create-dataset-form button {
+    padding: 0.4rem 1rem; background: #0057b7; color: #fff;
+    border: none; border-radius: 4px; cursor: pointer;
+}
+.create-dataset-form button:hover { background: #004a9e; }
+
+h2 { margin-top: 1.5rem; margin-bottom: 0.5rem; }
+
+.update-editor { display: flex; flex-direction: column; gap: 0.5rem; }
+.update-editor textarea {
+    width: 100%; font-family: monospace; font-size: 0.9rem;
+    padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; resize: vertical;
+}
+.update-editor button {
+    align-self: flex-start; padding: 0.4rem 1rem; background: #0057b7; color: #fff;
+    border: none; border-radius: 4px; cursor: pointer; font-size: 0.9rem;
+}
+.update-editor button:hover { background: #004a9e; }
+.update-result { margin-top: 0.3rem; padding: 0.4rem; border-radius: 4px; }
+.update-result.success { color: #186a3b; background: #d5f5e3; }
+.update-result.error { color: #922; background: #fde8e8; }

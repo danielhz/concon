@@ -19,3 +19,8 @@ target/
 # Added by cargo
 
 /target
+
+# Runtime config and data (use *.example.* as reference)
+mlipe.toml
+system.ttl
+data/

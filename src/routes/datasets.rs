@@ -7,8 +7,11 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/datasets", get(list_datasets).post(create_dataset))
-        .route("/datasets/{name}", axum::routing::delete(delete_dataset))
+        .route("/_api/datasets", get(list_datasets).post(create_dataset))
+        .route(
+            "/_api/datasets/{name}",
+            axum::routing::delete(delete_dataset),
+        )
 }
 
 #[derive(Serialize)]
@@ -33,8 +36,13 @@ async fn create_dataset(
     state
         .store_manager
         .create_dataset(&payload.name)
-        .map(|_| StatusCode::CREATED)
-        .map_err(|e| (StatusCode::CONFLICT, e))
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    // Insert dataset metadata into system store
+    state
+        .store_manager
+        .insert_dataset_metadata(&payload.name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(StatusCode::CREATED)
 }
 
 async fn delete_dataset(
@@ -64,7 +72,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_datasets_empty() {
         let server = test_server();
-        let response = server.get("/datasets").await;
+        let response = server.get("/_api/datasets").await;
         response.assert_status_ok();
         let body: serde_json::Value = response.json();
         assert_eq!(body["datasets"], serde_json::json!([]));
@@ -75,12 +83,12 @@ mod tests {
         let server = test_server();
 
         let response = server
-            .post("/datasets")
+            .post("/_api/datasets")
             .json(&serde_json::json!({"name": "test-dataset"}))
             .await;
         response.assert_status(axum::http::StatusCode::CREATED);
 
-        let response = server.get("/datasets").await;
+        let response = server.get("/_api/datasets").await;
         let body: serde_json::Value = response.json();
         assert_eq!(body["datasets"], serde_json::json!(["test-dataset"]));
     }
@@ -90,12 +98,12 @@ mod tests {
         let server = test_server();
 
         server
-            .post("/datasets")
+            .post("/_api/datasets")
             .json(&serde_json::json!({"name": "dup"}))
             .await;
 
         let response = server
-            .post("/datasets")
+            .post("/_api/datasets")
             .json(&serde_json::json!({"name": "dup"}))
             .await;
         response.assert_status(axum::http::StatusCode::CONFLICT);
@@ -106,14 +114,14 @@ mod tests {
         let server = test_server();
 
         server
-            .post("/datasets")
+            .post("/_api/datasets")
             .json(&serde_json::json!({"name": "to-delete"}))
             .await;
 
-        let response = server.delete("/datasets/to-delete").await;
+        let response = server.delete("/_api/datasets/to-delete").await;
         response.assert_status(axum::http::StatusCode::NO_CONTENT);
 
-        let response = server.get("/datasets").await;
+        let response = server.get("/_api/datasets").await;
         let body: serde_json::Value = response.json();
         assert_eq!(body["datasets"], serde_json::json!([]));
     }
@@ -121,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_nonexistent_dataset() {
         let server = test_server();
-        let response = server.delete("/datasets/nonexistent").await;
+        let response = server.delete("/_api/datasets/nonexistent").await;
         response.assert_status(axum::http::StatusCode::NOT_FOUND);
     }
 }

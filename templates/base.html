@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}MLIPE{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <a class="brand" href="/">MLIPE</a>
+        <div class="nav-right">
+            {% if username %}
+                <span class="nav-user">{{ username }}</span>
+                <form method="post" action="/_logout" class="nav-form">
+                    <button type="submit">Logout</button>
+                </form>
+            {% else %}
+                <a href="/_login">Login</a>
+            {% endif %}
+        </div>
+    </nav>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

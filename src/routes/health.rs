@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/health", get(health_check))
+    Router::new().route("/_health", get(health_check))
 }
 
 async fn health_check() -> StatusCode {
@@ -24,7 +24,7 @@ mod tests {
         let app = create_router(state);
         let server = TestServer::new(app);
 
-        let response = server.get("/health").await;
+        let response = server.get("/_health").await;
         response.assert_status_ok();
     }
 }

@@ -1,0 +1,107 @@
+#+TITLE: MLIPE Team Hierarchy and Permissions
+
+* Team tree structure
+
+Teams form a tree rooted at a single root team. Every team except the root
+has exactly one parent, linked via =mlipe:hasParentTeam=. The root team is
+identified as the team with no parent.
+
+#+begin_src text
+Root Team
+ +-- Team A
+ |    +-- Team A1
+ |    +-- Team A2
+ +-- Team B
+      +-- Team B1
+#+end_src
+
+Every user in the system belongs to the root team. Membership in nested
+teams is granted explicitly by team admins.
+
+* Root team admin privileges
+
+Admins of the root team can perform all actions in the system. This includes:
+
+- Creating and deleting users
+- Managing any team or dataset
+- Seeing all datasets regardless of visibility level
+
+* Team admin privileges
+
+An admin of a team can:
+
+- Add existing users to the team (=AddMemberAction=)
+- Remove users from the team (=RemoveMemberAction=)
+- Create datasets within the team (=CreateDatasetAction=)
+- Create subteams within the team (=CreateSubTeamAction=)
+- Grant and revoke roles within the team
+
+An admin of a team *cannot*:
+
+- Create or delete users (reserved to root team admins)
+- Modify permissions in parent teams
+
+When a user creates a subteam, they automatically become its admin. This
+grants them full control within the subteam, including the ability to create
+datasets there, even without an explicit =CreateDatasetAction= grant in the
+parent team.
+
+* Permission inheritance
+
+Permissions are inherited from parent teams to child teams. Subteam
+permissions can only *extend* the permissions granted by the parent, never
+*restrict* them. If a user has write access in a parent team, a subteam
+cannot reduce that to read-only.
+
+* Dataset ownership
+
+Every dataset belongs to exactly one team, linked via =mlipe:ownsDataset=.
+
+- When creating a dataset, the user selects which team it belongs to. The
+  user must be an admin of that team.
+- Dataset ownership can be transferred between teams by changing the
+  =mlipe:ownsDataset= relationship. The admins of the receiving team then
+  become responsible for managing access.
+
+* The no-name-collision rule
+
+Within a single team, no subteam and dataset can share the same name. This
+mirrors the filesystem constraint where a file and a directory in the same
+parent cannot have the same name. The rule ensures that URL paths
+unambiguously resolve to either a team or a dataset (see =url-design.org=).
+
+* Actions
+
+The system defines the following actions as named individuals of type
+=mlipe:Action=:
+
+| Action                       | Description                              |
+|------------------------------+------------------------------------------|
+| =mlipe:QueryAction=          | SPARQL SELECT/ASK/CONSTRUCT/DESCRIBE     |
+| =mlipe:UpdateAction=         | SPARQL INSERT/DELETE updates              |
+| =mlipe:CreateDatasetAction=  | Create a new dataset in a team           |
+| =mlipe:DeleteDatasetAction=  | Delete a dataset from a team             |
+| =mlipe:CreateUserAction=     | Create a new user (root admin only)      |
+| =mlipe:DeleteUserAction=     | Delete a user (root admin only)          |
+| =mlipe:AddMemberAction=      | Add a user to a team                     |
+| =mlipe:RemoveMemberAction=   | Remove a user from a team                |
+| =mlipe:CreateSubTeamAction=  | Create a subteam within a team           |
+
+* Roles
+
+Permissions are granted through roles. A role is associated with:
+
+- A user (via =mlipe:hasRole=)
+- A team (via =mlipe:roleInTeam=)
+- One or more permitted actions (via =mlipe:permitsAction=)
+
+#+begin_src turtle
+:role-example a mlipe:Role ;
+    mlipe:roleInTeam :team-A ;
+    mlipe:permitsAction mlipe:QueryAction ;
+    mlipe:permitsAction mlipe:UpdateAction .
+
+:alice mlipe:hasRole :role-example .
+#+end_src
+
+In this example, Alice can query and update datasets owned by Team A.
