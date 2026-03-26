@@ -33,6 +33,7 @@ h1 { margin-bottom: 1rem; }
 .login-form button:hover { background: #004a9e; }
 
 .error { color: #c00; margin-bottom: 1rem; }
+.success { color: #186a3b; margin-bottom: 1rem; }
 
 .create-dataset-form { display: flex; gap: 0.5rem; align-items: center; }
 .create-dataset-form input {

@@ -16,6 +16,7 @@ pub fn routes() -> Router<AppState> {
         .route("/_login", get(login_page).post(login_submit))
         .route("/_logout", axum::routing::post(logout))
         .route("/_datasets/new", axum::routing::post(create_dataset_web))
+        .route("/_change-password", get(change_password_page).post(change_password_submit))
         .route("/_users", get(users_list))
         .route("/_users/{username}", get(user_profile))
 }
@@ -131,6 +132,92 @@ async fn logout(
         cookies.remove(tower_cookies::Cookie::from(SESSION_COOKIE));
     }
     Redirect::to("/")
+}
+
+async fn change_password_page(
+    State(state): State<AppState>,
+    cookies: Cookies,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    if session.is_none() {
+        return Redirect::to("/_login").into_response();
+    }
+
+    let tmpl = match state.templates.get_template("change_password.html") {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let html = match tmpl.render(minijinja::context! {
+        username => session.map(|s| s.username),
+        error => "",
+        success => "",
+    }) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    Html(html).into_response()
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordForm {
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
+async fn change_password_submit(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<ChangePasswordForm>,
+) -> Response {
+    let session = match get_username(&cookies, &state) {
+        Some(s) => s,
+        None => return Redirect::to("/_login").into_response(),
+    };
+
+    let render = |error: &str, success: &str| -> Response {
+        let tmpl = match state.templates.get_template("change_password.html") {
+            Ok(t) => t,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        let html = match tmpl.render(minijinja::context! {
+            username => &session.username,
+            error => error,
+            success => success,
+        }) {
+            Ok(h) => h,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        Html(html).into_response()
+    };
+
+    // Verify current password
+    let current_hash = match auth::find_user_by_username(&state.store_manager.system, &session.username) {
+        Some((_, hash)) => hash,
+        None => return render("User not found.", ""),
+    };
+
+    if !auth::verify_password(&form.current_password, &current_hash) {
+        return render("Current password is incorrect.", "");
+    }
+
+    if form.new_password != form.confirm_password {
+        return render("New passwords do not match.", "");
+    }
+
+    if form.new_password.is_empty() {
+        return render("New password cannot be empty.", "");
+    }
+
+    // Update password in the system store
+    let new_hash = auth::hash_password(&form.new_password);
+    if let Err(e) = auth::update_password_hash(&state.store_manager.system, &session.user_iri, &new_hash) {
+        return render(&format!("Failed to update password: {}", e), "");
+    }
+
+    render("", "Password changed successfully.")
 }
 
 #[derive(Deserialize)]

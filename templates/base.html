@@ -12,7 +12,7 @@
         <a class="brand" href="/">MLIPE</a>
         <div class="nav-right">
             {% if username %}
-                <span class="nav-user">{{ username }}</span>
+                <a class="nav-user" href="/_change-password">{{ username }}</a>
                 <form method="post" action="/_logout" class="nav-form">
                     <button type="submit">Logout</button>
                 </form>

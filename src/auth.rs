@@ -100,6 +100,20 @@ pub fn find_user_by_username(store: &Store, username: &str) -> Option<(String, S
     None
 }
 
+/// Update the password hash for a user in the system store.
+pub fn update_password_hash(store: &Store, user_iri: &str, new_hash: &str) -> Result<(), String> {
+    let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
+    let update = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        DELETE {{ <{iri}> mlipe:passwordHash ?old }}
+        INSERT {{ <{iri}> mlipe:passwordHash "{new_hash}" }}
+        WHERE {{ <{iri}> mlipe:passwordHash ?old }}
+        "#,
+    );
+    store.update(&update).map_err(|e| e.to_string())
+}
+
 /// Get all public datasets from the system store.
 pub fn get_public_datasets(store: &Store) -> Vec<DatasetInfo> {
     let query = r#"
