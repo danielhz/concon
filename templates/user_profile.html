@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - {{ profile_username }}{% endblock %}
+
+{% block content %}
+<h1>{{ profile_username }}</h1>
+
+<h2>Teams</h2>
+{% if teams %}
+    <ul class="info-list">
+        {% for t in teams %}
+            <li>{{ t.name }}{% if t.is_admin %} <span class="badge">admin</span>{% endif %}</li>
+        {% endfor %}
+    </ul>
+{% else %}
+    <p>Not a member of any team.</p>
+{% endif %}
+
+<h2>Accessible datasets</h2>
+{% if datasets %}
+    <ul class="info-list">
+        {% for ds in datasets %}
+            <li><a href="/{{ ds.name }}/_query">{{ ds.name }}</a></li>
+        {% endfor %}
+    </ul>
+{% else %}
+    <p>No datasets accessible.</p>
+{% endif %}
+{% endblock %}

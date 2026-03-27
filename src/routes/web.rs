@@ -16,6 +16,7 @@ pub fn routes() -> Router<AppState> {
         .route("/_login", get(login_page).post(login_submit))
         .route("/_logout", axum::routing::post(logout))
         .route("/_datasets/new", axum::routing::post(create_dataset_web))
+        .route("/_datasets/delete", axum::routing::post(delete_dataset_web))
         .route("/_change-password", get(change_password_page).post(change_password_submit))
         .route("/_users", get(users_list))
         .route("/_users/{username}", get(user_profile))
@@ -265,6 +266,24 @@ async fn create_dataset_web(
     Redirect::to("/").into_response()
 }
 
+#[derive(Deserialize)]
+struct DeleteDatasetForm {
+    name: String,
+}
+
+async fn delete_dataset_web(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<DeleteDatasetForm>,
+) -> Response {
+    if get_username(&cookies, &state).is_none() {
+        return Redirect::to("/_login").into_response();
+    }
+
+    let _ = state.store_manager.delete_dataset(&form.name);
+    Redirect::to("/").into_response()
+}
+
 pub async fn dataset_query(
     state: &AppState,
     dataset_name: &str,
@@ -298,14 +317,20 @@ async fn users_list(
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(&cookies, &state);
 
+    let all_users = auth::list_all_users(&state.store_manager.system);
+
     let tmpl = state
         .templates
-        .get_template("base.html")
+        .get_template("users.html")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
+            users => all_users.iter().map(|u| minijinja::context! {
+                username => u.username,
+                teams => u.teams.iter().map(|t| &t.name).cloned().collect::<Vec<_>>().join(", "),
+            }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -314,20 +339,33 @@ async fn users_list(
 
 async fn user_profile(
     State(state): State<AppState>,
-    axum::extract::Path(username): axum::extract::Path<String>,
+    axum::extract::Path(profile_name): axum::extract::Path<String>,
     cookies: Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(&cookies, &state);
 
+    let user_info = auth::get_user_info(&state.store_manager.system, &profile_name)
+        .ok_or((StatusCode::NOT_FOUND, format!("User '{}' not found", profile_name)))?;
+
+    let admin_teams = auth::get_user_admin_teams(&state.store_manager.system, &user_info.iri);
+    let admin_team_iris: Vec<_> = admin_teams.iter().map(|t| &t.iri).collect();
+
+    let datasets = auth::get_user_datasets(&state.store_manager.system, &user_info.iri);
+
     let tmpl = state
         .templates
-        .get_template("base.html")
+        .get_template("user_profile.html")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
-            profile_username => username,
+            profile_username => profile_name,
+            teams => user_info.teams.iter().map(|t| minijinja::context! {
+                name => t.name,
+                is_admin => admin_team_iris.contains(&&t.iri),
+            }).collect::<Vec<_>>(),
+            datasets => datasets.iter().map(|d| minijinja::context! { name => d.name }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

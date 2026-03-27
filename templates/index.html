@@ -7,7 +7,16 @@
 {% if datasets %}
     <ul class="dataset-list">
         {% for ds in datasets %}
-            <li><a href="/{{ ds.name }}/_query">{{ ds.name }}</a></li>
+            <li>
+                <a href="/{{ ds.name }}/_query">{{ ds.name }}</a>
+                {% if username %}
+                <form method="post" action="/_datasets/delete" class="inline-form"
+                      onsubmit="return confirm('Delete dataset \'{{ ds.name }}\'?')">
+                    <input type="hidden" name="name" value="{{ ds.name }}">
+                    <button type="submit" class="btn-small-danger">delete</button>
+                </form>
+                {% endif %}
+            </li>
         {% endfor %}
     </ul>
 {% else %}

@@ -60,3 +60,30 @@ h2 { margin-top: 1.5rem; margin-bottom: 0.5rem; }
 .update-result { margin-top: 0.3rem; padding: 0.4rem; border-radius: 4px; }
 .update-result.success { color: #186a3b; background: #d5f5e3; }
 .update-result.error { color: #922; background: #fde8e8; }
+
+.data-table { border-collapse: collapse; width: 100%; }
+.data-table th, .data-table td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #e0e0e0; }
+.data-table th { font-weight: 600; background: #f5f5f5; }
+
+.info-list { list-style: none; }
+.info-list li { padding: 0.3rem 0; }
+
+.badge { font-size: 0.75rem; background: #0057b7; color: #fff; padding: 0.1rem 0.4rem; border-radius: 3px; }
+
+.btn-danger {
+    padding: 0.4rem 1rem; background: #c00; color: #fff;
+    border: none; border-radius: 4px; cursor: pointer;
+}
+.btn-danger:hover { background: #a00; }
+
+.btn-small-danger {
+    font-size: 0.75rem; padding: 0.1rem 0.4rem; background: transparent; color: #c00;
+    border: 1px solid #c00; border-radius: 3px; cursor: pointer; margin-left: 0.5rem;
+}
+.btn-small-danger:hover { background: #c00; color: #fff; }
+
+.inline-form { display: inline; }
+
+.delete-form { margin-top: 0.5rem; }
+
+.dataset-list li { display: flex; align-items: center; }

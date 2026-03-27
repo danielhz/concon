@@ -254,6 +254,93 @@ pub fn get_user_admin_teams(store: &Store, user_iri: &str) -> Vec<TeamInfo> {
     teams
 }
 
+/// User info for display purposes.
+#[derive(Clone)]
+pub struct UserInfo {
+    pub username: String,
+    pub iri: String,
+    pub teams: Vec<TeamInfo>,
+}
+
+/// List all users in the system store.
+pub fn list_all_users(store: &Store) -> Vec<UserInfo> {
+    let query = r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?user ?username WHERE {
+            ?user a mlipe:User ;
+                  mlipe:username ?username .
+        }
+        ORDER BY ?username
+    "#;
+
+    let mut users = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+        for solution in solutions.flatten() {
+            if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
+                let iri = user.to_string();
+                let username = strip_literal(&username.to_string());
+                let teams = get_user_member_teams(store, &iri);
+                users.push(UserInfo { username, iri, teams });
+            }
+        }
+    }
+    users
+}
+
+/// Get teams where the user is a member.
+pub fn get_user_member_teams(store: &Store, user_iri: &str) -> Vec<TeamInfo> {
+    let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
+    let query = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?team ?name WHERE {{
+            ?team a mlipe:Team ;
+                  mlipe:teamName ?name ;
+                  mlipe:hasMember <{iri}> .
+        }}
+        "#,
+    );
+
+    let mut teams = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+        for solution in solutions.flatten() {
+            if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
+                teams.push(TeamInfo {
+                    iri: iri.to_string(),
+                    name: strip_literal(&name.to_string()),
+                });
+            }
+        }
+    }
+    teams
+}
+
+/// Get user info by username.
+pub fn get_user_info(store: &Store, username: &str) -> Option<UserInfo> {
+    let (iri, _) = find_user_by_username(store, username)?;
+    let teams = get_user_member_teams(store, &iri);
+    Some(UserInfo {
+        username: username.to_string(),
+        iri,
+        teams,
+    })
+}
+
+/// Get datasets owned by a team.
+pub fn get_team_datasets(store: &Store, team_iri: &str) -> Vec<DatasetInfo> {
+    let iri = team_iri.trim_matches(|c| c == '<' || c == '>');
+    let query = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?name WHERE {{
+            <{iri}> mlipe:ownsDataset ?ds .
+            ?ds mlipe:datasetName ?name .
+        }}
+        "#,
+    );
+    query_dataset_names(store, &query)
+}
+
 /// Strip surrounding quotes and optional datatype suffix from an RDF literal string.
 pub fn strip_literal(s: &str) -> String {
     let s = s.trim();

@@ -8,7 +8,26 @@
 
 {% block content %}
 <h1>{{ dataset_name }}</h1>
+
 <div id="yasgui"></div>
+
+{% if username %}
+<h2>SPARQL Update</h2>
+<div class="update-editor">
+    <textarea id="update-text" rows="6" placeholder="PREFIX ex: <http://example.org/>
+INSERT DATA { ex:s ex:p ex:o . }"></textarea>
+    <button id="update-btn">Execute update</button>
+    <div id="update-result" class="update-result" style="display:none"></div>
+</div>
+
+<h2>Manage</h2>
+<form method="post" action="/_datasets/delete" class="delete-form"
+      onsubmit="return confirm('Delete dataset \'{{ dataset_name }}\'? This cannot be undone.')">
+    <input type="hidden" name="name" value="{{ dataset_name }}">
+    <button type="submit" class="btn-danger">Delete dataset</button>
+</form>
+{% endif %}
+
 <script src="https://unpkg.com/@triply/yasgui/build/yasgui.min.js"></script>
 <script>
     const yasgui = new Yasgui(document.getElementById("yasgui"), {
@@ -17,5 +36,32 @@
         },
         copyEndpointOnNewTab: false
     });
+
+    const updateBtn = document.getElementById("update-btn");
+    if (updateBtn) {
+        updateBtn.addEventListener("click", async () => {
+            const text = document.getElementById("update-text").value;
+            const result = document.getElementById("update-result");
+            try {
+                const resp = await fetch("/{{ dataset_name }}/_update", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/sparql-update"},
+                    body: text
+                });
+                if (resp.ok) {
+                    result.className = "update-result success";
+                    result.textContent = "Update executed successfully.";
+                } else {
+                    const err = await resp.text();
+                    result.className = "update-result error";
+                    result.textContent = err;
+                }
+            } catch (e) {
+                result.className = "update-result error";
+                result.textContent = e.message;
+            }
+            result.style.display = "block";
+        });
+    }
 </script>
 {% endblock %}
