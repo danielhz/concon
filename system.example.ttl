@@ -1,0 +1,56 @@
+@prefix mlipe: <https://mlipe.2mia.org/ontology#> .
+
+# ── Teams ────────────────────────────────────────────────────────────
+# The root team has no parent; its admins can see all datasets.
+
+<https://mlipe.2mia.org/teams/root> a mlipe:Team ;
+    mlipe:teamName "root" ;
+    mlipe:hasMember <https://mlipe.2mia.org/users/admin> ;
+    mlipe:hasAdmin <https://mlipe.2mia.org/users/admin> .
+
+# Sub-teams reference their parent via mlipe:hasParentTeam.
+
+<https://mlipe.2mia.org/teams/materials> a mlipe:Team ;
+    mlipe:teamName "materials" ;
+    mlipe:hasParentTeam <https://mlipe.2mia.org/teams/root> ;
+    mlipe:hasMember <https://mlipe.2mia.org/users/alice> ;
+    mlipe:hasAdmin <https://mlipe.2mia.org/users/alice> .
+
+# ── Users ────────────────────────────────────────────────────────────
+# Replace the passwordHash with a real argon2id hash.
+# The default hash below corresponds to the password "admin".
+
+<https://mlipe.2mia.org/users/admin> a mlipe:User ;
+    mlipe:username "admin" ;
+    mlipe:passwordHash "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_WITH_REAL_HASH" .
+
+<https://mlipe.2mia.org/users/alice> a mlipe:User ;
+    mlipe:username "alice" ;
+    mlipe:passwordHash "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_WITH_REAL_HASH" .
+
+# ── Datasets ─────────────────────────────────────────────────────────
+# Datasets are normally created via the web UI or the API.  The triples
+# below show the structure for reference.
+#
+# Visibility options:
+#   mlipe:PublicVisibility      — visible to everyone
+#   mlipe:LoggedUsersVisibility — visible to any logged-in user
+#   mlipe:TeamOnlyVisibility    — visible only to the owning team
+
+<https://mlipe.2mia.org/datasets/example> a mlipe:Dataset ;
+    mlipe:datasetName "example" ;
+    mlipe:hasVisibility mlipe:PublicVisibility .
+
+<https://mlipe.2mia.org/teams/root> mlipe:ownsDataset
+    <https://mlipe.2mia.org/datasets/example> .
+
+# ── Roles (optional) ────────────────────────────────────────────────
+# Fine-grained access: a user holds a role in a team, and the role
+# permits specific actions (e.g. mlipe:QueryAction).
+
+# <https://mlipe.2mia.org/users/alice> mlipe:hasRole
+#     <https://mlipe.2mia.org/roles/alice-materials-reader> .
+#
+# <https://mlipe.2mia.org/roles/alice-materials-reader>
+#     mlipe:roleInTeam <https://mlipe.2mia.org/teams/materials> ;
+#     mlipe:permitsAction mlipe:QueryAction .
