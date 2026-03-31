@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - Files{% endblock %}
+
+{% block content %}
+<h1>Files — {{ team_path }}</h1>
+
+{% if files %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Authors</th>
+            <th>Year</th>
+            <th>Filename</th>
+            <th>DOI</th>
+            <th>Uploaded</th>
+            {% if can_delete or username %}
+            <th>Actions</th>
+            {% endif %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for f in files %}
+        <tr>
+            <td>{{ f.title }}</td>
+            <td>{{ f.authors }}</td>
+            <td>{{ f.year }}</td>
+            <td><a href="{{ team_url_prefix }}/_files/{{ f.uuid }}">{{ f.file_name }}</a></td>
+            <td>{% if f.doi %}{{ f.doi }}{% endif %}</td>
+            <td>{{ f.uploaded_at }}</td>
+            {% if can_delete or username %}
+            <td class="actions-cell">
+                {% if username %}
+                <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_edit">edit</a>
+                {% endif %}
+                {% if can_delete %}
+                <form method="post" action="{{ team_url_prefix }}/_files/{{ f.uuid }}/_delete" class="inline-form"
+                      onsubmit="return confirm('Delete this file?')">
+                    <button type="submit" class="btn-small-danger">delete</button>
+                </form>
+                {% endif %}
+            </td>
+            {% endif %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No files uploaded yet.</p>
+{% endif %}
+
+{% if can_upload %}
+<h2>Upload PDF</h2>
+<form method="post" action="{{ team_url_prefix }}/_files/_upload" enctype="multipart/form-data" class="upload-form">
+    <label for="file">PDF file</label>
+    <input type="file" id="file" name="file" accept="application/pdf" required>
+
+    <label for="title">Title</label>
+    <input type="text" id="title" name="title" placeholder="Paper title">
+
+    <label for="authors">Authors</label>
+    <input type="text" id="authors" name="authors" placeholder="Smith, J.; Doe, A.">
+
+    <label for="year">Year</label>
+    <input type="text" id="year" name="year" placeholder="2026">
+
+    <label for="doi">DOI</label>
+    <input type="text" id="doi" name="doi" placeholder="10.1234/example">
+
+    <button type="submit">Upload</button>
+</form>
+{% endif %}
+
+<p><a href="{{ team_url_prefix }}/_files/_query">SPARQL query on file catalog</a></p>
+{% endblock %}

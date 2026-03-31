@@ -1,10 +1,11 @@
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{FromRequest, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use tower_cookies::Cookies;
 
 use crate::state::AppState;
+use super::files;
 use super::sparql;
 use super::web;
 
@@ -188,20 +189,31 @@ async fn content_get(
             }
         }
         ParsedPath::FileCatalog { team_segments, view } => {
+            let team_path = team_path_str(team_segments);
+            let team_url_prefix = build_team_url_prefix(team_segments);
             match view.as_deref() {
                 Some("_query") => {
-                    // SPARQL query on file catalog — will be implemented in Phase 8
-                    (StatusCode::NOT_IMPLEMENTED, "File catalog query not yet implemented".to_string())
-                        .into_response()
+                    // SPARQL query on file catalog
+                    let catalog = state.store_manager.get_file_catalog(&team_path);
+                    match catalog {
+                        Some(store) => {
+                            match sparql::sparql_query_get_on_store(&store, &params).await {
+                                Ok(resp) => resp.into_response(),
+                                Err(e) => e.into_response(),
+                            }
+                        }
+                        None => (StatusCode::NOT_FOUND, "No file catalog for this team").into_response(),
+                    }
                 }
                 Some("_upload") => {
                     (StatusCode::METHOD_NOT_ALLOWED, "Use POST for file upload".to_string())
                         .into_response()
                 }
                 None => {
-                    // Browse files — will be implemented in Phase 8
-                    (StatusCode::NOT_IMPLEMENTED, "File browsing not yet implemented".to_string())
-                        .into_response()
+                    match files::files_browse(&state, &team_path, &team_url_prefix, &cookies).await {
+                        Ok(html) => html.into_response(),
+                        Err(e) => e.into_response(),
+                    }
                 }
                 Some(unknown) => {
                     (StatusCode::NOT_FOUND, format!("Unknown files view: {}", unknown)).into_response()
@@ -209,15 +221,17 @@ async fn content_get(
             }
         }
         ParsedPath::FileItem { team_segments, file_id, action } => {
+            let team_path = team_path_str(team_segments);
+            let team_url_prefix = build_team_url_prefix(team_segments);
             match action.as_deref() {
                 None => {
-                    // Download file — will be implemented in Phase 8
-                    (StatusCode::NOT_IMPLEMENTED, "File download not yet implemented".to_string())
-                        .into_response()
+                    files::file_download(&state, &team_path, file_id).await
                 }
                 Some("_edit") => {
-                    (StatusCode::NOT_IMPLEMENTED, "File edit not yet implemented".to_string())
-                        .into_response()
+                    match files::file_edit_form(&state, &team_path, &team_url_prefix, file_id, &cookies).await {
+                        Ok(html) => html.into_response(),
+                        Err(e) => e.into_response(),
+                    }
                 }
                 Some("_delete") => {
                     (StatusCode::METHOD_NOT_ALLOWED, "Use POST to delete files".to_string())
@@ -236,22 +250,23 @@ async fn content_post(
     Path(path): Path<String>,
     headers: HeaderMap,
     cookies: Cookies,
-    body: String,
+    body: axum::body::Bytes,
 ) -> Response {
     let parsed = parse_path(&path);
 
     match &parsed {
         ParsedPath::DatasetView { view, .. } => {
             let qualified = parsed.qualified_dataset_name().unwrap();
+            let body_str = String::from_utf8_lossy(&body).to_string();
             match view.as_deref() {
                 Some("_sparql") => {
-                    match sparql::sparql_query_post(&state, &qualified, &headers, &body).await {
+                    match sparql::sparql_query_post(&state, &qualified, &headers, &body_str).await {
                         Ok(resp) => resp.into_response(),
                         Err(e) => e.into_response(),
                     }
                 }
                 Some("_update") => {
-                    match sparql::sparql_update_post(&state, &qualified, &headers, &body).await {
+                    match sparql::sparql_update_post(&state, &qualified, &headers, &body_str).await {
                         Ok(status) => status.into_response(),
                         Err(e) => e.into_response(),
                     }
@@ -262,12 +277,25 @@ async fn content_post(
                 }
             }
         }
-        ParsedPath::FileCatalog { view, .. } => {
+        ParsedPath::FileCatalog { team_segments, view } => {
+            let team_path = team_path_str(team_segments);
+            let team_url_prefix = build_team_url_prefix(team_segments);
             match view.as_deref() {
                 Some("_upload") => {
-                    // File upload — will be implemented in Phase 8
-                    (StatusCode::NOT_IMPLEMENTED, "File upload not yet implemented".to_string())
-                        .into_response()
+                    let content_type = headers.get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let request = axum::http::Request::builder()
+                        .header(header::CONTENT_TYPE, content_type)
+                        .body(axum::body::Body::from(body))
+                        .unwrap();
+                    match axum::extract::Multipart::from_request(request, &state).await {
+                        Ok(mp) => {
+                            files::files_upload(&state, &team_path, &team_url_prefix, &cookies, mp).await
+                        }
+                        Err(e) => (StatusCode::BAD_REQUEST, format!("Invalid multipart: {}", e)).into_response(),
+                    }
                 }
                 _ => {
                     (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this files view".to_string())
@@ -275,15 +303,23 @@ async fn content_post(
                 }
             }
         }
-        ParsedPath::FileItem { action, .. } => {
+        ParsedPath::FileItem { team_segments, file_id, action } => {
+            let team_path = team_path_str(team_segments);
+            let team_url_prefix = build_team_url_prefix(team_segments);
             match action.as_deref() {
                 Some("_edit") => {
-                    (StatusCode::NOT_IMPLEMENTED, "File edit not yet implemented".to_string())
-                        .into_response()
+                    let body_str = String::from_utf8_lossy(&body).to_string();
+                    let form: files::FileEditForm = serde_urlencoded::from_str(&body_str)
+                        .unwrap_or(files::FileEditForm {
+                            title: String::new(),
+                            authors: String::new(),
+                            year: String::new(),
+                            doi: String::new(),
+                        });
+                    files::file_edit_submit(&state, &team_path, &team_url_prefix, file_id, &cookies, form).await
                 }
                 Some("_delete") => {
-                    (StatusCode::NOT_IMPLEMENTED, "File delete not yet implemented".to_string())
-                        .into_response()
+                    files::file_delete(&state, &team_path, &team_url_prefix, file_id, &cookies).await
                 }
                 _ => {
                     (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this file path".to_string())
@@ -295,6 +331,24 @@ async fn content_post(
             (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this path".to_string())
                 .into_response()
         }
+    }
+}
+
+/// Build team path string: "root" for empty segments, otherwise joined.
+fn team_path_str(segments: &[String]) -> String {
+    if segments.is_empty() {
+        "root".to_string()
+    } else {
+        segments.join("/")
+    }
+}
+
+/// Build URL prefix for team (e.g., "/materials" or "" for root).
+fn build_team_url_prefix(segments: &[String]) -> String {
+    if segments.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", segments.join("/"))
     }
 }
 

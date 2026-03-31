@@ -20,7 +20,7 @@
 {% if datasets %}
     <ul class="info-list">
         {% for ds in datasets %}
-            <li><a href="/{{ ds.name }}/_query">{{ ds.name }}</a></li>
+            <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
         {% endfor %}
     </ul>
 {% else %}

@@ -341,6 +341,101 @@ pub fn get_team_datasets(store: &Store, team_iri: &str) -> Vec<DatasetInfo> {
     query_dataset_names(store, &query)
 }
 
+/// File action types for permission checking.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FileAction {
+    Read,
+    Write,
+    Delete,
+}
+
+/// Check if a user can perform a file action on a team's files.
+///
+/// Permission model:
+/// - Team admins: all actions (Read, Write, Delete)
+/// - Team members: Read + Write
+/// - Explicit role grants via mlipe:permitsAction
+/// - Monotonic: access on a parent team implies access on child teams
+pub fn can_access_files(store: &Store, user_iri: &str, team_iri: &str, action: FileAction) -> bool {
+    let user_clean = user_iri.trim_matches(|c| c == '<' || c == '>');
+
+    // Walk up the team hierarchy (monotonic permissions)
+    let mut current_team = team_iri.trim_matches(|c| c == '<' || c == '>').to_string();
+
+    loop {
+        // Check admin
+        let admin_query = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            ASK {{ <{current_team}> mlipe:hasAdmin <{user_clean}> }}
+            "#,
+        );
+        if let Ok(QueryResults::Boolean(true)) = store.query(&admin_query) {
+            return true; // Admins can do anything
+        }
+
+        // Check member (Read + Write)
+        if action != FileAction::Delete {
+            let member_query = format!(
+                r#"
+                PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+                ASK {{ <{current_team}> mlipe:hasMember <{user_clean}> }}
+                "#,
+            );
+            if let Ok(QueryResults::Boolean(true)) = store.query(&member_query) {
+                return true;
+            }
+        }
+
+        // Check explicit role grants
+        let action_iri = match action {
+            FileAction::Read => "mlipe:FileReadAction",
+            FileAction::Write => "mlipe:FileWriteAction",
+            FileAction::Delete => "mlipe:FileDeleteAction",
+        };
+        let role_query = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            ASK {{
+                <{user_clean}> mlipe:hasRole ?role .
+                ?role mlipe:roleInTeam <{current_team}> ;
+                      mlipe:permitsAction {action_iri} .
+            }}
+            "#,
+        );
+        if let Ok(QueryResults::Boolean(true)) = store.query(&role_query) {
+            return true;
+        }
+
+        // Walk up to parent team
+        let parent_query = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            SELECT ?parent WHERE {{
+                <{current_team}> mlipe:hasParentTeam ?parent .
+            }}
+            LIMIT 1
+            "#,
+        );
+
+        let mut parent = None;
+        if let Ok(QueryResults::Solutions(solutions)) = store.query(&parent_query) {
+            for solution in solutions.flatten() {
+                parent = solution.get("parent").map(|v| {
+                    v.to_string().trim_matches(|c| c == '<' || c == '>').to_string()
+                });
+            }
+        }
+
+        match parent {
+            Some(p) => current_team = p,
+            None => break, // Reached root, no access
+        }
+    }
+
+    false
+}
+
 /// Resolve a team path (e.g., ["materials", "atomistic"]) to a team IRI.
 /// Walks the hierarchy: root → materials → atomistic.
 /// Returns None if any segment doesn't resolve.

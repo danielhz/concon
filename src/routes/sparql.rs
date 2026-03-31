@@ -26,6 +26,18 @@ pub async fn sparql_query_get(
     execute_query(state, dataset_name, query)
 }
 
+/// Execute a SPARQL query directly on a given store (used for file catalogs).
+pub async fn sparql_query_get_on_store(
+    store: &Store,
+    params: &SparqlQueryParams,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let query = params
+        .query
+        .as_ref()
+        .ok_or((StatusCode::BAD_REQUEST, "Missing 'query' parameter".into()))?;
+    execute_query_on_store(store, query)
+}
+
 pub async fn sparql_query_post(
     state: &AppState,
     dataset_name: &str,
@@ -94,6 +106,16 @@ fn execute_query(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     format_results(results, &store)
+}
+
+fn execute_query_on_store(
+    store: &Store,
+    query: &str,
+) -> Result<(HeaderMap, String), (StatusCode, String)> {
+    let results = store
+        .query(query)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    format_results(results, store)
 }
 
 fn format_results(

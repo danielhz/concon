@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - Edit File{% endblock %}
+
+{% block content %}
+<h1>Edit — {{ file_name }}</h1>
+
+<form method="post" action="{{ team_url_prefix }}/_files/{{ file_id }}/_edit" class="login-form">
+    <label for="title">Title</label>
+    <input type="text" id="title" name="title" value="{{ title }}">
+
+    <label for="authors">Authors</label>
+    <input type="text" id="authors" name="authors" value="{{ authors }}">
+
+    <label for="year">Year</label>
+    <input type="text" id="year" name="year" value="{{ year }}">
+
+    <label for="doi">DOI</label>
+    <input type="text" id="doi" name="doi" value="{{ doi }}">
+
+    <button type="submit">Save</button>
+</form>
+
+<p><a href="{{ team_url_prefix }}/_files">Back to files</a></p>
+{% endblock %}

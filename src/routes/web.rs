@@ -51,7 +51,20 @@ async fn index(
     let html = tmpl
         .render(minijinja::context! {
             username => session.as_ref().map(|s| s.username.clone()),
-            datasets => datasets.iter().map(|d| minijinja::context! { name => d.name }).collect::<Vec<_>>(),
+            datasets => datasets.iter().map(|d| {
+                let (team_prefix, short_name) = match d.name.rsplit_once('/') {
+                    Some((team, name)) => {
+                        let prefix = if team == "root" { String::new() } else { format!("/{}", team) };
+                        (prefix, name.to_string())
+                    }
+                    None => (String::new(), d.name.clone()),
+                };
+                minijinja::context! {
+                    name => short_name,
+                    qualified_name => d.name,
+                    url => format!("{}/_ds/{}/_query", team_prefix, short_name),
+                }
+            }).collect::<Vec<_>>(),
             teams => teams.iter().map(|t| minijinja::context! { iri => t.iri, name => t.name }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -412,7 +425,19 @@ async fn user_profile(
                 name => t.name,
                 is_admin => admin_team_iris.contains(&&t.iri),
             }).collect::<Vec<_>>(),
-            datasets => datasets.iter().map(|d| minijinja::context! { name => d.name }).collect::<Vec<_>>(),
+            datasets => datasets.iter().map(|d| {
+                let (team_prefix, short_name) = match d.name.rsplit_once('/') {
+                    Some((team, name)) => {
+                        let prefix = if team == "root" { String::new() } else { format!("/{}", team) };
+                        (prefix, name.to_string())
+                    }
+                    None => (String::new(), d.name.clone()),
+                };
+                minijinja::context! {
+                    name => short_name,
+                    url => format!("{}/_ds/{}/_query", team_prefix, short_name),
+                }
+            }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

@@ -8,11 +8,11 @@
     <ul class="dataset-list">
         {% for ds in datasets %}
             <li>
-                <a href="/{{ ds.name }}/_query">{{ ds.name }}</a>
+                <a href="{{ ds.url }}">{{ ds.name }}</a>
                 {% if username %}
                 <form method="post" action="/_datasets/delete" class="inline-form"
                       onsubmit="return confirm('Delete dataset \'{{ ds.name }}\'?')">
-                    <input type="hidden" name="name" value="{{ ds.name }}">
+                    <input type="hidden" name="name" value="{{ ds.qualified_name }}">
                     <button type="submit" class="btn-small-danger">delete</button>
                 </form>
                 {% endif %}

@@ -1,5 +1,6 @@
 mod content;
 mod datasets;
+pub mod files;
 mod health;
 mod sparql;
 pub mod web;

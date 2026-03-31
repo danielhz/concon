@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - {{ team_name }}{% endblock %}
+
+{% block content %}
+<h1>{{ team_name }}</h1>
+
+{% if sub_teams %}
+<h2>Sub-teams</h2>
+<ul class="info-list">
+    {% for t in sub_teams %}
+        <li><a href="{{ team_url_prefix }}/{{ t.name }}">{{ t.name }}</a></li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+<h2>Datasets</h2>
+{% if datasets %}
+<ul class="dataset-list">
+    {% for ds in datasets %}
+        <li><a href="{{ team_url_prefix }}/_ds/{{ ds.name }}/_query">{{ ds.name }}</a></li>
+    {% endfor %}
+</ul>
+{% else %}
+<p>No datasets in this team.</p>
+{% endif %}
+
+<h2>Files</h2>
+<p><a href="{{ team_url_prefix }}/_files">Browse files</a></p>
+{% endblock %}

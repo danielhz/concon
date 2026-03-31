@@ -13,6 +13,8 @@ pub struct StoreManager {
     pub system: Store,
     /// Dataset stores, keyed by dataset name.
     datasets: RwLock<HashMap<String, Store>>,
+    /// File catalog stores, keyed by team path (e.g., "root", "materials").
+    catalogs: RwLock<HashMap<String, Store>>,
     /// Base directory for dataset storage.
     data_dir: PathBuf,
 }
@@ -24,6 +26,7 @@ impl StoreManager {
         Ok(Self {
             system,
             datasets: RwLock::new(HashMap::new()),
+            catalogs: RwLock::new(HashMap::new()),
             data_dir: PathBuf::new(),
         })
     }
@@ -33,12 +36,14 @@ impl StoreManager {
         let data_path = Path::new(data_dir);
         std::fs::create_dir_all(data_path.join("system"))?;
         std::fs::create_dir_all(data_path.join("datasets"))?;
+        std::fs::create_dir_all(data_path.join("catalogs"))?;
 
         let system = Store::open(data_path.join("system"))?;
 
         Ok(Self {
             system,
             datasets: RwLock::new(HashMap::new()),
+            catalogs: RwLock::new(HashMap::new()),
             data_dir: data_path.to_path_buf(),
         })
     }
@@ -201,5 +206,66 @@ impl StoreManager {
         self.system
             .load_from_reader(RdfFormat::Turtle, reader)
             .map_err(|e| format!("Failed to parse system data '{}': {}", path, e))
+    }
+
+    /// Get or create a file catalog store for a team.
+    /// The team_path is the joined team segments (e.g., "materials", "materials/atomistic").
+    /// Use "root" for the root team.
+    pub fn get_or_create_file_catalog(&self, team_path: &str) -> Result<Store, String> {
+        // Check if already loaded
+        {
+            let catalogs = self.catalogs.read().map_err(|e| e.to_string())?;
+            if let Some(store) = catalogs.get(team_path) {
+                return Ok(store.clone());
+            }
+        }
+
+        // Create or open
+        let mut catalogs = self.catalogs.write().map_err(|e| e.to_string())?;
+        // Double-check after acquiring write lock
+        if let Some(store) = catalogs.get(team_path) {
+            return Ok(store.clone());
+        }
+
+        let store = if self.data_dir.as_os_str().is_empty() {
+            Store::new().map_err(|e| e.to_string())?
+        } else {
+            let path = self.data_dir.join("catalogs").join(team_path);
+            std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+            Store::open(&path).map_err(|e| e.to_string())?
+        };
+
+        catalogs.insert(team_path.to_string(), store.clone());
+        Ok(store)
+    }
+
+    /// Get a file catalog store for a team (read-only, returns None if not yet created).
+    pub fn get_file_catalog(&self, team_path: &str) -> Option<Store> {
+        // Check in-memory first
+        if let Ok(catalogs) = self.catalogs.read() {
+            if let Some(store) = catalogs.get(team_path) {
+                return Some(store.clone());
+            }
+        }
+
+        // Try to open from disk if persistent
+        if self.data_dir.as_os_str().is_empty() {
+            return None;
+        }
+
+        let path = self.data_dir.join("catalogs").join(team_path);
+        if !path.exists() {
+            return None;
+        }
+
+        // Open and cache it
+        if let Ok(mut catalogs) = self.catalogs.write() {
+            if let Ok(store) = Store::open(&path) {
+                catalogs.insert(team_path.to_string(), store.clone());
+                return Some(store);
+            }
+        }
+
+        None
     }
 }
