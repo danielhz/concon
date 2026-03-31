@@ -287,6 +287,7 @@ async fn delete_dataset_web(
 pub async fn dataset_query(
     state: &AppState,
     dataset_name: &str,
+    url_prefix: &str,
     cookies: &Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     // Check dataset exists
@@ -296,6 +297,9 @@ pub async fn dataset_query(
 
     let session = get_username(cookies, state);
 
+    // Extract short name (last segment) for display
+    let display_name = dataset_name.rsplit('/').next().unwrap_or(dataset_name);
+
     let tmpl = state
         .templates
         .get_template("dataset.html")
@@ -304,7 +308,50 @@ pub async fn dataset_query(
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
-            dataset_name => dataset_name,
+            dataset_name => display_name,
+            url_prefix => url_prefix,
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Html(html))
+}
+
+pub async fn team_page(
+    state: &AppState,
+    team_segments: &[String],
+    cookies: &Cookies,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let session = get_username(cookies, state);
+
+    let team_path = team_segments.join("/");
+    let team_name = team_segments.last().map(|s| s.as_str()).unwrap_or("Root");
+
+    // Get sub-teams and datasets for this team
+    let sub_teams = auth::get_sub_teams(&state.store_manager.system, team_segments);
+    let datasets = auth::get_team_datasets_by_path(&state.store_manager.system, team_segments);
+
+    let team_url_prefix = if team_segments.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", team_path)
+    };
+
+    let tmpl = state
+        .templates
+        .get_template("team.html")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let html = tmpl
+        .render(minijinja::context! {
+            username => session.map(|s| s.username),
+            team_name => team_name,
+            team_url_prefix => team_url_prefix,
+            sub_teams => sub_teams.iter().map(|t| minijinja::context! {
+                name => t.name,
+            }).collect::<Vec<_>>(),
+            datasets => datasets.iter().map(|d| minijinja::context! {
+                name => d.name,
+            }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

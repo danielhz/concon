@@ -341,6 +341,116 @@ pub fn get_team_datasets(store: &Store, team_iri: &str) -> Vec<DatasetInfo> {
     query_dataset_names(store, &query)
 }
 
+/// Resolve a team path (e.g., ["materials", "atomistic"]) to a team IRI.
+/// Walks the hierarchy: root → materials → atomistic.
+/// Returns None if any segment doesn't resolve.
+pub fn resolve_team_path(store: &Store, segments: &[String]) -> Option<String> {
+    // Find root team (no parent)
+    let root_query = r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?team WHERE {
+            ?team a mlipe:Team .
+            FILTER NOT EXISTS { ?team mlipe:hasParentTeam ?parent }
+        }
+        LIMIT 1
+    "#;
+
+    let mut current_iri = None;
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(root_query) {
+        for solution in solutions.flatten() {
+            current_iri = solution.get("team").map(|v| v.to_string());
+        }
+    }
+
+    let mut current_iri = current_iri?;
+
+    for segment in segments {
+        let parent_clean = current_iri.trim_matches(|c| c == '<' || c == '>').to_string();
+        let query = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            SELECT ?team WHERE {{
+                ?team a mlipe:Team ;
+                      mlipe:teamName "{segment}" ;
+                      mlipe:hasParentTeam <{parent_clean}> .
+            }}
+            LIMIT 1
+            "#,
+        );
+
+        let mut found = None;
+        if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+            for solution in solutions.flatten() {
+                found = solution.get("team").map(|v| v.to_string());
+            }
+        }
+
+        current_iri = found?;
+    }
+
+    Some(current_iri)
+}
+
+/// Get direct sub-teams of a team identified by path segments.
+pub fn get_sub_teams(store: &Store, parent_segments: &[String]) -> Vec<TeamInfo> {
+    let parent_iri = if parent_segments.is_empty() {
+        // Root team
+        match resolve_team_path(store, &[]) {
+            Some(iri) => iri,
+            None => return Vec::new(),
+        }
+    } else {
+        match resolve_team_path(store, parent_segments) {
+            Some(iri) => iri,
+            None => return Vec::new(),
+        }
+    };
+
+    let parent_clean = parent_iri.trim_matches(|c| c == '<' || c == '>');
+    let query = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?team ?name WHERE {{
+            ?team a mlipe:Team ;
+                  mlipe:teamName ?name ;
+                  mlipe:hasParentTeam <{parent_clean}> .
+        }}
+        ORDER BY ?name
+        "#,
+    );
+
+    let mut teams = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+        for solution in solutions.flatten() {
+            if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
+                teams.push(TeamInfo {
+                    iri: iri.to_string(),
+                    name: strip_literal(&name.to_string()),
+                });
+            }
+        }
+    }
+    teams
+}
+
+/// Get datasets owned by a team identified by path segments.
+/// Looks for datasets whose name starts with the team path prefix.
+pub fn get_team_datasets_by_path(store: &Store, team_segments: &[String]) -> Vec<DatasetInfo> {
+    let team_iri = if team_segments.is_empty() {
+        match resolve_team_path(store, &[]) {
+            Some(iri) => iri,
+            None => return Vec::new(),
+        }
+    } else {
+        match resolve_team_path(store, team_segments) {
+            Some(iri) => iri,
+            None => return Vec::new(),
+        }
+    };
+
+    get_team_datasets(store, &team_iri)
+}
+
 /// Strip surrounding quotes and optional datatype suffix from an RDF literal string.
 pub fn strip_literal(s: &str) -> String {
     let s = s.trim();

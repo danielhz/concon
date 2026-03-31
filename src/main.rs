@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod migration;
 mod routes;
 mod state;
 mod store;
@@ -16,7 +17,8 @@ async fn main() {
         .expect("Failed to ensure system data file");
 
     let app_state =
-        state::AppState::new_persistent(&cfg.store.data_dir).expect("Failed to initialize application state");
+        state::AppState::new_persistent(&cfg.store.data_dir, &cfg.store.files_dir)
+            .expect("Failed to initialize application state");
 
     if app_state.store_manager.is_system_empty() {
         app_state
@@ -27,6 +29,9 @@ async fn main() {
     } else {
         tracing::info!("System store already initialized, skipping seed load");
     }
+
+    migration::check_schema_version(&app_state.store_manager.system)
+        .expect("Schema version mismatch");
 
     app_state
         .store_manager

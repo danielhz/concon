@@ -23,6 +23,12 @@ pub struct ServerConfig {
 pub struct StoreConfig {
     pub system_data: String,
     pub data_dir: String,
+    #[serde(default = "default_files_dir")]
+    pub files_dir: String,
+}
+
+fn default_files_dir() -> String {
+    "data/files".into()
 }
 
 impl Default for Config {
@@ -35,6 +41,7 @@ impl Default for Config {
             store: StoreConfig {
                 system_data: DEFAULT_SYSTEM_DATA_PATH.into(),
                 data_dir: "data".into(),
+                files_dir: default_files_dir(),
             },
         }
     }

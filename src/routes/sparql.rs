@@ -194,7 +194,7 @@ mod tests {
     async fn test_sparql_query_on_nonexistent_dataset() {
         let server = test_server();
         let response = server
-            .get("/nonexistent/_sparql")
+            .get("/_ds/nonexistent/_sparql")
             .add_query_param("query", "SELECT * WHERE { ?s ?p ?o }")
             .await;
         response.assert_status(axum::http::StatusCode::NOT_FOUND);
@@ -206,11 +206,11 @@ mod tests {
 
         server
             .post("/_api/datasets")
-            .json(&serde_json::json!({"name": "sparql-test"}))
+            .json(&serde_json::json!({"name": "root/sparql-test"}))
             .await;
 
         let response = server
-            .get("/sparql-test/_sparql")
+            .get("/_ds/sparql-test/_sparql")
             .add_query_param("query", "SELECT * WHERE { ?s ?p ?o }")
             .await;
         response.assert_status_ok();
@@ -225,11 +225,11 @@ mod tests {
 
         server
             .post("/_api/datasets")
-            .json(&serde_json::json!({"name": "sparql-test-2"}))
+            .json(&serde_json::json!({"name": "root/sparql-test-2"}))
             .await;
 
         let response = server
-            .get("/sparql-test-2/_sparql")
+            .get("/_ds/sparql-test-2/_sparql")
             .await;
         response.assert_status(axum::http::StatusCode::BAD_REQUEST);
     }
@@ -240,11 +240,11 @@ mod tests {
 
         server
             .post("/_api/datasets")
-            .json(&serde_json::json!({"name": "sparql-post-test"}))
+            .json(&serde_json::json!({"name": "root/sparql-post-test"}))
             .await;
 
         let response = server
-            .post("/sparql-post-test/_sparql")
+            .post("/_ds/sparql-post-test/_sparql")
             .text("SELECT * WHERE { ?s ?p ?o }")
             .await;
         response.assert_status_ok();

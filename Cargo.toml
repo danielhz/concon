@@ -7,7 +7,7 @@ license = "MIT"
 default-run = "mlipe"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 oxigraph = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +21,7 @@ uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+chrono = "0.4"
 
 [dev-dependencies]
 axum-test = "19"
