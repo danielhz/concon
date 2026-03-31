@@ -1,0 +1,133 @@
+#+TITLE: MLIPE File Sharing
+
+* Overview
+
+Teams can share files (PDF papers) through a built-in file management
+system.  Each team has a file catalog — a system-managed RDF dataset that
+stores metadata about uploaded files.  The actual files are stored on disk
+using internal UUIDs, while human-readable metadata (title, authors, etc.)
+lives in the catalog.
+
+* File storage layout
+
+Files are stored on disk under =data/files/=, organized by team hierarchy.
+The catalog RDF store lives under =data/datasets/= alongside regular
+datasets.
+
+#+begin_src text
+data/
+  files/
+    root/
+      550e8400-e29b-41d4-a716-446655440000.pdf
+    materials/
+      7c9e6679-7425-40de-944b-e07fc1f90ae7.pdf
+      atomistic/
+        a3bb189e-8bf9-3888-9912-ace4e6543002.pdf
+  datasets/
+    materials/
+      _files/           <- catalog RDF store for team materials
+      atomistic/
+        _files/         <- catalog RDF store for team atomistic
+#+end_src
+
+Files are stored with their UUID as filename on disk.  The original
+filename and all other metadata are recorded in the catalog dataset.
+
+* File metadata
+
+Each uploaded file is described by the following properties in the team's
+catalog dataset:
+
+| Property              | Description                      | Editable |
+|-----------------------+----------------------------------+----------|
+| =mlipe:fileName=      | Original filename from upload    | No       |
+| =mlipe:fileTitle=     | Title of the paper               | Yes      |
+| =mlipe:fileAuthors=   | Author list                      | Yes      |
+| =mlipe:fileYear=      | Publication year                 | Yes      |
+| =mlipe:fileDOI=       | DOI of the paper                 | Yes      |
+| =mlipe:fileSize=      | File size in bytes               | No       |
+| =mlipe:mimeType=      | MIME type (=application/pdf=)    | No       |
+| =mlipe:uploadedBy=    | IRI of the user who uploaded     | No       |
+| =mlipe:uploadedAt=    | Upload timestamp (xsd:dateTime)  | No       |
+
+Example catalog entry:
+
+#+begin_src turtle
+@prefix mlipe: <https://mlipe.2mia.org/ontology#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<https://mlipe.2mia.org/files/7c9e6679-7425-40de-944b-e07fc1f90ae7>
+    a mlipe:File ;
+    mlipe:fileName "mlip-review-2026.pdf" ;
+    mlipe:fileTitle "A Review of Machine Learned Interatomic Potentials" ;
+    mlipe:fileAuthors "Smith, J.; Doe, A." ;
+    mlipe:fileYear "2026" ;
+    mlipe:fileDOI "10.1234/example.2026.001" ;
+    mlipe:fileSize 2048000 ;
+    mlipe:mimeType "application/pdf" ;
+    mlipe:uploadedBy <https://mlipe.2mia.org/users/alice> ;
+    mlipe:uploadedAt "2026-03-31T10:00:00Z"^^xsd:dateTime .
+#+end_src
+
+* Catalog dataset
+
+Each team has a system-managed catalog dataset named =_files= under the
+team path.  This dataset:
+
+- Is created automatically when the first file is uploaded to a team.
+- Is read-only for users: they can query it via SPARQL but cannot directly
+  run SPARQL Update on it.
+- Is updated automatically by the system on upload, metadata edit, and
+  delete operations.
+
+The catalog follows the same dataset naming convention as regular datasets,
+using the team hierarchy:
+
+| Team       | Catalog dataset name          |
+|------------+-------------------------------|
+| root       | =_files=                      |
+| materials  | =materials/_files=            |
+| atomistic  | =materials/atomistic/_files=  |
+
+* URL routes
+
+| URL                                    | Action                                  |
+|----------------------------------------+-----------------------------------------|
+| =/materials/_files=                    | Browse files for team materials         |
+| =/materials/_files/_query=             | SPARQL query on the file catalog        |
+| =/materials/_files/{uuid}=             | Download a file                         |
+| =/materials/_files/_upload= (POST)     | Upload a new file                       |
+| =/materials/_files/{uuid}/_edit=       | Edit file metadata (title, authors ...) |
+| =/materials/_files/{uuid}/_delete= (POST) | Delete a file                        |
+
+* Accepted file types
+
+Only PDF files (=application/pdf=) are accepted.  The maximum upload size
+is 99 MB, enforced at the Nginx level via =client_max_body_size=.
+
+* Permissions
+
+File operations are controlled by three actions:
+
+| Action                  | Description                                 |
+|-------------------------+---------------------------------------------|
+| =mlipe:FileReadAction=  | Download files and query the catalog        |
+| =mlipe:FileWriteAction= | Upload files and edit metadata              |
+| =mlipe:FileDeleteAction= | Delete files                               |
+
+** Default permissions by team role
+
+| Role         | FileRead | FileWrite | FileDelete |
+|--------------+----------+-----------+------------|
+| Team admin   | Yes      | Yes       | Yes        |
+| Team member  | Yes      | Yes       | No         |
+| Role-granted | Per action granted via =mlipe:permitsAction= |
+
+** Permission monotonicity
+
+Permissions are monotonic: access to a team's files implies access to all
+sub-team files.  If a user can read files in team =materials=, they can
+also read files in team =materials/atomistic=.  Sub-teams cannot restrict
+permissions granted by a parent team.
+
+This follows the same inheritance model described in =team-hierarchy.org=.

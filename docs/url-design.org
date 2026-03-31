@@ -29,14 +29,30 @@ Because application routes occupy a separate namespace (=_=-prefixed), teams
 and datasets can freely use names like "login", "health", or "users" without
 collisions.
 
-* No name collisions within a team
+* Datasets use the =_ds= segment
 
-Within a single team, a subteam and a dataset cannot share the same name.
-This follows from the filesystem analogy: a directory and a file in the same
-parent directory cannot have the same name. The URL path must unambiguously
-resolve to either a team or a dataset.
+Datasets are accessed via the =_ds= segment under their owning team's path.
+This avoids name collisions between datasets and sub-teams: a team can have
+both a sub-team called =atomistic= and a dataset called =atomistic= without
+ambiguity.
+
+| Path                               | Meaning                            |
+|------------------------------------+------------------------------------|
+| =/materials/atomistic=             | Sub-team =atomistic= of materials  |
+| =/materials/_ds/atomistic/_query=  | Dataset =atomistic= of materials   |
+
+Because =_ds= is a reserved =_=-prefixed segment, it is structurally
+distinct from team names, which never start with =_=.
+
+* File catalogs use the =_files= segment
+
+Each team has an optional file catalog accessed via the =_files= segment.
+This is a system-managed dataset that stores metadata about uploaded files.
+See =file-sharing.org= for details.
 
 * URL table
+
+** Application routes
 
 | URL                 | Meaning                                        |
 |---------------------+------------------------------------------------|
@@ -46,26 +62,60 @@ resolve to either a team or a dataset.
 | =/_health=          | Health check endpoint                          |
 | =/_users=           | Users list                                     |
 | =/_users/daniel=    | Daniel's profile page                          |
+| =/_change-password= | Change password page                           |
+| =/_api/datasets=    | Dataset API (JSON)                             |
+
+** Team hierarchy
+
+| URL                 | Meaning                                        |
+|---------------------+------------------------------------------------|
 | =/A/=               | Team A listing (subteams and datasets)         |
 | =/A/B/=             | Team B listing (child of A)                    |
-| =/A/B/D/_sparql=    | SPARQL endpoint for dataset D in team B in A   |
-| =/A/B/D/_query=     | YASGUI query editor for dataset D              |
+
+** Datasets (via =_ds=)
+
+| URL                       | Meaning                                  |
+|---------------------------+------------------------------------------|
+| =/A/_ds/D/_query=         | YASGUI query editor for dataset D        |
+| =/A/_ds/D/_sparql=        | SPARQL endpoint for dataset D            |
+| =/A/_ds/D/_update=        | SPARQL Update endpoint for dataset D     |
+| =/A/B/_ds/D/_query=       | Dataset D in team B (child of A)         |
+
+** File sharing (via =_files=)
+
+| URL                             | Meaning                              |
+|---------------------------------+--------------------------------------|
+| =/A/_files=                     | Browse files for team A              |
+| =/A/_files/_query=              | SPARQL query on team A's catalog     |
+| =/A/_files/{uuid}=              | Download a file                      |
+| =/A/_files/_upload= (POST)      | Upload a file                        |
+| =/A/_files/{uuid}/_edit=        | Edit file metadata                   |
+| =/A/_files/{uuid}/_delete= (POST) | Delete a file                     |
 
 * Content traversal
 
 When a URL path does not begin with =_=, the router traverses the team
-hierarchy segment by segment. Each segment is resolved as either a subteam
-or a dataset within the current team context. The final segment determines
-what is displayed:
+hierarchy segment by segment. Each non-=_= segment resolves to a sub-team
+within the current team context.
 
-- If it resolves to a team, the team listing is shown.
-- If it resolves to a dataset, the dataset overview is shown.
-- If followed by a =_=-prefixed action (e.g. =_sparql=, =_query=), that
-  action is invoked on the resolved resource.
+Segments starting with =_= are system actions:
+
+- =_ds/{name}= — select a dataset owned by the current team.
+- =_files= — access the file catalog of the current team.
+- =_query=, =_sparql=, =_update= — invoke a view on the preceding dataset
+  or catalog.
+
+Example resolution for =/materials/atomistic/_ds/potentials/_query=:
+
+1. =materials= — resolve to team =materials= under root.
+2. =atomistic= — resolve to sub-team =atomistic= under =materials=.
+3. =_ds/potentials= — select dataset =potentials= in team =atomistic=.
+4. =_query= — show the YASGUI query editor for this dataset.
 
 * Summary
 
 The =_= prefix creates a clean separation between the application's own
 routes and the content namespace. Content names are never restricted by the
 application's route table, and application routes are never shadowed by
-user-created teams or datasets.
+user-created teams or datasets. The =_ds= segment disambiguates datasets
+from sub-teams, and =_files= provides access to team file catalogs.

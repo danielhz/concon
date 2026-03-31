@@ -86,6 +86,12 @@ The system defines the following actions as named individuals of type
 | =mlipe:AddMemberAction=      | Add a user to a team                     |
 | =mlipe:RemoveMemberAction=   | Remove a user from a team                |
 | =mlipe:CreateSubTeamAction=  | Create a subteam within a team           |
+| =mlipe:FileReadAction=       | Download files and query the file catalog |
+| =mlipe:FileWriteAction=      | Upload files and edit file metadata      |
+| =mlipe:FileDeleteAction=     | Delete files (team admins only by default) |
+
+File actions follow the same monotonic inheritance model as other
+permissions.  See =file-sharing.org= for the full file sharing design.
 
 * Roles
 
