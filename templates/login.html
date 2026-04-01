@@ -5,13 +5,13 @@
 {% block content %}
 <h1>Login</h1>
 {% if error %}
-    <p class="error">{{ error }}</p>
+    <div class="callout alert">{{ error }}</div>
 {% endif %}
-<form method="post" action="/_login" class="login-form">
+<form method="post" action="/_login" style="max-width: 320px;">
     <label for="username">Username</label>
     <input type="text" id="username" name="username" required autofocus>
     <label for="password">Password</label>
     <input type="password" id="password" name="password" required>
-    <button type="submit">Log in</button>
+    <button type="submit" class="button">Log in</button>
 </form>
 {% endblock %}

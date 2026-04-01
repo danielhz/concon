@@ -5,19 +5,19 @@
 {% block content %}
 <h1>{{ team_name }}</h1>
 
-<div x-data="{ tab: 'datasets' }">
-    <div class="tabs">
-        <a href="#" class="tab" :class="{ active: tab === 'datasets' }" @click.prevent="tab = 'datasets'">Datasets</a>
-        <a href="#" class="tab" :class="{ active: tab === 'files' }" @click.prevent="tab = 'files'">Files</a>
-        {% if is_team_admin %}
-        <a href="#" class="tab" :class="{ active: tab === 'members' }" @click.prevent="tab = 'members'">Members</a>
-        {% endif %}
-        <a href="#" class="tab" :class="{ active: tab === 'subteams' }" @click.prevent="tab = 'subteams'">Sub-teams</a>
-    </div>
+<ul class="tabs" data-tabs id="team-tabs">
+    <li class="tabs-title is-active"><a href="#datasets" aria-selected="true">Datasets</a></li>
+    <li class="tabs-title"><a href="#files">Files</a></li>
+    {% if is_team_admin %}
+    <li class="tabs-title"><a href="#members">Members</a></li>
+    {% endif %}
+    <li class="tabs-title"><a href="#subteams">Sub-teams</a></li>
+</ul>
 
-    <div x-show="tab === 'datasets'">
+<div class="tabs-content" data-tabs-content="team-tabs">
+    <div class="tabs-panel is-active" id="datasets">
         {% if datasets %}
-        <ul class="dataset-list">
+        <ul class="no-bullet">
             {% for ds in datasets %}
                 <li><a href="{{ team_url_prefix }}/_ds/{{ ds.name }}/_query">{{ ds.name }}</a></li>
             {% endfor %}
@@ -28,27 +28,31 @@
 
         {% if is_team_admin %}
         <h3>New dataset</h3>
-        <form method="post" action="/_datasets/new" class="create-dataset-form">
-            <input type="text" name="name" placeholder="Dataset name" required>
-            <input type="hidden" name="team" value="{{ team_path }}">
-            <select name="visibility">
-                <option value="Public">Public</option>
-                <option value="LoggedUsers">Logged users only</option>
-                <option value="TeamOnly">Team only</option>
-            </select>
-            <button type="submit">Create</button>
+        <form method="post" action="/_datasets/new">
+            <div class="input-group">
+                <input class="input-group-field" type="text" name="name" placeholder="Dataset name" required>
+                <input type="hidden" name="team" value="{{ team_path }}">
+                <select class="input-group-field" name="visibility">
+                    <option value="Public">Public</option>
+                    <option value="LoggedUsers">Logged users only</option>
+                    <option value="TeamOnly">Team only</option>
+                </select>
+                <div class="input-group-button">
+                    <button type="submit" class="button">Create</button>
+                </div>
+            </div>
         </form>
         {% endif %}
     </div>
 
-    <div x-show="tab === 'files'" x-cloak>
-        <p><a href="{{ team_url_prefix }}/_files">Browse files</a></p>
+    <div class="tabs-panel" id="files">
+        <p><a href="{{ team_url_prefix }}/_files" class="button small">Browse files</a></p>
     </div>
 
     {% if is_team_admin %}
-    <div x-show="tab === 'members'" x-cloak>
+    <div class="tabs-panel" id="members">
         {% if members %}
-        <table class="data-table">
+        <table class="hover">
             <thead><tr><th>Username</th></tr></thead>
             <tbody>
                 {% for m in members %}
@@ -62,9 +66,9 @@
     </div>
     {% endif %}
 
-    <div x-show="tab === 'subteams'" x-cloak>
+    <div class="tabs-panel" id="subteams">
         {% if sub_teams %}
-        <ul class="info-list">
+        <ul class="no-bullet">
             {% for t in sub_teams %}
                 <li><a href="{{ team_url_prefix }}/{{ t.name }}">{{ t.name }}</a></li>
             {% endfor %}

@@ -5,21 +5,25 @@
 {% block content %}
 <h1>User Management</h1>
 
-<p><a href="/_admin">Back to administration</a></p>
+<p><a href="/_admin">&laquo; Back to administration</a></p>
 
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
-{% if success %}<p class="success">{{ success }}</p>{% endif %}
+{% if error %}<div class="callout alert">{{ error }}</div>{% endif %}
+{% if success %}<div class="callout success">{{ success }}</div>{% endif %}
 
 <h2>Create user</h2>
-<form method="post" action="/_admin/users/new" class="create-user-form">
-    <input type="text" name="username" placeholder="Username" required>
-    <input type="password" name="password" placeholder="Password" required>
-    <button type="submit">Create</button>
+<form method="post" action="/_admin/users/new">
+    <div class="input-group" style="max-width: 480px;">
+        <input class="input-group-field" type="text" name="username" placeholder="Username" required>
+        <input class="input-group-field" type="password" name="password" placeholder="Password" required>
+        <div class="input-group-button">
+            <button type="submit" class="button">Create</button>
+        </div>
+    </div>
 </form>
 
 <h2>Users</h2>
 {% if users %}
-<table class="data-table">
+<table class="hover">
     <thead>
         <tr><th>Username</th><th>Teams</th><th>Actions</th></tr>
     </thead>

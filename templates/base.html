@@ -4,51 +4,67 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}MLIPE{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/foundation-sites@6.8.1/dist/css/foundation.min.css" crossorigin="anonymous">
     <link rel="stylesheet" href="/static/style.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
     {% block head %}{% endblock %}
 </head>
 <body>
-    <nav class="navbar">
-        <a class="brand" href="/">MLIPE</a>
-        <div class="nav-links">
-            <div class="dropdown" x-data="{ open: false }">
-                <a href="#" class="dropdown-toggle" @click.prevent="open = !open">Explore &#9662;</a>
-                <div class="dropdown-menu" x-show="open" x-transition @click.outside="open = false" style="display: none;">
-                    <a href="/_teams">Teams</a>
-                    <a href="/_users">Users</a>
-                </div>
-            </div>
-            {% if username %}
-            <div class="dropdown" x-data="{ open: false }">
-                <a href="#" class="dropdown-toggle" @click.prevent="open = !open">+</a>
-                <div class="dropdown-menu" x-show="open" x-transition @click.outside="open = false" style="display: none;">
-                    <a href="/_teams">New dataset</a>
-                    {% if is_admin %}<a href="/_admin/teams">New team</a>{% endif %}
-                </div>
-            </div>
-            {% endif %}
+    <div class="top-bar">
+        <div class="top-bar-left">
+            <ul class="dropdown menu" data-dropdown-menu>
+                <li class="menu-text"><a href="/" style="color: #fff; font-weight: 700;">MLIPE</a></li>
+                <li class="has-submenu">
+                    <a href="#">Explore</a>
+                    <ul class="submenu menu vertical" data-submenu>
+                        <li><a href="/_teams">Teams</a></li>
+                        <li><a href="/_users">Users</a></li>
+                    </ul>
+                </li>
+                {% if username %}
+                <li class="has-submenu">
+                    <a href="#">+</a>
+                    <ul class="submenu menu vertical" data-submenu>
+                        <li><a href="/_teams">New dataset</a></li>
+                        {% if is_admin %}<li><a href="/_admin/teams">New team</a></li>{% endif %}
+                    </ul>
+                </li>
+                {% endif %}
+            </ul>
         </div>
-        <div class="nav-right">
-            {% if username %}
-                <div class="dropdown" x-data="{ open: false }">
-                    <a href="#" class="dropdown-toggle nav-user" @click.prevent="open = !open">{{ username }} &#9662;</a>
-                    <div class="dropdown-menu dropdown-right" x-show="open" x-transition @click.outside="open = false" style="display: none;">
-                        <a href="/_change-password">Change password</a>
-                        {% if is_admin %}<a href="/_admin">Site administration</a>{% endif %}
-                        <hr class="dropdown-divider">
-                        <form method="post" action="/_logout">
-                            <button type="submit" class="dropdown-item-btn">Logout</button>
-                        </form>
-                    </div>
-                </div>
-            {% else %}
-                <a href="/_login">Login</a>
-            {% endif %}
+        <div class="top-bar-right">
+            <ul class="dropdown menu" data-dropdown-menu>
+                {% if username %}
+                <li class="has-submenu">
+                    <a href="#">{{ username }}</a>
+                    <ul class="submenu menu vertical" data-submenu>
+                        <li><a href="/_change-password">Change password</a></li>
+                        {% if is_admin %}<li><a href="/_admin">Site administration</a></li>{% endif %}
+                        <li><hr></li>
+                        <li>
+                            <form method="post" action="/_logout">
+                                <button type="submit" class="clear button expanded small">Logout</button>
+                            </form>
+                        </li>
+                    </ul>
+                </li>
+                {% else %}
+                <li><a href="/_login">Login</a></li>
+                {% endif %}
+            </ul>
         </div>
-    </nav>
-    <main>
-        {% block content %}{% endblock %}
-    </main>
+    </div>
+    <div class="grid-container">
+        <div class="grid-x grid-padding-x">
+            <div class="cell">
+                <main style="padding-top: 1.5rem;">
+                    {% block content %}{% endblock %}
+                </main>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/foundation-sites@6.8.1/dist/js/foundation.min.js" crossorigin="anonymous"></script>
+    <script>$(document).foundation();</script>
+    {% block scripts %}{% endblock %}
 </body>
 </html>
