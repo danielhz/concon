@@ -44,17 +44,15 @@ async fn index(
     cookies: Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(&cookies, &state);
-    let admin = is_root_admin(&session, &state);
 
-    let datasets = match &session {
-        Some(s) => auth::get_user_datasets(&state.store_manager.system, &s.user_iri),
-        None => auth::get_public_datasets(&state.store_manager.system),
-    };
+    if session.is_some() {
+        // Logged in: show root team page
+        return team_page(&state, &[], &cookies).await;
+    }
 
-    let teams = match &session {
-        Some(s) => auth::get_user_member_teams(&state.store_manager.system, &s.user_iri),
-        None => Vec::new(),
-    };
+    // Anonymous: show public landing page
+    let admin = false;
+    let datasets = auth::get_public_datasets(&state.store_manager.system);
 
     let tmpl = state
         .templates
@@ -63,7 +61,7 @@ async fn index(
 
     let html = tmpl
         .render(minijinja::context! {
-            username => session.as_ref().map(|s| s.username.clone()),
+            username => Option::<String>::None,
             is_admin => admin,
             datasets => datasets.iter().map(|d| {
                 let (team_prefix, short_name) = match d.name.rsplit_once('/') {
@@ -75,11 +73,9 @@ async fn index(
                 };
                 minijinja::context! {
                     name => short_name,
-                    qualified_name => d.name,
                     url => format!("{}/_ds/{}/_query", team_prefix, short_name),
                 }
             }).collect::<Vec<_>>(),
-            teams => teams.iter().map(|t| minijinja::context! { iri => t.iri, name => t.name }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

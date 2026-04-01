@@ -3,38 +3,12 @@
 {% block title %}MLIPE{% endblock %}
 
 {% block content %}
-{% if username %}
-<h1>Dashboard</h1>
-
-{% if teams %}
-<h2>Your teams</h2>
-<ul class="no-bullet">
-    {% for t in teams %}
-        <li><a href="/{{ t.name }}">{{ t.name }}</a></li>
-    {% endfor %}
-</ul>
-{% endif %}
-
-<p><a href="/_teams">Browse all teams</a></p>
-
-<h2>Your datasets</h2>
-{% if datasets %}
-<ul class="dataset-list">
-    {% for ds in datasets %}
-        <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
-    {% endfor %}
-</ul>
-{% else %}
-<p>No datasets accessible.</p>
-{% endif %}
-
-{% else %}
 <h1>MLIPE</h1>
 <p>Machine Learned Interatomic Potentials Environment</p>
 
 {% if datasets %}
 <h2>Public datasets</h2>
-<ul class="dataset-list">
+<ul class="no-bullet">
     {% for ds in datasets %}
         <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
     {% endfor %}
@@ -44,5 +18,4 @@
 {% endif %}
 
 <p><a href="/_login">Log in</a> to access more datasets and features.</p>
-{% endif %}
 {% endblock %}

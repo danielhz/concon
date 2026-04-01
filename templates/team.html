@@ -3,12 +3,14 @@
 {% block title %}MLIPE - {{ team_name }}{% endblock %}
 
 {% block content %}
+{% if breadcrumbs %}
 <h1>
-    <a href="/">Root</a>
     {% for crumb in breadcrumbs %}
-        / <a href="{{ crumb.url }}">{{ crumb.name }}</a>
+        {% if not loop.first %} / {% endif %}
+        <a href="{{ crumb.url }}">{{ crumb.name }}</a>
     {% endfor %}
 </h1>
+{% endif %}
 
 <ul class="tabs" data-tabs id="team-tabs">
     <li class="tabs-title is-active"><a href="#datasets" aria-selected="true">Datasets</a></li>
