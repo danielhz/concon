@@ -34,7 +34,8 @@ INSERT DATA { ex:s ex:p ex:o . }"></textarea>
         requestConfig: {
             endpoint: "{{ url_prefix|safe }}/_sparql"
         },
-        copyEndpointOnNewTab: false
+        copyEndpointOnNewTab: false,
+        persistenceId: "yasgui-{{ url_prefix|safe }}"
     });
 
     const updateBtn = document.getElementById("update-btn");
