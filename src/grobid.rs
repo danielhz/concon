@@ -1,16 +1,8 @@
 //! GROBID integration for extracting metadata from scientific PDFs.
 //!
-//! GROBID runs as a Docker container on-demand: started before processing,
-//! stopped after. This saves RAM when idle.
+//! GROBID runs as a permanent service on a dedicated server (degu04).
 
-use std::process::Command;
-use std::time::Duration;
-
-const GROBID_IMAGE: &str = "lfoppiano/grobid:0.8.1";
-const GROBID_CONTAINER: &str = "mlipe-grobid";
-const GROBID_PORT: u16 = 8070;
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
-const STARTUP_POLL: Duration = Duration::from_secs(2);
+const GROBID_BASE_URL: &str = "http://10.0.0.2:8070";
 
 /// Metadata extracted from a PDF.
 #[derive(Debug, Default, Clone)]
@@ -33,85 +25,14 @@ pub struct PaperMetadata {
     pub tei_xml: String,
 }
 
-/// Start the GROBID container if not already running.
-pub fn ensure_running() -> Result<(), String> {
-    let output = Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}}", GROBID_CONTAINER])
-        .output()
-        .map_err(|e| format!("Failed to run docker: {}", e))?;
-
-    if output.status.success() {
-        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if state == "true" {
-            tracing::info!("GROBID container already running");
-            return Ok(());
-        }
-    }
-
-    let _ = Command::new("docker")
-        .args(["rm", "-f", GROBID_CONTAINER])
-        .output();
-
-    tracing::info!("Starting GROBID container...");
-    let output = Command::new("docker")
-        .args([
-            "run", "-d",
-            "--name", GROBID_CONTAINER,
-            "-p", &format!("{}:8070", GROBID_PORT),
-            "--memory", "4g",
-            GROBID_IMAGE,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to start GROBID: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to start GROBID: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > STARTUP_TIMEOUT {
-            return Err("GROBID startup timed out".into());
-        }
-
-        if let Ok(resp) = reqwest::blocking::get(format!("http://localhost:{}/api/isalive", GROBID_PORT)) {
-            if resp.status().is_success() {
-                tracing::info!("GROBID is ready");
-                return Ok(());
-            }
-        }
-
-        std::thread::sleep(STARTUP_POLL);
-    }
-}
-
-/// Stop the GROBID container.
-pub fn stop() {
-    tracing::info!("Stopping GROBID container...");
-    let _ = Command::new("docker")
-        .args(["stop", GROBID_CONTAINER])
-        .output();
-    let _ = Command::new("docker")
-        .args(["rm", GROBID_CONTAINER])
-        .output();
-}
-
 /// Extract metadata from a PDF file using GROBID.
 /// Calls processHeaderDocument first, then processFulltextDocument.
 pub async fn extract_metadata(pdf_path: &std::path::Path) -> Result<PaperMetadata, String> {
-    let path = pdf_path.to_path_buf();
-    tokio::task::spawn_blocking(|| ensure_running())
-        .await
-        .map_err(|e| format!("Task join error: {}", e))??;
-
-    let file_bytes = tokio::fs::read(&path)
+    let file_bytes = tokio::fs::read(pdf_path)
         .await
         .map_err(|e| format!("Failed to read PDF: {}", e))?;
 
-    let file_name = path
+    let file_name = pdf_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
@@ -128,7 +49,7 @@ pub async fn extract_metadata(pdf_path: &std::path::Path) -> Result<PaperMetadat
         let form = reqwest::multipart::Form::new().part("input", part);
 
         let resp = client
-            .post(format!("http://localhost:{}/api/processHeaderDocument", GROBID_PORT))
+            .post(format!("{}/api/processHeaderDocument", GROBID_BASE_URL))
             .multipart(form)
             .send()
             .await
@@ -152,7 +73,7 @@ pub async fn extract_metadata(pdf_path: &std::path::Path) -> Result<PaperMetadat
         let form = reqwest::multipart::Form::new().part("input", part);
 
         let resp = client
-            .post(format!("http://localhost:{}/api/processFulltextDocument", GROBID_PORT))
+            .post(format!("{}/api/processFulltextDocument", GROBID_BASE_URL))
             .multipart(form)
             .send()
             .await

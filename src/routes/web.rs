@@ -930,7 +930,6 @@ async fn upload_file(
             Ok(meta) => {
                 if meta.title.is_empty() && meta.authors.is_empty() && meta.doi.is_empty() {
                     tracing::info!("GROBID: no metadata extracted for {}", uuid_clone);
-                    crate::grobid::stop();
                     return;
                 }
 
@@ -1013,8 +1012,6 @@ async fn upload_file(
                     let _ = catalog_clone.update(&ref_insert);
                 }
 
-                // Stop GROBID to free resources
-                crate::grobid::stop();
             }
             Err(e) => {
                 tracing::warn!("GROBID extraction failed for {}: {}", uuid_clone, e);
