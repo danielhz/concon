@@ -1,12 +1,15 @@
 /* MLIPE custom styles — Foundation 6 handles base layout, navbar, tabs, forms */
 
 /* Top bar color */
-.top-bar { background: #0057b7; }
-.top-bar a { color: #fff; }
-.top-bar .menu-text { font-weight: 700; font-size: 1.1rem; }
-.top-bar .submenu { background: #fff; border: 1px solid #ddd; }
-.top-bar .submenu a { color: #222; }
-.top-bar .submenu a:hover { background: #f0f0f0; }
+.top-bar, .top-bar ul { background: #1a1a2e; }
+.top-bar a { color: #e0e0e0; }
+.top-bar a:hover { color: #fff; }
+.top-bar .menu-text { font-weight: 700; font-size: 1.1rem; color: #fff; }
+.top-bar .menu > li > a { color: #e0e0e0; }
+.top-bar .menu > li > a:hover { color: #fff; background: #16213e; }
+.top-bar .is-dropdown-submenu { background: #fff; border: 1px solid #ddd; }
+.top-bar .is-dropdown-submenu a { color: #222; }
+.top-bar .is-dropdown-submenu a:hover { background: #f0f0f0; color: #222; }
 
 /* Status messages */
 .error { color: #c00; margin-bottom: 1rem; }
