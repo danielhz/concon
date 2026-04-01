@@ -557,22 +557,38 @@ pub fn get_sub_teams(store: &Store, parent_segments: &[String]) -> Vec<TeamInfo>
     teams
 }
 
-/// Get datasets owned by a team identified by path segments.
-/// Looks for datasets whose name starts with the team path prefix.
+/// Get datasets owned by a team and all its sub-teams, identified by path segments.
+/// Uses the dataset name prefix to match (e.g., "MetaLearn/" matches all
+/// datasets under MetaLearn and its sub-teams).
 pub fn get_team_datasets_by_path(store: &Store, team_segments: &[String]) -> Vec<DatasetInfo> {
-    let team_iri = if team_segments.is_empty() {
-        match resolve_team_path(store, &[]) {
-            Some(iri) => iri,
-            None => return Vec::new(),
-        }
+    let prefix = if team_segments.is_empty() {
+        // Root team: return all datasets
+        String::new()
     } else {
-        match resolve_team_path(store, team_segments) {
-            Some(iri) => iri,
-            None => return Vec::new(),
-        }
+        format!("{}/", team_segments.join("/"))
     };
 
-    get_team_datasets(store, &team_iri)
+    let query = r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?name WHERE {
+            ?ds a mlipe:Dataset ;
+                mlipe:datasetName ?name .
+        }
+        ORDER BY ?name
+    "#;
+
+    let mut datasets = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+        for solution in solutions.flatten() {
+            if let Some(name) = solution.get("name") {
+                let name = strip_literal(&name.to_string());
+                if prefix.is_empty() || name.starts_with(&prefix) {
+                    datasets.push(DatasetInfo { name });
+                }
+            }
+        }
+    }
+    datasets
 }
 
 /// Strip surrounding quotes and optional datatype suffix from an RDF literal string.

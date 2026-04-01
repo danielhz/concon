@@ -422,11 +422,24 @@ pub async fn team_page(
                 name => t.name,
             }).collect::<Vec<_>>(),
             datasets => datasets.iter().map(|d| {
-                // Strip team prefix to get short name for display and URLs
-                let short_name = d.name.rsplit_once('/')
-                    .map(|(_, n)| n)
-                    .unwrap_or(&d.name);
-                minijinja::context! { name => short_name }
+                // Build display name and URL from qualified name
+                let (team_prefix, short_name) = match d.name.rsplit_once('/') {
+                    Some((team, name)) => {
+                        let prefix = if team == "root" { String::new() } else { format!("/{}", team) };
+                        (prefix, name.to_string())
+                    }
+                    None => (String::new(), d.name.clone()),
+                };
+                // Show relative path from current team for display
+                let display = if team_path.is_empty() {
+                    d.name.strip_prefix("root/").unwrap_or(&d.name).to_string()
+                } else {
+                    d.name.strip_prefix(&format!("{}/", team_path)).unwrap_or(&d.name).to_string()
+                };
+                minijinja::context! {
+                    name => display,
+                    url => format!("{}/_ds/{}/_query", team_prefix, short_name),
+                }
             }).collect::<Vec<_>>(),
             members => members.iter().map(|u| minijinja::context! {
                 username => u.username,

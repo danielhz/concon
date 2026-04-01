@@ -26,7 +26,7 @@
         {% if datasets %}
         <ul class="no-bullet">
             {% for ds in datasets %}
-                <li><a href="{{ team_url_prefix }}/_ds/{{ ds.name }}/_query">{{ ds.name }}</a></li>
+                <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
             {% endfor %}
         </ul>
         {% else %}
