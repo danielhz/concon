@@ -360,6 +360,12 @@ pub async fn team_page(
     let team_path = team_segments.join("/");
     let team_name = team_segments.last().map(|s| s.as_str()).unwrap_or("Root");
 
+    // Build breadcrumbs: each ancestor team as (name, url)
+    let breadcrumbs: Vec<_> = team_segments.iter().enumerate().map(|(i, name)| {
+        let url = format!("/{}", team_segments[..=i].join("/"));
+        minijinja::context! { name => name, url => url }
+    }).collect();
+
     // Resolve team IRI for permission checks
     let team_iri = auth::resolve_team_path(&state.store_manager.system, team_segments);
 
@@ -403,6 +409,7 @@ pub async fn team_page(
             is_admin => admin,
             is_team_admin => is_team_admin,
             team_name => team_name,
+            breadcrumbs => breadcrumbs,
             team_path => team_path,
             team_url_prefix => team_url_prefix,
             sub_teams => sub_teams.iter().map(|t| minijinja::context! {
