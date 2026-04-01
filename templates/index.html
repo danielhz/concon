@@ -8,12 +8,14 @@
 
 {% if teams %}
 <h2>Your teams</h2>
-<ul class="info-list">
+<ul class="no-bullet">
     {% for t in teams %}
         <li><a href="/{{ t.name }}">{{ t.name }}</a></li>
     {% endfor %}
 </ul>
 {% endif %}
+
+<p><a href="/_teams">Browse all teams</a></p>
 
 <h2>Your datasets</h2>
 {% if datasets %}

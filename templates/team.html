@@ -38,9 +38,9 @@
                 <input class="input-group-field" type="text" name="name" placeholder="Dataset name" required>
                 <input type="hidden" name="team" value="{{ team_path }}">
                 <select class="input-group-field" name="visibility">
-                    <option value="Public">Public</option>
+                    <option value="TeamOnly" selected>Team only</option>
                     <option value="LoggedUsers">Logged users only</option>
-                    <option value="TeamOnly">Team only</option>
+                    <option value="Public">Public</option>
                 </select>
                 <div class="input-group-button">
                     <button type="submit" class="button">Create</button>
