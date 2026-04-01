@@ -3,7 +3,7 @@
 {% block title %}MLIPE - {{ dataset_name }}{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="https://unpkg.com/@triply/yasgui/build/yasgui.min.css">
+<link rel="stylesheet" href="/static/vendor/yasgui.min.css">
 {% endblock %}
 
 {% block content %}
@@ -33,7 +33,7 @@ INSERT DATA { ex:s ex:p ex:o . }"></textarea>
 </form>
 {% endif %}
 
-<script src="https://unpkg.com/@triply/yasgui/build/yasgui.min.js"></script>
+<script src="/static/vendor/yasgui.min.js"></script>
 <script>
     const yasgui = new Yasgui(document.getElementById("yasgui"), {
         requestConfig: {
