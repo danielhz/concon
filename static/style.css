@@ -14,18 +14,20 @@ a:hover { text-decoration: underline; }
 .nav-right a { color: #fff; }
 .nav-user { font-weight: 500; }
 
+/* Alpine.js cloak: hide elements until Alpine initializes */
+[x-cloak] { display: none !important; }
+
 /* Dropdown */
 .dropdown { position: relative; display: inline-block; }
 .dropdown-toggle { cursor: pointer; }
 .dropdown-toggle:hover { text-decoration: underline; }
 .dropdown-menu {
-    display: none; position: absolute; top: 100%; left: 0;
+    position: absolute; top: 100%; left: 0;
     background: #fff; border: 1px solid #ddd; border-radius: 4px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.15); min-width: 160px;
     margin-top: 0.3rem; z-index: 100;
 }
 .dropdown-right { left: auto; right: 0; }
-.dropdown:hover .dropdown-menu { display: block; }
 .dropdown-menu a {
     display: block; padding: 0.5rem 0.75rem; color: #222;
     text-decoration: none;

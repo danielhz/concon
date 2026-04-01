@@ -5,23 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}MLIPE{% endblock %}</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
     {% block head %}{% endblock %}
 </head>
 <body>
     <nav class="navbar">
         <a class="brand" href="/">MLIPE</a>
         <div class="nav-links">
-            <div class="dropdown">
-                <a href="#" class="dropdown-toggle">Explore</a>
-                <div class="dropdown-menu">
+            <div class="dropdown" x-data="{ open: false }">
+                <a href="#" class="dropdown-toggle" @click.prevent="open = !open">Explore</a>
+                <div class="dropdown-menu" x-show="open" @click.outside="open = false" x-cloak>
                     <a href="/_teams">Teams</a>
                     <a href="/_users">Users</a>
                 </div>
             </div>
             {% if username %}
-            <div class="dropdown">
-                <a href="#" class="dropdown-toggle">+</a>
-                <div class="dropdown-menu">
+            <div class="dropdown" x-data="{ open: false }">
+                <a href="#" class="dropdown-toggle" @click.prevent="open = !open">+</a>
+                <div class="dropdown-menu" x-show="open" @click.outside="open = false" x-cloak>
                     <a href="/_teams">New dataset</a>
                     {% if is_admin %}<a href="/_admin/teams">New team</a>{% endif %}
                 </div>
@@ -30,9 +31,9 @@
         </div>
         <div class="nav-right">
             {% if username %}
-                <div class="dropdown">
-                    <a href="#" class="dropdown-toggle nav-user">{{ username }}</a>
-                    <div class="dropdown-menu dropdown-right">
+                <div class="dropdown" x-data="{ open: false }">
+                    <a href="#" class="dropdown-toggle nav-user" @click.prevent="open = !open">{{ username }}</a>
+                    <div class="dropdown-menu dropdown-right" x-show="open" @click.outside="open = false" x-cloak>
                         <a href="/_change-password">Change password</a>
                         {% if is_admin %}<a href="/_admin">Site administration</a>{% endif %}
                         <hr class="dropdown-divider">
