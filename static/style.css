@@ -6,6 +6,7 @@ a:hover { text-decoration: underline; }
 .navbar {
     display: flex; align-items: center; justify-content: space-between;
     padding: 0.6rem 1.2rem; background: #0057b7; color: #fff;
+    position: relative; overflow: visible;
 }
 .navbar .brand { color: #fff; font-weight: 700; font-size: 1.1rem; }
 .nav-links { display: flex; align-items: center; gap: 0.75rem; }
@@ -22,11 +23,11 @@ a:hover { text-decoration: underline; }
 .dropdown-toggle { cursor: pointer; }
 .dropdown-toggle:hover { text-decoration: underline; }
 .dropdown-menu {
-    display: none;
     position: absolute; top: 100%; left: 0;
     background: #fff; border: 1px solid #ddd; border-radius: 4px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.15); min-width: 180px;
     margin-top: 0.3rem; z-index: 1000;
+    white-space: nowrap;
 }
 .dropdown-right { left: auto; right: 0; }
 .dropdown-menu a {
