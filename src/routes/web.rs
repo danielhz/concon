@@ -18,7 +18,7 @@ pub fn routes() -> Router<AppState> {
         .route("/_datasets/new", axum::routing::post(create_dataset_web))
         .route("/_datasets/delete", axum::routing::post(delete_dataset_web))
         .route("/_change-password", get(change_password_page).post(change_password_submit))
-        .route("/_teams", get(teams_list).post(create_team))
+        .route("/_teams", get(teams_list))
         .route("/_admin", get(admin_dashboard))
         .route("/_admin/users", get(admin_users))
         .route("/_admin/users/new", axum::routing::post(admin_create_user))
@@ -671,20 +671,19 @@ async fn admin_delete_user(
 }
 
 #[derive(Deserialize)]
-struct CreateTeamForm {
-    name: String,
-    parent_path: String,
+pub struct CreateTeamForm {
+    pub name: String,
 }
 
-async fn create_team(
-    State(state): State<AppState>,
-    cookies: Cookies,
-    Form(form): Form<CreateTeamForm>,
+/// Create a sub-team under the given parent team segments.
+pub async fn create_team(
+    state: &AppState,
+    parent_segments: &[String],
+    cookies: &Cookies,
+    form: CreateTeamForm,
 ) -> Response {
-    let session = get_username(&cookies, &state);
-    if !is_root_admin(&session, &state) {
-        // For now only root admins can create teams.
-        // Later: check if user is admin of the parent team.
+    let session = get_username(cookies, state);
+    if !is_root_admin(&session, state) {
         return Redirect::to("/").into_response();
     }
 
@@ -693,24 +692,17 @@ async fn create_team(
         return Redirect::to("/_teams").into_response();
     }
 
-    // Resolve parent team IRI
-    let parent_segments: Vec<String> = if form.parent_path.is_empty() {
-        Vec::new()
-    } else {
-        form.parent_path.split('/').map(|s| s.to_string()).collect()
-    };
-
-    let parent_iri = match auth::resolve_team_path(&state.store_manager.system, &parent_segments) {
+    let parent_iri = match auth::resolve_team_path(&state.store_manager.system, parent_segments) {
         Some(iri) => iri,
         None => return Redirect::to("/_teams").into_response(),
     };
     let parent_clean = parent_iri.trim_matches(|c| c == '<' || c == '>');
 
-    // Build new team IRI
-    let team_path = if form.parent_path.is_empty() {
+    let parent_path = parent_segments.join("/");
+    let team_path = if parent_path.is_empty() {
         name.clone()
     } else {
-        format!("{}/{}", form.parent_path, name)
+        format!("{}/{}", parent_path, name)
     };
     let team_iri = format!("https://mlipe.2mia.org/teams/{}", team_path);
 
@@ -727,10 +719,10 @@ async fn create_team(
     let _ = state.store_manager.system.update(&insert);
 
     // Redirect back to the parent team page
-    if form.parent_path.is_empty() {
+    if parent_path.is_empty() {
         Redirect::to("/").into_response()
     } else {
-        Redirect::to(&format!("/{}", form.parent_path)).into_response()
+        Redirect::to(&format!("/{}", parent_path)).into_response()
     }
 }
 

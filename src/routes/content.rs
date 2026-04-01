@@ -37,6 +37,10 @@ pub enum ParsedPath {
         file_id: String,
         action: Option<String>,
     },
+    /// /{team-path}/_new_team — create sub-team action
+    NewTeam {
+        team_segments: Vec<String>,
+    },
 }
 
 impl ParsedPath {
@@ -47,7 +51,8 @@ impl ParsedPath {
             Self::TeamPage { team_segments }
             | Self::DatasetView { team_segments, .. }
             | Self::FileCatalog { team_segments, .. }
-            | Self::FileItem { team_segments, .. } => team_segments.join("/"),
+            | Self::FileItem { team_segments, .. }
+            | Self::NewTeam { team_segments } => team_segments.join("/"),
         }
     }
 
@@ -100,6 +105,10 @@ pub fn parse_path(path: &str) -> ParsedPath {
                 None
             };
             return ParsedPath::DatasetView { team_segments, dataset, view };
+        }
+
+        if seg == "_new_team" {
+            return ParsedPath::NewTeam { team_segments };
         }
 
         if seg == "_files" {
@@ -242,6 +251,10 @@ async fn content_get(
                 }
             }
         }
+        ParsedPath::NewTeam { .. } => {
+            (StatusCode::METHOD_NOT_ALLOWED, "Use POST to create a team".to_string())
+                .into_response()
+        }
     }
 }
 
@@ -326,6 +339,12 @@ async fn content_post(
                         .into_response()
                 }
             }
+        }
+        ParsedPath::NewTeam { team_segments } => {
+            let body_str = String::from_utf8_lossy(&body).to_string();
+            let form: web::CreateTeamForm = serde_urlencoded::from_str(&body_str)
+                .unwrap_or(web::CreateTeamForm { name: String::new() });
+            web::create_team(&state, team_segments, &cookies, form).await
         }
         _ => {
             (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this path".to_string())

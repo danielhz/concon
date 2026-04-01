@@ -79,8 +79,7 @@
 
         {% if is_team_admin %}
         <h3>New sub-team</h3>
-        <form method="post" action="/_teams">
-            <input type="hidden" name="parent_path" value="{{ team_path }}">
+        <form method="post" action="{{ team_url_prefix }}/_new_team">
             <div class="input-group" style="max-width: 400px;">
                 <input class="input-group-field" type="text" name="name" placeholder="Sub-team name" required>
                 <div class="input-group-button">
