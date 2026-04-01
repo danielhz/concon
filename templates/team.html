@@ -54,11 +54,34 @@
     </div>
 
     <div class="tabs-panel" id="files">
-        <p><a href="{{ team_url_prefix }}/_files" class="button small">Upload and manage files</a></p>
+        {% if can_upload %}
+        <h3>Upload PDF</h3>
+        <form method="post" action="/_api/files/upload" enctype="multipart/form-data">
+            <input type="hidden" name="team_path" value="{{ team_path_for_files }}">
+            <div class="grid-x grid-margin-x">
+                <div class="cell medium-6">
+                    <input type="file" name="file" accept="application/pdf" required>
+                </div>
+                <div class="cell medium-6">
+                    <button type="submit" class="button">Upload</button>
+                </div>
+            </div>
+        </form>
+        {% endif %}
+
         {% if files %}
+        <h3>Files</h3>
         <table class="hover">
             <thead>
-                <tr><th>Filename</th><th>Title</th><th>Authors</th><th>Year</th></tr>
+                <tr>
+                    <th>Filename</th>
+                    <th>Title</th>
+                    <th>Authors</th>
+                    <th>Year</th>
+                    {% if can_upload %}
+                    <th>Actions</th>
+                    {% endif %}
+                </tr>
             </thead>
             <tbody>
                 {% for f in files %}
@@ -67,6 +90,17 @@
                     <td>{{ f.title }}</td>
                     <td>{{ f.authors }}</td>
                     <td>{{ f.year }}</td>
+                    {% if can_upload %}
+                    <td class="actions-cell">
+                        <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_edit">edit</a>
+                        {% if is_team_admin %}
+                        <form method="post" action="{{ team_url_prefix }}/_files/{{ f.uuid }}/_delete" class="inline-form"
+                              onsubmit="return confirm('Delete this file?')">
+                            <button type="submit" class="btn-small-danger">delete</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                    {% endif %}
                 </tr>
                 {% endfor %}
             </tbody>
@@ -117,4 +151,26 @@
         {% endif %}
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Activate tab from URL hash
+$(document).ready(function() {
+    var hash = window.location.hash;
+    if (hash) {
+        var tab = $('[data-tabs] a[href="' + hash + '"]');
+        if (tab.length) {
+            tab.click();
+        }
+    }
+    // Update hash when tab changes
+    $('[data-tabs]').on('change.zf.tabs', function() {
+        var activeTab = $(this).find('.is-active a').attr('href');
+        if (activeTab) {
+            history.replaceState(null, null, activeTab);
+        }
+    });
+});
+</script>
 {% endblock %}

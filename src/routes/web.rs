@@ -434,6 +434,11 @@ pub async fn team_page(
     // Get files for this team
     let team_path_for_files = if team_segments.is_empty() { "root".to_string() } else { team_path.clone() };
     let files = super::files::list_files_from_catalog(state, &team_path_for_files);
+    let can_upload = is_team_admin || session.as_ref().map_or(false, |s| {
+        team_iri.as_ref().map_or(false, |iri| {
+            auth::can_access_files(&state.store_manager.system, &s.user_iri, iri, auth::FileAction::Write)
+        })
+    });
 
     let team_url_prefix = if team_segments.is_empty() {
         String::new()
@@ -482,6 +487,8 @@ pub async fn team_page(
                 username => u.username,
             }).collect::<Vec<_>>(),
             files => files,
+            can_upload => can_upload,
+            team_path_for_files => team_path_for_files,
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
