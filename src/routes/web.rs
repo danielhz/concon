@@ -909,6 +909,62 @@ async fn upload_file(
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to insert metadata: {}", e)).into_response();
     }
 
+    // Extract metadata from PDF using GROBID (best-effort, don't fail upload)
+    let pdf_path = file_path_on_disk.clone();
+    let catalog_clone = catalog.clone();
+    let uuid_clone = uuid.clone();
+    tokio::spawn(async move {
+        match crate::grobid::extract_metadata(&pdf_path).await {
+            Ok(meta) => {
+                if meta.title.is_empty() && meta.authors.is_empty() && meta.doi.is_empty() {
+                    tracing::info!("GROBID: no metadata extracted for {}", uuid_clone);
+                    return;
+                }
+
+                let title = meta.title.replace('"', r#"\""#);
+                let authors = meta.authors.replace('"', r#"\""#);
+                let doi = meta.doi.replace('"', r#"\""#);
+                let file_iri = format!("https://mlipe.2mia.org/files/{}", uuid_clone);
+
+                let update = format!(
+                    r#"
+                    PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+                    DELETE {{
+                        <{file_iri}> mlipe:fileTitle ?oldTitle ;
+                                     mlipe:fileAuthors ?oldAuthors ;
+                                     mlipe:fileYear ?oldYear ;
+                                     mlipe:fileDOI ?oldDoi .
+                    }}
+                    INSERT {{
+                        <{file_iri}> mlipe:fileTitle "{title}" ;
+                                     mlipe:fileAuthors "{authors}" ;
+                                     mlipe:fileYear "{year}" ;
+                                     mlipe:fileDOI "{doi}" .
+                    }}
+                    WHERE {{
+                        OPTIONAL {{ <{file_iri}> mlipe:fileTitle ?oldTitle }}
+                        OPTIONAL {{ <{file_iri}> mlipe:fileAuthors ?oldAuthors }}
+                        OPTIONAL {{ <{file_iri}> mlipe:fileYear ?oldYear }}
+                        OPTIONAL {{ <{file_iri}> mlipe:fileDOI ?oldDoi }}
+                    }}
+                    "#,
+                    year = meta.year,
+                );
+
+                match catalog_clone.update(&update) {
+                    Ok(()) => tracing::info!("GROBID: extracted metadata for {}: '{}'", uuid_clone, meta.title),
+                    Err(e) => tracing::warn!("GROBID: failed to update metadata: {}", e),
+                }
+
+                // Stop GROBID to free resources
+                crate::grobid::stop();
+            }
+            Err(e) => {
+                tracing::warn!("GROBID extraction failed for {}: {}", uuid_clone, e);
+            }
+        }
+    });
+
     Redirect::to(&format!("{}/_files", team_url_prefix)).into_response()
 }
 

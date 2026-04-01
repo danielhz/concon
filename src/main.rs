@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod grobid;
 mod migration;
 mod routes;
 mod state;
