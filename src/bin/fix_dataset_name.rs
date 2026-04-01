@@ -1,4 +1,4 @@
-//! One-off fix: rename dataset "MLIPs Literature" to "MetaLearn/MLIPs Literature"
+//! Fix: insert missing dataset metadata for MLIPs Literature
 
 use oxigraph::store::Store;
 
@@ -7,13 +7,33 @@ fn main() {
 
     let update = r#"
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-        DELETE { <https://mlipe.2mia.org/datasets/MLIPs%20Literature> mlipe:datasetName "MLIPs Literature" }
-        INSERT { <https://mlipe.2mia.org/datasets/MLIPs%20Literature> mlipe:datasetName "MetaLearn/MLIPs Literature" }
-        WHERE { <https://mlipe.2mia.org/datasets/MLIPs%20Literature> mlipe:datasetName "MLIPs Literature" }
+        INSERT DATA {
+            <https://mlipe.2mia.org/datasets/MetaLearn/MLIPs%20Literature> a mlipe:Dataset ;
+                mlipe:datasetName "MetaLearn/MLIPs Literature" ;
+                mlipe:hasVisibility mlipe:TeamOnlyVisibility .
+            <https://mlipe.2mia.org/teams/MetaLearn> mlipe:ownsDataset
+                <https://mlipe.2mia.org/datasets/MetaLearn/MLIPs%20Literature> .
+        }
     "#;
 
     match store.update(update) {
-        Ok(()) => println!("Fixed dataset name: MLIPs Literature -> MetaLearn/MLIPs Literature"),
+        Ok(()) => println!("Inserted dataset metadata for MetaLearn/MLIPs Literature"),
         Err(e) => eprintln!("Failed: {}", e),
+    }
+
+    // Verify
+    use oxigraph::sparql::QueryResults;
+    let query = r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?name ?team WHERE {
+            ?ds a mlipe:Dataset ; mlipe:datasetName ?name .
+            ?team mlipe:ownsDataset ?ds .
+        }
+    "#;
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+        for solution in solutions.flatten() {
+            println!("  dataset: {:?}, team: {:?}",
+                solution.get("name"), solution.get("team"));
+        }
     }
 }
