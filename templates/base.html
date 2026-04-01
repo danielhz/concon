@@ -13,8 +13,8 @@
         <a class="brand" href="/">MLIPE</a>
         <div class="nav-links">
             <div class="dropdown" x-data="{ open: false }">
-                <a href="#" class="dropdown-toggle" @click.prevent="open = !open">Explore</a>
-                <div class="dropdown-menu" x-show="open" @click.outside="open = false" x-cloak>
+                <a href="#" class="dropdown-toggle" @click.prevent="open = !open">Explore &#9662;</a>
+                <div class="dropdown-menu" x-show="open" x-transition @click.outside="open = false" style="display: none;">
                     <a href="/_teams">Teams</a>
                     <a href="/_users">Users</a>
                 </div>
@@ -22,7 +22,7 @@
             {% if username %}
             <div class="dropdown" x-data="{ open: false }">
                 <a href="#" class="dropdown-toggle" @click.prevent="open = !open">+</a>
-                <div class="dropdown-menu" x-show="open" @click.outside="open = false" x-cloak>
+                <div class="dropdown-menu" x-show="open" x-transition @click.outside="open = false" style="display: none;">
                     <a href="/_teams">New dataset</a>
                     {% if is_admin %}<a href="/_admin/teams">New team</a>{% endif %}
                 </div>
@@ -32,8 +32,8 @@
         <div class="nav-right">
             {% if username %}
                 <div class="dropdown" x-data="{ open: false }">
-                    <a href="#" class="dropdown-toggle nav-user" @click.prevent="open = !open">{{ username }}</a>
-                    <div class="dropdown-menu dropdown-right" x-show="open" @click.outside="open = false" x-cloak>
+                    <a href="#" class="dropdown-toggle nav-user" @click.prevent="open = !open">{{ username }} &#9662;</a>
+                    <div class="dropdown-menu dropdown-right" x-show="open" x-transition @click.outside="open = false" style="display: none;">
                         <a href="/_change-password">Change password</a>
                         {% if is_admin %}<a href="/_admin">Site administration</a>{% endif %}
                         <hr class="dropdown-divider">
