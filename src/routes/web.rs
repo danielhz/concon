@@ -19,6 +19,7 @@ pub fn routes() -> Router<AppState> {
         .route("/_datasets/delete", axum::routing::post(delete_dataset_web))
         .route("/_change-password", get(change_password_page).post(change_password_submit))
         .route("/_teams", get(teams_list))
+        .route("/_teams/new", axum::routing::post(create_team))
         .route("/_admin", get(admin_dashboard))
         .route("/_admin/users", get(admin_users))
         .route("/_admin/users/new", axum::routing::post(admin_create_user))
@@ -668,6 +669,70 @@ async fn admin_delete_user(
     }
 
     Redirect::to("/_admin/users").into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateTeamForm {
+    name: String,
+    parent_path: String,
+}
+
+async fn create_team(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<CreateTeamForm>,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        // For now only root admins can create teams.
+        // Later: check if user is admin of the parent team.
+        return Redirect::to("/").into_response();
+    }
+
+    let name = form.name.trim().to_string();
+    if name.is_empty() {
+        return Redirect::to("/_teams").into_response();
+    }
+
+    // Resolve parent team IRI
+    let parent_segments: Vec<String> = if form.parent_path.is_empty() {
+        Vec::new()
+    } else {
+        form.parent_path.split('/').map(|s| s.to_string()).collect()
+    };
+
+    let parent_iri = match auth::resolve_team_path(&state.store_manager.system, &parent_segments) {
+        Some(iri) => iri,
+        None => return Redirect::to("/_teams").into_response(),
+    };
+    let parent_clean = parent_iri.trim_matches(|c| c == '<' || c == '>');
+
+    // Build new team IRI
+    let team_path = if form.parent_path.is_empty() {
+        name.clone()
+    } else {
+        format!("{}/{}", form.parent_path, name)
+    };
+    let team_iri = format!("https://mlipe.2mia.org/teams/{}", team_path);
+
+    let insert = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        INSERT DATA {{
+            <{team_iri}> a mlipe:Team ;
+                mlipe:teamName "{name}" ;
+                mlipe:hasParentTeam <{parent_clean}> .
+        }}
+        "#,
+    );
+    let _ = state.store_manager.system.update(&insert);
+
+    // Redirect back to the parent team page
+    if form.parent_path.is_empty() {
+        Redirect::to("/").into_response()
+    } else {
+        Redirect::to(&format!("/{}", form.parent_path)).into_response()
+    }
 }
 
 async fn teams_list(
