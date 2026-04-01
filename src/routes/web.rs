@@ -276,18 +276,28 @@ async fn create_dataset_web(
         _ => "PublicVisibility",
     };
 
-    let team_iri = if form.team.is_empty() {
-        "https://mlipe.2mia.org/teams/root".to_string()
+    // Resolve team path to IRI
+    let team_path = form.team.trim().to_string();
+    let team_segments: Vec<String> = if team_path.is_empty() {
+        Vec::new()
     } else {
-        let iri = form.team.trim().to_string();
-        // Strip angle brackets if present
-        iri.trim_matches(|c| c == '<' || c == '>').to_string()
+        team_path.split('/').map(|s| s.to_string()).collect()
+    };
+    let team_iri = auth::resolve_team_path(&state.store_manager.system, &team_segments)
+        .unwrap_or_else(|| "https://mlipe.2mia.org/teams/root".to_string());
+    let team_iri = team_iri.trim_matches(|c| c == '<' || c == '>').to_string();
+
+    // Qualify dataset name with team path
+    let qualified_name = if team_path.is_empty() {
+        format!("root/{}", name)
+    } else {
+        format!("{}/{}", team_path, name)
     };
 
-    if state.store_manager.create_dataset(&name).is_ok() {
+    if state.store_manager.create_dataset(&qualified_name).is_ok() {
         let _ = state
             .store_manager
-            .insert_dataset_metadata_full(&name, visibility, &team_iri);
+            .insert_dataset_metadata_full(&qualified_name, visibility, &team_iri);
     }
 
     Redirect::to("/").into_response()
@@ -411,8 +421,12 @@ pub async fn team_page(
             sub_teams => sub_teams.iter().map(|t| minijinja::context! {
                 name => t.name,
             }).collect::<Vec<_>>(),
-            datasets => datasets.iter().map(|d| minijinja::context! {
-                name => d.name,
+            datasets => datasets.iter().map(|d| {
+                // Strip team prefix to get short name for display and URLs
+                let short_name = d.name.rsplit_once('/')
+                    .map(|(_, n)| n)
+                    .unwrap_or(&d.name);
+                minijinja::context! { name => short_name }
             }).collect::<Vec<_>>(),
             members => members.iter().map(|u| minijinja::context! {
                 username => u.username,
