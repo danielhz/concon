@@ -154,6 +154,20 @@ async fn content_get(
 ) -> Response {
     let parsed = parse_path(&path);
 
+    // Require login for UI pages (team pages, dataset query UI, file browsing).
+    // SPARQL endpoints remain accessible for programmatic access.
+    let needs_login = match &parsed {
+        ParsedPath::TeamPage { .. } => true,
+        ParsedPath::DatasetView { view, .. } => view.as_deref() != Some("_sparql"),
+        ParsedPath::FileCatalog { view, .. } => view.as_deref() != Some("_query"),
+        ParsedPath::FileItem { .. } => true,
+        ParsedPath::NewTeam { .. } => true,
+    };
+
+    if needs_login && web::get_username(&cookies, &state).is_none() {
+        return axum::response::Redirect::to("/_login").into_response();
+    }
+
     match &parsed {
         ParsedPath::TeamPage { team_segments } => {
             // Backward compatibility: if a single segment matches an existing
@@ -267,12 +281,24 @@ async fn content_post(
 ) -> Response {
     let parsed = parse_path(&path);
 
+    // SPARQL endpoints remain accessible; everything else requires login
+    let needs_login = match &parsed {
+        ParsedPath::DatasetView { view, .. } => {
+            view.as_deref() != Some("_sparql") && view.as_deref() != Some("_update")
+        }
+        _ => true,
+    };
+
+    if needs_login && web::get_username(&cookies, &state).is_none() {
+        return axum::response::Redirect::to("/_login").into_response();
+    }
+
     match &parsed {
         ParsedPath::DatasetView { view, .. } => {
             let qualified = parsed.qualified_dataset_name().unwrap();
             let body_str = String::from_utf8_lossy(&body).to_string();
             match view.as_deref() {
-                Some("_sparql") => {
+                Some("_sparql") | Some("_query") => {
                     match sparql::sparql_query_post(&state, &qualified, &headers, &body_str).await {
                         Ok(resp) => resp.into_response(),
                         Err(e) => e.into_response(),

@@ -8,14 +8,22 @@
 
 {% if datasets %}
 <h2>Public datasets</h2>
-<ul class="no-bullet">
-    {% for ds in datasets %}
-        <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
-    {% endfor %}
-</ul>
+<table>
+    <thead>
+        <tr><th>Dataset</th><th>Publisher</th></tr>
+    </thead>
+    <tbody>
+        {% for ds in datasets %}
+        <tr>
+            <td>{{ ds.name }}</td>
+            <td>{{ ds.team }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
 {% else %}
 <p>No public datasets available.</p>
 {% endif %}
 
-<p><a href="/_login">Log in</a> to access more datasets and features.</p>
+<p><a href="/_login" class="button">Log in</a> to access datasets and features.</p>
 {% endblock %}

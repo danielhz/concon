@@ -437,6 +437,84 @@ pub fn can_access_files(store: &Store, user_iri: &str, team_iri: &str, action: F
 }
 
 /// Get members of a team by team IRI.
+/// Check if a user can see a team.
+///
+/// Rules (monotonic):
+/// - Root admins: can see all teams
+/// - User is member or admin of the team: can see it
+/// - User is member or admin of any ancestor team: can see it
+pub fn can_see_team(store: &Store, user_iri: &str, team_iri: &str) -> bool {
+    if is_root_admin(store, user_iri) {
+        return true;
+    }
+
+    let user_clean = user_iri.trim_matches(|c| c == '<' || c == '>');
+    let mut current_team = team_iri.trim_matches(|c| c == '<' || c == '>').to_string();
+
+    loop {
+        // Check member
+        let member_query = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            ASK {{ <{current_team}> mlipe:hasMember <{user_clean}> }}
+            "#,
+        );
+        if let Ok(QueryResults::Boolean(true)) = store.query(&member_query) {
+            return true;
+        }
+
+        // Check admin
+        let admin_query = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            ASK {{ <{current_team}> mlipe:hasAdmin <{user_clean}> }}
+            "#,
+        );
+        if let Ok(QueryResults::Boolean(true)) = store.query(&admin_query) {
+            return true;
+        }
+
+        // Walk up to parent team
+        let parent_query = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            SELECT ?parent WHERE {{
+                <{current_team}> mlipe:hasParentTeam ?parent .
+            }}
+            LIMIT 1
+            "#,
+        );
+
+        let mut parent = None;
+        if let Ok(QueryResults::Solutions(solutions)) = store.query(&parent_query) {
+            for solution in solutions.flatten() {
+                parent = solution.get("parent").map(|v| {
+                    v.to_string().trim_matches(|c| c == '<' || c == '>').to_string()
+                });
+            }
+        }
+
+        match parent {
+            Some(p) => current_team = p,
+            None => break,
+        }
+    }
+
+    false
+}
+
+/// Filter sub-teams by visibility for a user.
+pub fn get_visible_sub_teams(store: &Store, user_iri: &str, parent_segments: &[String]) -> Vec<TeamInfo> {
+    let all = get_sub_teams(store, parent_segments);
+    if is_root_admin(store, user_iri) {
+        return all;
+    }
+    all.into_iter().filter(|t| {
+        let iri = t.iri.trim_matches(|c| c == '<' || c == '>');
+        can_see_team(store, user_iri, iri)
+    }).collect()
+}
+
 pub fn get_team_members(store: &Store, team_iri: &str) -> Vec<UserInfo> {
     let iri = team_iri.trim_matches(|c| c == '<' || c == '>');
     let query = format!(

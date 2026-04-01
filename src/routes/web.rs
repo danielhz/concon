@@ -64,16 +64,16 @@ async fn index(
             username => Option::<String>::None,
             is_admin => admin,
             datasets => datasets.iter().map(|d| {
-                let (team_prefix, short_name) = match d.name.rsplit_once('/') {
+                let (team_name, short_name) = match d.name.rsplit_once('/') {
                     Some((team, name)) => {
-                        let prefix = if team == "root" { String::new() } else { format!("/{}", team) };
-                        (prefix, name.to_string())
+                        let display_team = if team == "root" { "Root".to_string() } else { team.to_string() };
+                        (display_team, name.to_string())
                     }
-                    None => (String::new(), d.name.clone()),
+                    None => ("Root".to_string(), d.name.clone()),
                 };
                 minijinja::context! {
                     name => short_name,
-                    url => format!("{}/_ds/{}/_query", team_prefix, short_name),
+                    team => team_name,
                 }
             }).collect::<Vec<_>>(),
         })
@@ -366,6 +366,20 @@ pub async fn team_page(
     let team_path = team_segments.join("/");
     let team_name = team_segments.last().map(|s| s.as_str()).unwrap_or("Root");
 
+    // Check team visibility (root team is always visible to logged-in users)
+    if !team_segments.is_empty() {
+        let team_iri_check = auth::resolve_team_path(&state.store_manager.system, team_segments);
+        if let Some(ref iri) = team_iri_check {
+            if let Some(ref s) = session {
+                if !auth::can_see_team(&state.store_manager.system, &s.user_iri, iri) {
+                    return Err((StatusCode::FORBIDDEN, "You do not have access to this team".into()));
+                }
+            } else {
+                return Err((StatusCode::UNAUTHORIZED, "Login required".into()));
+            }
+        }
+    }
+
     // Build breadcrumbs: each ancestor team as (name, url)
     let breadcrumbs: Vec<_> = team_segments.iter().enumerate().map(|(i, name)| {
         let url = format!("/{}", team_segments[..=i].join("/"));
@@ -385,8 +399,12 @@ pub async fn team_page(
         })
     });
 
-    // Get sub-teams and datasets for this team
-    let sub_teams = auth::get_sub_teams(&state.store_manager.system, team_segments);
+    // Get sub-teams (filtered by visibility) and datasets
+    let sub_teams = if let Some(ref s) = session {
+        auth::get_visible_sub_teams(&state.store_manager.system, &s.user_iri, team_segments)
+    } else {
+        Vec::new()
+    };
     let datasets = auth::get_team_datasets_by_path(&state.store_manager.system, team_segments);
 
     // Get team members if admin
@@ -759,27 +777,35 @@ pub async fn create_team(
 async fn teams_list(
     State(state): State<AppState>,
     cookies: Cookies,
-) -> Result<Html<String>, (StatusCode, String)> {
+) -> Response {
     let session = get_username(&cookies, &state);
+    if session.is_none() {
+        return Redirect::to("/_login").into_response();
+    }
     let admin = is_root_admin(&session, &state);
 
-    // Get all top-level teams (children of root)
-    let teams = auth::get_sub_teams(&state.store_manager.system, &[]);
+    // Get visible top-level teams (children of root)
+    let teams = auth::get_visible_sub_teams(
+        &state.store_manager.system,
+        &session.as_ref().unwrap().user_iri,
+        &[],
+    );
 
-    let tmpl = state
-        .templates
-        .get_template("teams_list.html")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let tmpl = match state.templates.get_template("teams_list.html") {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
 
-    let html = tmpl
-        .render(minijinja::context! {
-            username => session.map(|s| s.username),
-            is_admin => admin,
-            teams => teams.iter().map(|t| minijinja::context! {
-                name => t.name,
-            }).collect::<Vec<_>>(),
-        })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let html = match tmpl.render(minijinja::context! {
+        username => session.map(|s| s.username),
+        is_admin => admin,
+        teams => teams.iter().map(|t| minijinja::context! {
+            name => t.name,
+        }).collect::<Vec<_>>(),
+    }) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
 
-    Ok(Html(html))
+    Html(html).into_response()
 }
