@@ -321,20 +321,10 @@ async fn content_post(
             let team_url_prefix = build_team_url_prefix(team_segments);
             match view.as_deref() {
                 Some("_upload") => {
-                    let content_type = headers.get(header::CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_string();
-                    let request = axum::http::Request::builder()
-                        .header(header::CONTENT_TYPE, content_type)
-                        .body(axum::body::Body::from(body))
-                        .unwrap();
-                    match axum::extract::Multipart::from_request(request, &state).await {
-                        Ok(mp) => {
-                            files::files_upload(&state, &team_path, &team_url_prefix, &cookies, mp).await
-                        }
-                        Err(e) => (StatusCode::BAD_REQUEST, format!("Invalid multipart: {}", e)).into_response(),
-                    }
+                    // File uploads are handled by the dedicated route in web.rs
+                    // This path shouldn't be reached, but redirect just in case
+                    (StatusCode::BAD_REQUEST, "Use the file upload form".to_string())
+                        .into_response()
                 }
                 _ => {
                     (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this files view".to_string())

@@ -19,6 +19,7 @@ pub fn routes() -> Router<AppState> {
         .route("/_datasets/delete", axum::routing::post(delete_dataset_web))
         .route("/_change-password", get(change_password_page).post(change_password_submit))
         .route("/_teams", get(teams_list))
+        .route("/_api/files/upload", axum::routing::post(upload_file))
         .route("/_admin", get(admin_dashboard))
         .route("/_admin/users", get(admin_users))
         .route("/_admin/users/new", axum::routing::post(admin_create_user))
@@ -786,6 +787,117 @@ pub async fn create_team(
     } else {
         Redirect::to(&format!("/{}", parent_path)).into_response()
     }
+}
+
+async fn upload_file(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    multipart: axum::extract::Multipart,
+) -> Response {
+    let session = match get_username(&cookies, &state) {
+        Some(s) => s,
+        None => return Redirect::to("/_login").into_response(),
+    };
+
+    // The team_path is sent as a hidden field in the form
+    let mut team_path = String::new();
+    let mut mp = multipart;
+    let mut file_data: Option<Vec<u8>> = None;
+    let mut file_name = String::new();
+
+    while let Ok(Some(field)) = mp.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "team_path" => {
+                team_path = field.text().await.unwrap_or_default();
+            }
+            "file" => {
+                file_name = field.file_name().unwrap_or("unknown.pdf").to_string();
+                match field.bytes().await {
+                    Ok(bytes) => file_data = Some(bytes.to_vec()),
+                    Err(e) => return (StatusCode::BAD_REQUEST, format!("Failed to read file: {}", e)).into_response(),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let data = match file_data {
+        Some(d) if !d.is_empty() => d,
+        _ => return (StatusCode::BAD_REQUEST, "No file provided").into_response(),
+    };
+
+    if team_path.is_empty() {
+        team_path = "root".to_string();
+    }
+
+    let team_url_prefix = if team_path == "root" {
+        String::new()
+    } else {
+        format!("/{}", team_path)
+    };
+
+    // Check permissions
+    let team_iri = match auth::resolve_team_path(
+        &state.store_manager.system,
+        &if team_path == "root" { Vec::new() } else { team_path.split('/').map(|s| s.to_string()).collect() },
+    ) {
+        Some(iri) => iri,
+        None => return (StatusCode::NOT_FOUND, "Team not found").into_response(),
+    };
+
+    if !auth::can_access_files(&state.store_manager.system, &session.user_iri, &team_iri, auth::FileAction::Write) {
+        return (StatusCode::FORBIDDEN, "Not authorized to upload files").into_response();
+    }
+
+    let file_size = data.len();
+    let uuid = uuid::Uuid::new_v4().to_string();
+
+    // Save file to disk
+    let file_dir = state.files_dir.join(&team_path);
+    if let Err(e) = std::fs::create_dir_all(&file_dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create directory: {}", e)).into_response();
+    }
+
+    let file_path_on_disk = file_dir.join(format!("{}.pdf", uuid));
+    if let Err(e) = std::fs::write(&file_path_on_disk, &data) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write file: {}", e)).into_response();
+    }
+
+    // Insert metadata into catalog
+    let catalog = match state.store_manager.get_or_create_file_catalog(&team_path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to open catalog: {}", e)).into_response(),
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let user_iri = session.user_iri.trim_matches(|c| c == '<' || c == '>');
+    let file_name_escaped = file_name.replace('"', r#"\""#);
+
+    let insert = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {{
+            <https://mlipe.2mia.org/files/{uuid}> a mlipe:File ;
+                mlipe:fileName "{file_name_escaped}" ;
+                mlipe:fileTitle "" ;
+                mlipe:fileAuthors "" ;
+                mlipe:fileYear "" ;
+                mlipe:fileDOI "" ;
+                mlipe:fileSize {file_size} ;
+                mlipe:mimeType "application/pdf" ;
+                mlipe:uploadedBy <{user_iri}> ;
+                mlipe:uploadedAt "{now}"^^xsd:dateTime .
+        }}
+        "#,
+    );
+
+    if let Err(e) = catalog.update(&insert) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to insert metadata: {}", e)).into_response();
+    }
+
+    Redirect::to(&format!("{}/_files", team_url_prefix)).into_response()
 }
 
 async fn teams_list(

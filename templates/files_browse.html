@@ -12,7 +12,8 @@
 
 {% if can_upload %}
 <h2>Upload PDF</h2>
-<form method="post" action="{{ team_url_prefix }}/_files/_upload" enctype="multipart/form-data">
+<form method="post" action="/_api/files/upload" enctype="multipart/form-data">
+    <input type="hidden" name="team_path" value="{{ team_path }}">
     <div class="grid-x grid-margin-x">
         <div class="cell medium-6">
             <label for="file">PDF file</label>
