@@ -19,6 +19,7 @@ pub async fn files_browse(
     cookies: &Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(cookies, state);
+    let admin = super::web::is_root_admin(&session, state);
 
     let files = list_files_from_catalog(state, team_path);
 
@@ -46,6 +47,7 @@ pub async fn files_browse(
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
+            is_admin => admin,
             team_path => team_path,
             team_url_prefix => team_url_prefix,
             files => files,

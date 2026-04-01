@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - Teams{% endblock %}
+
+{% block content %}
+<h1>Teams</h1>
+{% if teams %}
+<ul class="info-list">
+    {% for t in teams %}
+        <li><a href="/{{ t.name }}">{{ t.name }}</a></li>
+    {% endfor %}
+</ul>
+{% else %}
+<p>No teams found.</p>
+{% endif %}
+{% endblock %}

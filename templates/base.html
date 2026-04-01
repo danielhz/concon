@@ -10,12 +10,37 @@
 <body>
     <nav class="navbar">
         <a class="brand" href="/">MLIPE</a>
+        <div class="nav-links">
+            <div class="dropdown">
+                <a href="#" class="dropdown-toggle">Explore</a>
+                <div class="dropdown-menu">
+                    <a href="/_teams">Teams</a>
+                    <a href="/_users">Users</a>
+                </div>
+            </div>
+            {% if username %}
+            <div class="dropdown">
+                <a href="#" class="dropdown-toggle">+</a>
+                <div class="dropdown-menu">
+                    <a href="/_teams">New dataset</a>
+                    {% if is_admin %}<a href="/_admin/teams">New team</a>{% endif %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
         <div class="nav-right">
             {% if username %}
-                <a class="nav-user" href="/_change-password">{{ username }}</a>
-                <form method="post" action="/_logout" class="nav-form">
-                    <button type="submit">Logout</button>
-                </form>
+                <div class="dropdown">
+                    <a href="#" class="dropdown-toggle nav-user">{{ username }}</a>
+                    <div class="dropdown-menu dropdown-right">
+                        <a href="/_change-password">Change password</a>
+                        {% if is_admin %}<a href="/_admin">Site administration</a>{% endif %}
+                        <hr class="dropdown-divider">
+                        <form method="post" action="/_logout">
+                            <button type="submit" class="dropdown-item-btn">Logout</button>
+                        </form>
+                    </div>
+                </div>
             {% else %}
                 <a href="/_login">Login</a>
             {% endif %}

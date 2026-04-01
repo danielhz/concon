@@ -18,6 +18,7 @@ pub fn routes() -> Router<AppState> {
         .route("/_datasets/new", axum::routing::post(create_dataset_web))
         .route("/_datasets/delete", axum::routing::post(delete_dataset_web))
         .route("/_change-password", get(change_password_page).post(change_password_submit))
+        .route("/_teams", get(teams_list))
         .route("/_users", get(users_list))
         .route("/_users/{username}", get(user_profile))
 }
@@ -27,11 +28,19 @@ pub fn get_username(cookies: &Cookies, state: &AppState) -> Option<auth::Session
     state.session_store.get_session(cookie.value())
 }
 
+/// Check if the current session user is a root team admin.
+pub fn is_root_admin(session: &Option<auth::Session>, state: &AppState) -> bool {
+    session.as_ref().map_or(false, |s| {
+        auth::is_root_admin(&state.store_manager.system, &s.user_iri)
+    })
+}
+
 async fn index(
     State(state): State<AppState>,
     cookies: Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
 
     let datasets = match &session {
         Some(s) => auth::get_user_datasets(&state.store_manager.system, &s.user_iri),
@@ -51,6 +60,7 @@ async fn index(
     let html = tmpl
         .render(minijinja::context! {
             username => session.as_ref().map(|s| s.username.clone()),
+            is_admin => admin,
             datasets => datasets.iter().map(|d| {
                 let (team_prefix, short_name) = match d.name.rsplit_once('/') {
                     Some((team, name)) => {
@@ -77,6 +87,7 @@ async fn login_page(
     cookies: Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
 
     let tmpl = state
         .templates
@@ -86,6 +97,7 @@ async fn login_page(
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
+            is_admin => admin,
             error => "",
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -153,6 +165,7 @@ async fn change_password_page(
     cookies: Cookies,
 ) -> Response {
     let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
     if session.is_none() {
         return Redirect::to("/_login").into_response();
     }
@@ -164,6 +177,7 @@ async fn change_password_page(
 
     let html = match tmpl.render(minijinja::context! {
         username => session.map(|s| s.username),
+        is_admin => admin,
         error => "",
         success => "",
     }) {
@@ -309,6 +323,7 @@ pub async fn dataset_query(
     }
 
     let session = get_username(cookies, state);
+    let admin = is_root_admin(&session, state);
 
     // Extract short name (last segment) for display
     let display_name = dataset_name.rsplit('/').next().unwrap_or(dataset_name);
@@ -321,6 +336,7 @@ pub async fn dataset_query(
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
+            is_admin => admin,
             dataset_name => display_name,
             url_prefix => url_prefix,
         })
@@ -335,6 +351,7 @@ pub async fn team_page(
     cookies: &Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(cookies, state);
+    let admin = is_root_admin(&session, state);
 
     let team_path = team_segments.join("/");
     let team_name = team_segments.last().map(|s| s.as_str()).unwrap_or("Root");
@@ -357,6 +374,7 @@ pub async fn team_page(
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
+            is_admin => admin,
             team_name => team_name,
             team_url_prefix => team_url_prefix,
             sub_teams => sub_teams.iter().map(|t| minijinja::context! {
@@ -376,6 +394,7 @@ async fn users_list(
     cookies: Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
 
     let all_users = auth::list_all_users(&state.store_manager.system);
 
@@ -387,6 +406,7 @@ async fn users_list(
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
+            is_admin => admin,
             users => all_users.iter().map(|u| minijinja::context! {
                 username => u.username,
                 teams => u.teams.iter().map(|t| &t.name).cloned().collect::<Vec<_>>().join(", "),
@@ -403,6 +423,7 @@ async fn user_profile(
     cookies: Cookies,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
 
     let user_info = auth::get_user_info(&state.store_manager.system, &profile_name)
         .ok_or((StatusCode::NOT_FOUND, format!("User '{}' not found", profile_name)))?;
@@ -420,6 +441,7 @@ async fn user_profile(
     let html = tmpl
         .render(minijinja::context! {
             username => session.map(|s| s.username),
+            is_admin => admin,
             profile_username => profile_name,
             teams => user_info.teams.iter().map(|t| minijinja::context! {
                 name => t.name,
@@ -437,6 +459,34 @@ async fn user_profile(
                     name => short_name,
                     url => format!("{}/_ds/{}/_query", team_prefix, short_name),
                 }
+            }).collect::<Vec<_>>(),
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Html(html))
+}
+
+async fn teams_list(
+    State(state): State<AppState>,
+    cookies: Cookies,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
+
+    // Get all top-level teams (children of root)
+    let teams = auth::get_sub_teams(&state.store_manager.system, &[]);
+
+    let tmpl = state
+        .templates
+        .get_template("teams_list.html")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let html = tmpl
+        .render(minijinja::context! {
+            username => session.map(|s| s.username),
+            is_admin => admin,
+            teams => teams.iter().map(|t| minijinja::context! {
+                name => t.name,
             }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
