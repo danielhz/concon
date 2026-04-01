@@ -1,19 +1,4 @@
-/* MLIPE custom styles — Foundation 6 handles base layout, navbar, tabs, forms */
-
-/* Top bar color */
-.top-bar, .top-bar ul { background: #1a1a2e; }
-.top-bar a { color: #e0e0e0; }
-.top-bar a:hover { color: #fff; }
-.top-bar .menu-text { font-weight: 700; font-size: 1.1rem; color: #fff; }
-.top-bar .menu > li > a { color: #e0e0e0; }
-.top-bar .menu > li > a:hover { color: #fff; background: #16213e; }
-.top-bar .is-dropdown-submenu { background: #fff; border: 1px solid #ddd; }
-.top-bar .is-dropdown-submenu a { color: #222; }
-.top-bar .is-dropdown-submenu a:hover { background: #f0f0f0; color: #222; }
-
-/* Status messages */
-.error { color: #c00; margin-bottom: 1rem; }
-.success { color: #186a3b; margin-bottom: 1rem; }
+/* MLIPE custom styles — Foundation 6 defaults used for everything else */
 
 /* SPARQL update editor */
 .update-editor { display: flex; flex-direction: column; gap: 0.5rem; }
@@ -31,7 +16,6 @@
 
 /* Inline forms and danger buttons */
 .inline-form { display: inline; }
-.btn-danger { margin-bottom: 0; }
 .btn-small-danger {
     font-size: 0.75rem; padding: 0.1rem 0.4rem; background: transparent; color: #c00;
     border: 1px solid #c00; border-radius: 3px; cursor: pointer; margin-left: 0.5rem;
@@ -45,7 +29,7 @@
     padding: 1rem 1.5rem; border: 1px solid #ddd; border-radius: 6px;
     background: #fff; min-width: 140px; color: #222; text-decoration: none;
 }
-a.admin-card:hover { border-color: #0057b7; text-decoration: none; }
+a.admin-card:hover { border-color: #1779ba; text-decoration: none; }
 .admin-card strong { font-size: 1.1rem; }
 
 /* File actions */
@@ -54,4 +38,3 @@ a.admin-card:hover { border-color: #0057b7; text-decoration: none; }
 
 /* Upload form */
 .upload-form { max-width: 480px; }
-.upload-form label { font-weight: 600; }
