@@ -889,14 +889,26 @@ async fn upload_file(
     let insert = format!(
         r#"
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        PREFIX dcterms: <http://purl.org/dc/terms/>
+        PREFIX bibo: <http://purl.org/ontology/bibo/>
         PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
         INSERT DATA {{
             <https://mlipe.2mia.org/files/{uuid}> a mlipe:File ;
                 mlipe:fileName "{file_name_escaped}" ;
-                mlipe:fileTitle "" ;
-                mlipe:fileAuthors "" ;
-                mlipe:fileYear "" ;
-                mlipe:fileDOI "" ;
+                dcterms:title "" ;
+                dcterms:creator "" ;
+                dcterms:date "" ;
+                bibo:doi "" ;
+                dcterms:abstract "" ;
+                dcterms:isPartOf "" ;
+                bibo:volume "" ;
+                bibo:issue "" ;
+                bibo:pages "" ;
+                dcterms:publisher "" ;
+                bibo:issn "" ;
+                dcterms:identifier "" ;
+                dcterms:subject "" ;
+                mlipe:affiliation "" ;
                 mlipe:fileSize {file_size} ;
                 mlipe:mimeType "application/pdf" ;
                 mlipe:uploadedBy <{user_iri}> ;
@@ -918,42 +930,87 @@ async fn upload_file(
             Ok(meta) => {
                 if meta.title.is_empty() && meta.authors.is_empty() && meta.doi.is_empty() {
                     tracing::info!("GROBID: no metadata extracted for {}", uuid_clone);
+                    crate::grobid::stop();
                     return;
                 }
 
-                let title = meta.title.replace('"', r#"\""#);
-                let authors = meta.authors.replace('"', r#"\""#);
-                let doi = meta.doi.replace('"', r#"\""#);
+                let esc = |s: &str| s.replace('\\', "\\\\").replace('"', r#"\""#);
                 let file_iri = format!("https://mlipe.2mia.org/files/{}", uuid_clone);
 
                 let update = format!(
                     r#"
+                    PREFIX dcterms: <http://purl.org/dc/terms/>
+                    PREFIX bibo: <http://purl.org/ontology/bibo/>
                     PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
                     DELETE {{
-                        <{file_iri}> mlipe:fileTitle ?oldTitle ;
-                                     mlipe:fileAuthors ?oldAuthors ;
-                                     mlipe:fileYear ?oldYear ;
-                                     mlipe:fileDOI ?oldDoi .
+                        <{file_iri}> dcterms:title ?t ; dcterms:creator ?a ; dcterms:date ?y ;
+                                     bibo:doi ?d ; dcterms:abstract ?ab ; dcterms:isPartOf ?j ;
+                                     bibo:volume ?v ; bibo:issue ?is ; bibo:pages ?p ;
+                                     dcterms:publisher ?pb ; bibo:issn ?issn ;
+                                     dcterms:identifier ?ax ; dcterms:subject ?kw ;
+                                     mlipe:affiliation ?af .
                     }}
                     INSERT {{
-                        <{file_iri}> mlipe:fileTitle "{title}" ;
-                                     mlipe:fileAuthors "{authors}" ;
-                                     mlipe:fileYear "{year}" ;
-                                     mlipe:fileDOI "{doi}" .
+                        <{file_iri}> dcterms:title "{title}" ; dcterms:creator "{authors}" ;
+                                     dcterms:date "{year}" ; bibo:doi "{doi}" ;
+                                     dcterms:abstract "{abstract_text}" ;
+                                     dcterms:isPartOf "{journal}" ;
+                                     bibo:volume "{volume}" ; bibo:issue "{issue}" ;
+                                     bibo:pages "{pages}" ; dcterms:publisher "{publisher}" ;
+                                     bibo:issn "{issn}" ; dcterms:identifier "{arxiv_id}" ;
+                                     dcterms:subject "{keywords}" ;
+                                     mlipe:affiliation "{affiliations}" .
                     }}
                     WHERE {{
-                        OPTIONAL {{ <{file_iri}> mlipe:fileTitle ?oldTitle }}
-                        OPTIONAL {{ <{file_iri}> mlipe:fileAuthors ?oldAuthors }}
-                        OPTIONAL {{ <{file_iri}> mlipe:fileYear ?oldYear }}
-                        OPTIONAL {{ <{file_iri}> mlipe:fileDOI ?oldDoi }}
+                        OPTIONAL {{ <{file_iri}> dcterms:title ?t }}
+                        OPTIONAL {{ <{file_iri}> dcterms:creator ?a }}
+                        OPTIONAL {{ <{file_iri}> dcterms:date ?y }}
+                        OPTIONAL {{ <{file_iri}> bibo:doi ?d }}
+                        OPTIONAL {{ <{file_iri}> dcterms:abstract ?ab }}
+                        OPTIONAL {{ <{file_iri}> dcterms:isPartOf ?j }}
+                        OPTIONAL {{ <{file_iri}> bibo:volume ?v }}
+                        OPTIONAL {{ <{file_iri}> bibo:issue ?is }}
+                        OPTIONAL {{ <{file_iri}> bibo:pages ?p }}
+                        OPTIONAL {{ <{file_iri}> dcterms:publisher ?pb }}
+                        OPTIONAL {{ <{file_iri}> bibo:issn ?issn }}
+                        OPTIONAL {{ <{file_iri}> dcterms:identifier ?ax }}
+                        OPTIONAL {{ <{file_iri}> dcterms:subject ?kw }}
+                        OPTIONAL {{ <{file_iri}> mlipe:affiliation ?af }}
                     }}
                     "#,
-                    year = meta.year,
+                    title = esc(&meta.title),
+                    authors = esc(&meta.authors),
+                    year = esc(&meta.year),
+                    doi = esc(&meta.doi),
+                    abstract_text = esc(&meta.abstract_text),
+                    journal = esc(&meta.journal),
+                    volume = esc(&meta.volume),
+                    issue = esc(&meta.issue),
+                    pages = esc(&meta.pages),
+                    publisher = esc(&meta.publisher),
+                    issn = esc(&meta.issn),
+                    arxiv_id = esc(&meta.arxiv_id),
+                    keywords = esc(&meta.keywords),
+                    affiliations = esc(&meta.affiliations),
                 );
 
                 match catalog_clone.update(&update) {
                     Ok(()) => tracing::info!("GROBID: extracted metadata for {}: '{}'", uuid_clone, meta.title),
                     Err(e) => tracing::warn!("GROBID: failed to update metadata: {}", e),
+                }
+
+                // Store references as bibo:cites
+                for ref_doi in &meta.references {
+                    let ref_escaped = esc(ref_doi);
+                    let ref_insert = format!(
+                        r#"
+                        PREFIX bibo: <http://purl.org/ontology/bibo/>
+                        INSERT DATA {{
+                            <{file_iri}> bibo:cites <https://doi.org/{ref_escaped}> .
+                        }}
+                        "#,
+                    );
+                    let _ = catalog_clone.update(&ref_insert);
                 }
 
                 // Stop GROBID to free resources

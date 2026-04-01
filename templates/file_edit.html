@@ -5,21 +5,74 @@
 {% block content %}
 <h1>Edit — {{ file_name }}</h1>
 
-<form method="post" action="{{ team_url_prefix }}/_files/{{ file_id }}/_edit" class="login-form">
-    <label for="title">Title</label>
-    <input type="text" id="title" name="title" value="{{ title }}">
+<form method="post" action="{{ team_url_prefix }}/_files/{{ file_id }}/_edit" style="max-width: 640px;">
+    <fieldset>
+        <legend>Basic information</legend>
+        <label for="title">Title</label>
+        <input type="text" id="title" name="title" value="{{ title }}">
 
-    <label for="authors">Authors</label>
-    <input type="text" id="authors" name="authors" value="{{ authors }}">
+        <label for="authors">Authors</label>
+        <input type="text" id="authors" name="authors" value="{{ authors }}" placeholder="Surname, First; Surname2, First2">
 
-    <label for="year">Year</label>
-    <input type="text" id="year" name="year" value="{{ year }}">
+        <label for="year">Year</label>
+        <input type="text" id="year" name="year" value="{{ year }}" style="max-width: 120px;">
 
-    <label for="doi">DOI</label>
-    <input type="text" id="doi" name="doi" value="{{ doi }}">
+        <label for="doi">DOI</label>
+        <input type="text" id="doi" name="doi" value="{{ doi }}" placeholder="10.1234/example">
+    </fieldset>
 
-    <button type="submit">Save</button>
+    <fieldset>
+        <legend>Abstract</legend>
+        <textarea id="abstract_text" name="abstract_text" rows="6">{{ abstract_text }}</textarea>
+    </fieldset>
+
+    <fieldset>
+        <legend>Publication</legend>
+        <div class="grid-x grid-margin-x">
+            <div class="cell medium-6">
+                <label for="journal">Journal / Venue</label>
+                <input type="text" id="journal" name="journal" value="{{ journal }}">
+            </div>
+            <div class="cell medium-2">
+                <label for="volume">Volume</label>
+                <input type="text" id="volume" name="volume" value="{{ volume }}">
+            </div>
+            <div class="cell medium-2">
+                <label for="issue">Issue</label>
+                <input type="text" id="issue" name="issue" value="{{ issue }}">
+            </div>
+            <div class="cell medium-2">
+                <label for="pages">Pages</label>
+                <input type="text" id="pages" name="pages" value="{{ pages }}">
+            </div>
+        </div>
+        <div class="grid-x grid-margin-x">
+            <div class="cell medium-6">
+                <label for="publisher">Publisher</label>
+                <input type="text" id="publisher" name="publisher" value="{{ publisher }}">
+            </div>
+            <div class="cell medium-3">
+                <label for="issn">ISSN</label>
+                <input type="text" id="issn" name="issn" value="{{ issn }}">
+            </div>
+            <div class="cell medium-3">
+                <label for="arxiv_id">arXiv ID</label>
+                <input type="text" id="arxiv_id" name="arxiv_id" value="{{ arxiv_id }}">
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Classification</legend>
+        <label for="keywords">Keywords</label>
+        <input type="text" id="keywords" name="keywords" value="{{ keywords }}" placeholder="keyword1; keyword2; keyword3">
+
+        <label for="affiliations">Affiliations</label>
+        <input type="text" id="affiliations" name="affiliations" value="{{ affiliations }}" placeholder="Institution1; Institution2">
+    </fieldset>
+
+    <button type="submit" class="button">Save</button>
 </form>
 
-<p><a href="{{ team_url_prefix }}/_files">Back to files</a></p>
+<p><a href="{{ team_url_prefix }}#files">Back to team</a></p>
 {% endblock %}

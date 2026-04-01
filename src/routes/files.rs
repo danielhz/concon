@@ -189,7 +189,7 @@ pub async fn file_download(
     file_id: &str,
 ) -> Response {
     // Get original filename from catalog
-    let original_name = get_file_metadata_field(state, team_path, file_id, "mlipe:fileName")
+    let original_name = get_file_metadata_field(state, team_path, file_id, "mlipe:fileName", "mlipe")
         .unwrap_or_else(|| format!("{}.pdf", file_id));
 
     let file_path = state.files_dir.join(team_path).join(format!("{}.pdf", file_id));
@@ -245,18 +245,38 @@ pub async fn file_edit_form(
             authors => meta.authors,
             year => meta.year,
             doi => meta.doi,
+            abstract_text => meta.abstract_text,
+            journal => meta.journal,
+            volume => meta.volume,
+            issue => meta.issue,
+            pages => meta.pages,
+            publisher => meta.publisher,
+            issn => meta.issn,
+            arxiv_id => meta.arxiv_id,
+            keywords => meta.keywords,
+            affiliations => meta.affiliations,
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Html(html))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct FileEditForm {
     pub title: String,
     pub authors: String,
     pub year: String,
     pub doi: String,
+    pub abstract_text: String,
+    pub journal: String,
+    pub volume: String,
+    pub issue: String,
+    pub pages: String,
+    pub publisher: String,
+    pub issn: String,
+    pub arxiv_id: String,
+    pub keywords: String,
+    pub affiliations: String,
 }
 
 /// Submit file metadata edit (POST).
@@ -289,34 +309,64 @@ pub async fn file_edit_submit(
 
     let file_iri = format!("https://mlipe.2mia.org/files/{}", file_id);
 
-    // Update editable fields
-    let title_escaped = form.title.replace('"', r#"\""#);
-    let authors_escaped = form.authors.replace('"', r#"\""#);
-    let doi_escaped = form.doi.replace('"', r#"\""#);
+    // Escape all string fields
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', r#"\""#);
+    let title = esc(&form.title);
+    let authors = esc(&form.authors);
+    let doi = esc(&form.doi);
+    let abstract_text = esc(&form.abstract_text);
+    let journal = esc(&form.journal);
+    let volume = esc(&form.volume);
+    let issue = esc(&form.issue);
+    let pages = esc(&form.pages);
+    let publisher = esc(&form.publisher);
+    let issn = esc(&form.issn);
+    let arxiv_id = esc(&form.arxiv_id);
+    let keywords = esc(&form.keywords);
+    let affiliations = esc(&form.affiliations);
+    let year = esc(&form.year);
 
     let update = format!(
         r#"
+        PREFIX dcterms: <http://purl.org/dc/terms/>
+        PREFIX bibo: <http://purl.org/ontology/bibo/>
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
         DELETE {{
-            <{file_iri}> mlipe:fileTitle ?oldTitle ;
-                         mlipe:fileAuthors ?oldAuthors ;
-                         mlipe:fileYear ?oldYear ;
-                         mlipe:fileDOI ?oldDoi .
+            <{file_iri}> dcterms:title ?t ; dcterms:creator ?a ; dcterms:date ?y ;
+                         bibo:doi ?d ; dcterms:abstract ?ab ; dcterms:isPartOf ?j ;
+                         bibo:volume ?v ; bibo:issue ?is ; bibo:pages ?p ;
+                         dcterms:publisher ?pb ; bibo:issn ?issn ;
+                         dcterms:identifier ?ax ; dcterms:subject ?kw ;
+                         mlipe:affiliation ?af .
         }}
         INSERT {{
-            <{file_iri}> mlipe:fileTitle "{title_escaped}" ;
-                         mlipe:fileAuthors "{authors_escaped}" ;
-                         mlipe:fileYear "{year}" ;
-                         mlipe:fileDOI "{doi_escaped}" .
+            <{file_iri}> dcterms:title "{title}" ; dcterms:creator "{authors}" ;
+                         dcterms:date "{year}" ; bibo:doi "{doi}" ;
+                         dcterms:abstract "{abstract_text}" ;
+                         dcterms:isPartOf "{journal}" ;
+                         bibo:volume "{volume}" ; bibo:issue "{issue}" ;
+                         bibo:pages "{pages}" ; dcterms:publisher "{publisher}" ;
+                         bibo:issn "{issn}" ; dcterms:identifier "{arxiv_id}" ;
+                         dcterms:subject "{keywords}" ;
+                         mlipe:affiliation "{affiliations}" .
         }}
         WHERE {{
-            OPTIONAL {{ <{file_iri}> mlipe:fileTitle ?oldTitle }}
-            OPTIONAL {{ <{file_iri}> mlipe:fileAuthors ?oldAuthors }}
-            OPTIONAL {{ <{file_iri}> mlipe:fileYear ?oldYear }}
-            OPTIONAL {{ <{file_iri}> mlipe:fileDOI ?oldDoi }}
+            OPTIONAL {{ <{file_iri}> dcterms:title ?t }}
+            OPTIONAL {{ <{file_iri}> dcterms:creator ?a }}
+            OPTIONAL {{ <{file_iri}> dcterms:date ?y }}
+            OPTIONAL {{ <{file_iri}> bibo:doi ?d }}
+            OPTIONAL {{ <{file_iri}> dcterms:abstract ?ab }}
+            OPTIONAL {{ <{file_iri}> dcterms:isPartOf ?j }}
+            OPTIONAL {{ <{file_iri}> bibo:volume ?v }}
+            OPTIONAL {{ <{file_iri}> bibo:issue ?is }}
+            OPTIONAL {{ <{file_iri}> bibo:pages ?p }}
+            OPTIONAL {{ <{file_iri}> dcterms:publisher ?pb }}
+            OPTIONAL {{ <{file_iri}> bibo:issn ?issn }}
+            OPTIONAL {{ <{file_iri}> dcterms:identifier ?ax }}
+            OPTIONAL {{ <{file_iri}> dcterms:subject ?kw }}
+            OPTIONAL {{ <{file_iri}> mlipe:affiliation ?af }}
         }}
         "#,
-        year = form.year,
     );
 
     if let Err(e) = catalog.update(&update) {
@@ -386,6 +436,16 @@ struct FileMeta {
     authors: String,
     year: String,
     doi: String,
+    abstract_text: String,
+    journal: String,
+    volume: String,
+    issue: String,
+    pages: String,
+    publisher: String,
+    issn: String,
+    arxiv_id: String,
+    keywords: String,
+    affiliations: String,
 }
 
 fn get_file_all_metadata(state: &AppState, team_path: &str, file_id: &str) -> Option<FileMeta> {
@@ -395,26 +455,54 @@ fn get_file_all_metadata(state: &AppState, team_path: &str, file_id: &str) -> Op
     let query = format!(
         r#"
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-        SELECT ?fileName ?title ?authors ?year ?doi WHERE {{
+        PREFIX dcterms: <http://purl.org/dc/terms/>
+        PREFIX bibo: <http://purl.org/ontology/bibo/>
+        SELECT ?fileName ?title ?authors ?year ?doi ?abstract ?journal
+               ?volume ?issue ?pages ?publisher ?issn ?arxivId ?keywords ?affiliations
+        WHERE {{
             <{file_iri}> a mlipe:File .
             OPTIONAL {{ <{file_iri}> mlipe:fileName ?fileName }}
-            OPTIONAL {{ <{file_iri}> mlipe:fileTitle ?title }}
-            OPTIONAL {{ <{file_iri}> mlipe:fileAuthors ?authors }}
-            OPTIONAL {{ <{file_iri}> mlipe:fileYear ?year }}
-            OPTIONAL {{ <{file_iri}> mlipe:fileDOI ?doi }}
+            OPTIONAL {{ <{file_iri}> dcterms:title ?title }}
+            OPTIONAL {{ <{file_iri}> dcterms:creator ?authors }}
+            OPTIONAL {{ <{file_iri}> dcterms:date ?year }}
+            OPTIONAL {{ <{file_iri}> bibo:doi ?doi }}
+            OPTIONAL {{ <{file_iri}> dcterms:abstract ?abstract }}
+            OPTIONAL {{ <{file_iri}> dcterms:isPartOf ?journal }}
+            OPTIONAL {{ <{file_iri}> bibo:volume ?volume }}
+            OPTIONAL {{ <{file_iri}> bibo:issue ?issue }}
+            OPTIONAL {{ <{file_iri}> bibo:pages ?pages }}
+            OPTIONAL {{ <{file_iri}> dcterms:publisher ?publisher }}
+            OPTIONAL {{ <{file_iri}> bibo:issn ?issn }}
+            OPTIONAL {{ <{file_iri}> dcterms:identifier ?arxivId }}
+            OPTIONAL {{ <{file_iri}> dcterms:subject ?keywords }}
+            OPTIONAL {{ <{file_iri}> mlipe:affiliation ?affiliations }}
         }}
         LIMIT 1
         "#,
     );
 
+    let g = |sol: &oxigraph::sparql::QuerySolution, name: &str| -> String {
+        sol.get(name).map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default()
+    };
+
     if let Ok(QueryResults::Solutions(solutions)) = catalog.query(&query) {
         for solution in solutions.flatten() {
             return Some(FileMeta {
-                file_name: solution.get("fileName").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                title: solution.get("title").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                authors: solution.get("authors").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                year: solution.get("year").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                doi: solution.get("doi").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
+                file_name: g(&solution, "fileName"),
+                title: g(&solution, "title"),
+                authors: g(&solution, "authors"),
+                year: g(&solution, "year"),
+                doi: g(&solution, "doi"),
+                abstract_text: g(&solution, "abstract"),
+                journal: g(&solution, "journal"),
+                volume: g(&solution, "volume"),
+                issue: g(&solution, "issue"),
+                pages: g(&solution, "pages"),
+                publisher: g(&solution, "publisher"),
+                issn: g(&solution, "issn"),
+                arxiv_id: g(&solution, "arxivId"),
+                keywords: g(&solution, "keywords"),
+                affiliations: g(&solution, "affiliations"),
             });
         }
     }
@@ -422,13 +510,15 @@ fn get_file_all_metadata(state: &AppState, team_path: &str, file_id: &str) -> Op
     None
 }
 
-fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, field: &str) -> Option<String> {
+fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, field: &str, _ns_hint: &str) -> Option<String> {
     let catalog = state.store_manager.get_file_catalog(team_path)?;
     let file_iri = format!("https://mlipe.2mia.org/files/{}", file_id);
 
     let query = format!(
         r#"
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        PREFIX dcterms: <http://purl.org/dc/terms/>
+        PREFIX bibo: <http://purl.org/ontology/bibo/>
         SELECT ?val WHERE {{
             <{file_iri}> {field} ?val .
         }}
@@ -500,13 +590,15 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
 
     let query = r#"
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        PREFIX dcterms: <http://purl.org/dc/terms/>
+        PREFIX bibo: <http://purl.org/ontology/bibo/>
         SELECT ?file ?fileName ?title ?authors ?year ?doi ?size ?uploadedAt WHERE {
             ?file a mlipe:File .
             OPTIONAL { ?file mlipe:fileName ?fileName }
-            OPTIONAL { ?file mlipe:fileTitle ?title }
-            OPTIONAL { ?file mlipe:fileAuthors ?authors }
-            OPTIONAL { ?file mlipe:fileYear ?year }
-            OPTIONAL { ?file mlipe:fileDOI ?doi }
+            OPTIONAL { ?file dcterms:title ?title }
+            OPTIONAL { ?file dcterms:creator ?authors }
+            OPTIONAL { ?file dcterms:date ?year }
+            OPTIONAL { ?file bibo:doi ?doi }
             OPTIONAL { ?file mlipe:fileSize ?size }
             OPTIONAL { ?file mlipe:uploadedAt ?uploadedAt }
         }
@@ -517,22 +609,25 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
     if let Ok(QueryResults::Solutions(solutions)) = catalog.query(query) {
         for solution in solutions.flatten() {
             let file_iri = solution.get("file").map(|v| v.to_string()).unwrap_or_default();
-            // Extract UUID from IRI
             let uuid = file_iri
                 .rsplit('/')
                 .next()
                 .unwrap_or("")
                 .trim_matches('>');
 
+            let g = |name: &str| -> String {
+                solution.get(name).map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default()
+            };
+
             files.push(minijinja::context! {
                 uuid => uuid,
-                file_name => solution.get("fileName").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                title => solution.get("title").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                authors => solution.get("authors").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                year => solution.get("year").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                doi => solution.get("doi").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                size => solution.get("size").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
-                uploaded_at => solution.get("uploadedAt").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default(),
+                file_name => g("fileName"),
+                title => g("title"),
+                authors => g("authors"),
+                year => g("year"),
+                doi => g("doi"),
+                size => g("size"),
+                uploaded_at => g("uploadedAt"),
             });
         }
     }

@@ -339,12 +339,7 @@ async fn content_post(
                 Some("_edit") => {
                     let body_str = String::from_utf8_lossy(&body).to_string();
                     let form: files::FileEditForm = serde_urlencoded::from_str(&body_str)
-                        .unwrap_or(files::FileEditForm {
-                            title: String::new(),
-                            authors: String::new(),
-                            year: String::new(),
-                            doi: String::new(),
-                        });
+                        .unwrap_or_default();
                     files::file_edit_submit(&state, &team_path, &team_url_prefix, file_id, &cookies, form).await
                 }
                 Some("_delete") => {
