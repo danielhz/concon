@@ -23,16 +23,6 @@
 
 <div class="tabs-content" data-tabs-content="team-tabs">
     <div class="tabs-panel is-active" id="datasets">
-        {% if datasets %}
-        <ul class="no-bullet">
-            {% for ds in datasets %}
-                <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
-            {% endfor %}
-        </ul>
-        {% else %}
-        <p>No datasets in this team.</p>
-        {% endif %}
-
         {% if is_team_admin %}
         <h3>New dataset</h3>
         <form method="post" action="/_datasets/new">
@@ -49,6 +39,17 @@
                 </div>
             </div>
         </form>
+        {% endif %}
+
+        {% if datasets %}
+        <h3>Datasets</h3>
+        <ul class="no-bullet">
+            {% for ds in datasets %}
+                <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No datasets in this team.</p>
         {% endif %}
     </div>
 
