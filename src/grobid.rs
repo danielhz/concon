@@ -48,6 +48,7 @@ pub async fn extract_metadata(pdf_path: &std::path::Path, base_url: &str) -> Res
 
         let resp = client
             .post(format!("{}/api/processHeaderDocument", base_url))
+            .header("Accept", "application/xml")
             .multipart(form)
             .send()
             .await
@@ -72,6 +73,7 @@ pub async fn extract_metadata(pdf_path: &std::path::Path, base_url: &str) -> Res
 
         let resp = client
             .post(format!("{}/api/processFulltextDocument", base_url))
+            .header("Accept", "application/xml")
             .multipart(form)
             .send()
             .await
