@@ -208,6 +208,15 @@ impl StoreManager {
             .map_err(|e| format!("Failed to parse system data '{}': {}", path, e))
     }
 
+    /// Get the catalogs base directory path.
+    pub fn catalogs_dir(&self) -> Option<PathBuf> {
+        if self.data_dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(self.data_dir.join("catalogs"))
+        }
+    }
+
     /// Get or create a file catalog store for a team.
     /// The team_path is the joined team segments (e.g., "materials", "materials/atomistic").
     /// Use "root" for the root team.

@@ -422,10 +422,10 @@ pub async fn team_page(
     };
     let datasets = auth::get_team_datasets_by_path(&state.store_manager.system, team_segments);
 
-    // Get team members if admin
+    // Get team members (recursive) if admin
     let members = if is_team_admin {
         team_iri.as_ref().map_or(Vec::new(), |iri| {
-            auth::get_team_members(&state.store_manager.system, iri)
+            auth::get_team_members_recursive(&state.store_manager.system, iri)
         })
     } else {
         Vec::new()
@@ -433,7 +433,7 @@ pub async fn team_page(
 
     // Get files for this team
     let team_path_for_files = if team_segments.is_empty() { "root".to_string() } else { team_path.clone() };
-    let files = super::files::list_files_from_catalog(state, &team_path_for_files);
+    let files = super::files::list_files_recursive(state, &team_path_for_files);
     let can_upload = is_team_admin || session.as_ref().map_or(false, |s| {
         team_iri.as_ref().map_or(false, |iri| {
             auth::can_access_files(&state.store_manager.system, &s.user_iri, iri, auth::FileAction::Write)

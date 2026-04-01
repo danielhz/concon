@@ -128,16 +128,6 @@
     {% endif %}
 
     <div class="tabs-panel" id="subteams">
-        {% if sub_teams %}
-        <ul class="no-bullet">
-            {% for t in sub_teams %}
-                <li><a href="{{ team_url_prefix }}/{{ t.name }}">{{ t.name }}</a></li>
-            {% endfor %}
-        </ul>
-        {% else %}
-        <p>No sub-teams.</p>
-        {% endif %}
-
         {% if is_team_admin %}
         <h3>New sub-team</h3>
         <form method="post" action="{{ team_url_prefix }}/_new_team">
@@ -148,6 +138,17 @@
                 </div>
             </div>
         </form>
+        {% endif %}
+
+        {% if sub_teams %}
+        <h3>Sub-teams</h3>
+        <ul class="no-bullet">
+            {% for t in sub_teams %}
+                <li><a href="{{ team_url_prefix }}/{{ t.name }}">{{ t.name }}</a></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No sub-teams.</p>
         {% endif %}
     </div>
 </div>

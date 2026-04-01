@@ -445,6 +445,53 @@ fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, fie
     None
 }
 
+/// List files from this team's catalog and all sub-team catalogs recursively.
+pub fn list_files_recursive(state: &AppState, team_path: &str) -> Vec<minijinja::Value> {
+    let mut all_files = Vec::new();
+
+    // List this team's files
+    all_files.extend(list_files_from_catalog(state, team_path));
+
+    // Scan for sub-team catalogs on disk
+    let catalogs_dir = state.store_manager.catalogs_dir();
+    if let Some(catalogs_dir) = catalogs_dir {
+        let prefix = format!("{}/", team_path);
+        if let Ok(entries) = std::fs::read_dir(&catalogs_dir) {
+            find_catalog_dirs(&catalogs_dir, &prefix, state, &mut all_files);
+        }
+    }
+
+    all_files
+}
+
+fn find_catalog_dirs(base: &std::path::Path, prefix: &str, state: &AppState, files: &mut Vec<minijinja::Value>) {
+    let target = base.join(prefix.trim_end_matches('/'));
+    if !target.exists() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(&target) {
+        for entry in entries.flatten() {
+            if entry.file_type().map_or(false, |t| t.is_dir()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Skip Oxigraph internal files
+                if name == "." || name == ".." || name.ends_with(".log") || name.ends_with(".sst") {
+                    continue;
+                }
+                let sub_path = format!("{}{}", prefix, name);
+                // Check if this looks like a catalog (has CURRENT file = Oxigraph store)
+                if entry.path().join("CURRENT").exists() {
+                    // This is a catalog store, not a subdirectory of catalogs
+                    continue;
+                }
+                // It's a subdirectory — check for catalog and recurse
+                let catalog_path = format!("{}/{}", prefix.trim_end_matches('/'), name);
+                files.extend(list_files_from_catalog(state, &catalog_path));
+                find_catalog_dirs(base, &format!("{}/", catalog_path), state, files);
+            }
+        }
+    }
+}
+
 pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijinja::Value> {
     let catalog = match state.store_manager.get_file_catalog(team_path) {
         Some(c) => c,

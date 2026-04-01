@@ -515,6 +515,42 @@ pub fn get_visible_sub_teams(store: &Store, user_iri: &str, parent_segments: &[S
     }).collect()
 }
 
+/// Get members of a team and all its sub-teams recursively.
+/// Deduplicates by username.
+pub fn get_team_members_recursive(store: &Store, team_iri: &str) -> Vec<UserInfo> {
+    let iri = team_iri.trim_matches(|c| c == '<' || c == '>');
+    // Use a SPARQL property path to find all descendant teams
+    let query = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT DISTINCT ?user ?username WHERE {{
+            {{
+                <{iri}> mlipe:hasMember ?user .
+            }} UNION {{
+                ?subteam mlipe:hasParentTeam+ <{iri}> .
+                ?subteam mlipe:hasMember ?user .
+            }}
+            ?user mlipe:username ?username .
+        }}
+        ORDER BY ?username
+        "#,
+    );
+
+    let mut users = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+        for solution in solutions.flatten() {
+            if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
+                users.push(UserInfo {
+                    username: strip_literal(&username.to_string()),
+                    iri: user.to_string(),
+                    teams: Vec::new(),
+                });
+            }
+        }
+    }
+    users
+}
+
 pub fn get_team_members(store: &Store, team_iri: &str) -> Vec<UserInfo> {
     let iri = team_iri.trim_matches(|c| c == '<' || c == '>');
     let query = format!(
