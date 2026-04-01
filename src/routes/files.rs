@@ -445,7 +445,7 @@ fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, fie
     None
 }
 
-fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijinja::Value> {
+pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijinja::Value> {
     let catalog = match state.store_manager.get_file_catalog(team_path) {
         Some(c) => c,
         None => return Vec::new(),

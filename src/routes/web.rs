@@ -431,6 +431,10 @@ pub async fn team_page(
         Vec::new()
     };
 
+    // Get files for this team
+    let team_path_for_files = if team_segments.is_empty() { "root".to_string() } else { team_path.clone() };
+    let files = super::files::list_files_from_catalog(state, &team_path_for_files);
+
     let team_url_prefix = if team_segments.is_empty() {
         String::new()
     } else {
@@ -477,6 +481,7 @@ pub async fn team_page(
             members => members.iter().map(|u| minijinja::context! {
                 username => u.username,
             }).collect::<Vec<_>>(),
+            files => files,
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
