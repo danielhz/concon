@@ -32,7 +32,7 @@ INSERT DATA { ex:s ex:p ex:o . }"></textarea>
 <script>
     const yasgui = new Yasgui(document.getElementById("yasgui"), {
         requestConfig: {
-            endpoint: "{{ url_prefix }}/_sparql"
+            endpoint: "{{ url_prefix|safe }}/_sparql"
         },
         copyEndpointOnNewTab: false
     });
@@ -43,7 +43,7 @@ INSERT DATA { ex:s ex:p ex:o . }"></textarea>
             const text = document.getElementById("update-text").value;
             const result = document.getElementById("update-result");
             try {
-                const resp = await fetch("{{ url_prefix }}/_update", {
+                const resp = await fetch("{{ url_prefix|safe }}/_update", {
                     method: "POST",
                     headers: {"Content-Type": "application/sparql-update"},
                     body: text
