@@ -18,7 +18,7 @@ async fn main() {
         .expect("Failed to ensure system data file");
 
     let app_state =
-        state::AppState::new_persistent(&cfg.store.data_dir, &cfg.store.files_dir)
+        state::AppState::new_persistent(&cfg.store.data_dir, &cfg.store.files_dir, &cfg.grobid.url)
             .expect("Failed to initialize application state");
 
     if app_state.store_manager.is_system_empty() {

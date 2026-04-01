@@ -8,3 +8,8 @@ port = 3000
 # admin user (credentials from MLIPE_ADMIN_USER / MLIPE_ADMIN_PASS env vars,
 # or "admin" / "admin").
 system_data = "system.ttl"
+
+[grobid]
+# URL of the GROBID service for PDF metadata extraction.
+# Leave empty or omit to disable automatic extraction.
+url = "http://localhost:8070"

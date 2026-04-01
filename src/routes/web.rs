@@ -925,8 +925,12 @@ async fn upload_file(
     let pdf_path = file_path_on_disk.clone();
     let catalog_clone = catalog.clone();
     let uuid_clone = uuid.clone();
+    let grobid_url = state.grobid_url.clone();
     tokio::spawn(async move {
-        match crate::grobid::extract_metadata(&pdf_path).await {
+        if grobid_url.is_empty() {
+            return;
+        }
+        match crate::grobid::extract_metadata(&pdf_path, &grobid_url).await {
             Ok(meta) => {
                 if meta.title.is_empty() && meta.authors.is_empty() && meta.doi.is_empty() {
                     tracing::info!("GROBID: no metadata extracted for {}", uuid_clone);

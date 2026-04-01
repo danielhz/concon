@@ -1,8 +1,6 @@
 //! GROBID integration for extracting metadata from scientific PDFs.
 //!
-//! GROBID runs as a permanent service on a dedicated server (degu04).
-
-const GROBID_BASE_URL: &str = "http://10.0.0.2:8070";
+//! GROBID URL is configured via mlipe.toml [grobid] section.
 
 /// Metadata extracted from a PDF.
 #[derive(Debug, Default, Clone)]
@@ -27,7 +25,7 @@ pub struct PaperMetadata {
 
 /// Extract metadata from a PDF file using GROBID.
 /// Calls processHeaderDocument first, then processFulltextDocument.
-pub async fn extract_metadata(pdf_path: &std::path::Path) -> Result<PaperMetadata, String> {
+pub async fn extract_metadata(pdf_path: &std::path::Path, base_url: &str) -> Result<PaperMetadata, String> {
     let file_bytes = tokio::fs::read(pdf_path)
         .await
         .map_err(|e| format!("Failed to read PDF: {}", e))?;
@@ -49,7 +47,7 @@ pub async fn extract_metadata(pdf_path: &std::path::Path) -> Result<PaperMetadat
         let form = reqwest::multipart::Form::new().part("input", part);
 
         let resp = client
-            .post(format!("{}/api/processHeaderDocument", GROBID_BASE_URL))
+            .post(format!("{}/api/processHeaderDocument", base_url))
             .multipart(form)
             .send()
             .await
@@ -73,7 +71,7 @@ pub async fn extract_metadata(pdf_path: &std::path::Path) -> Result<PaperMetadat
         let form = reqwest::multipart::Form::new().part("input", part);
 
         let resp = client
-            .post(format!("{}/api/processFulltextDocument", GROBID_BASE_URL))
+            .post(format!("{}/api/processFulltextDocument", base_url))
             .multipart(form)
             .send()
             .await

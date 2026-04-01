@@ -11,6 +11,24 @@ const DEFAULT_SYSTEM_DATA_PATH: &str = "system.ttl";
 pub struct Config {
     pub server: ServerConfig,
     pub store: StoreConfig,
+    #[serde(default)]
+    pub grobid: GrobidConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GrobidConfig {
+    #[serde(default = "default_grobid_url")]
+    pub url: String,
+}
+
+fn default_grobid_url() -> String {
+    "http://localhost:8070".into()
+}
+
+impl Default for GrobidConfig {
+    fn default() -> Self {
+        Self { url: default_grobid_url() }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -43,6 +61,7 @@ impl Default for Config {
                 data_dir: "data".into(),
                 files_dir: default_files_dir(),
             },
+            grobid: GrobidConfig::default(),
         }
     }
 }

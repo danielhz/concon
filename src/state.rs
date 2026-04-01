@@ -11,6 +11,7 @@ pub struct AppState {
     pub session_store: Arc<SessionStore>,
     pub templates: Arc<minijinja::Environment<'static>>,
     pub files_dir: PathBuf,
+    pub grobid_url: String,
 }
 
 impl AppState {
@@ -26,11 +27,12 @@ impl AppState {
             session_store: Arc::new(SessionStore::new()),
             templates: Arc::new(env),
             files_dir: PathBuf::new(),
+            grobid_url: String::new(),
         })
     }
 
     /// Create AppState with persistent stores on disk.
-    pub fn new_persistent(data_dir: &str, files_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_persistent(data_dir: &str, files_dir: &str, grobid_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let store_manager = StoreManager::new_persistent(data_dir)?;
 
         let mut env = minijinja::Environment::new();
@@ -44,6 +46,7 @@ impl AppState {
             session_store: Arc::new(SessionStore::new()),
             templates: Arc::new(env),
             files_dir: files_path,
+            grobid_url: grobid_url.to_string(),
         })
     }
 }
