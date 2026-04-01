@@ -39,6 +39,17 @@ pub async fn files_browse(
         }
     });
 
+    // Build breadcrumbs from team path
+    let team_segments: Vec<&str> = if team_path == "root" {
+        Vec::new()
+    } else {
+        team_path.split('/').filter(|s| !s.is_empty()).collect()
+    };
+    let breadcrumbs: Vec<_> = team_segments.iter().enumerate().map(|(i, name)| {
+        let url = format!("/{}", team_segments[..=i].join("/"));
+        minijinja::context! { name => *name, url => url }
+    }).collect();
+
     let tmpl = state
         .templates
         .get_template("files_browse.html")
@@ -50,6 +61,7 @@ pub async fn files_browse(
             is_admin => admin,
             team_path => team_path,
             team_url_prefix => team_url_prefix,
+            breadcrumbs => breadcrumbs,
             files => files,
             can_upload => can_upload,
             can_delete => can_delete,
