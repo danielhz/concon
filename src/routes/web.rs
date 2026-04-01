@@ -335,8 +335,21 @@ pub async fn dataset_query(
     let session = get_username(cookies, state);
     let admin = is_root_admin(&session, state);
 
-    // Extract short name (last segment) for display
+    // Extract short name and team path for display
     let display_name = dataset_name.rsplit('/').next().unwrap_or(dataset_name);
+
+    // Build breadcrumbs from the team segments in the qualified name
+    let team_segments: Vec<&str> = match dataset_name.rsplit_once('/') {
+        Some((team_path, _)) => {
+            let segs: Vec<&str> = team_path.split('/').filter(|s| !s.is_empty() && *s != "root").collect();
+            segs
+        }
+        None => Vec::new(),
+    };
+    let breadcrumbs: Vec<_> = team_segments.iter().enumerate().map(|(i, name)| {
+        let url = format!("/{}", team_segments[..=i].join("/"));
+        minijinja::context! { name => *name, url => url }
+    }).collect();
 
     let tmpl = state
         .templates
@@ -349,6 +362,7 @@ pub async fn dataset_query(
             is_admin => admin,
             dataset_name => display_name,
             url_prefix => url_prefix,
+            breadcrumbs => breadcrumbs,
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
