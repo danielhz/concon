@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - User Management{% endblock %}
+
+{% block content %}
+<h1>User Management</h1>
+
+<p><a href="/_admin">Back to administration</a></p>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if success %}<p class="success">{{ success }}</p>{% endif %}
+
+<h2>Create user</h2>
+<form method="post" action="/_admin/users/new" class="create-user-form">
+    <input type="text" name="username" placeholder="Username" required>
+    <input type="password" name="password" placeholder="Password" required>
+    <button type="submit">Create</button>
+</form>
+
+<h2>Users</h2>
+{% if users %}
+<table class="data-table">
+    <thead>
+        <tr><th>Username</th><th>Teams</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+        {% for u in users %}
+        <tr>
+            <td><a href="/_users/{{ u.username }}">{{ u.username }}</a></td>
+            <td>{{ u.teams }}</td>
+            <td>
+                <form method="post" action="/_admin/users/delete" class="inline-form"
+                      onsubmit="return confirm('Delete user \'{{ u.username }}\'?')">
+                    <input type="hidden" name="username" value="{{ u.username }}">
+                    <button type="submit" class="btn-small-danger">delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No users found.</p>
+{% endif %}
+{% endblock %}

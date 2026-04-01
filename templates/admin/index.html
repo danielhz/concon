@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - Site Administration{% endblock %}
+
+{% block content %}
+<h1>Site Administration</h1>
+
+<div class="admin-cards">
+    <a href="/_admin/users" class="admin-card">
+        <strong>Users</strong>
+        <span>{{ user_count }} user(s)</span>
+    </a>
+    <div class="admin-card">
+        <strong>Teams</strong>
+        <span>{{ team_count }} team(s)</span>
+    </div>
+    <div class="admin-card">
+        <strong>Datasets</strong>
+        <span>{{ dataset_count }} dataset(s)</span>
+    </div>
+</div>
+
+<h2>System</h2>
+<table class="data-table">
+    <tr><th>Schema version</th><td>{{ schema_version }}</td></tr>
+</table>
+{% endblock %}

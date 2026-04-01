@@ -5,26 +5,81 @@
 {% block content %}
 <h1>{{ team_name }}</h1>
 
-{% if sub_teams %}
-<h2>Sub-teams</h2>
-<ul class="info-list">
-    {% for t in sub_teams %}
-        <li><a href="{{ team_url_prefix }}/{{ t.name }}">{{ t.name }}</a></li>
-    {% endfor %}
-</ul>
+<div class="tabs">
+    <a href="#datasets" class="tab active" onclick="showTab(event, 'datasets')">Datasets</a>
+    <a href="#files" class="tab" onclick="showTab(event, 'files')">Files</a>
+    {% if is_team_admin %}
+    <a href="#members" class="tab" onclick="showTab(event, 'members')">Members</a>
+    {% endif %}
+    <a href="#subteams" class="tab" onclick="showTab(event, 'subteams')">Sub-teams</a>
+</div>
+
+<div id="datasets" class="tab-content active">
+    {% if datasets %}
+    <ul class="dataset-list">
+        {% for ds in datasets %}
+            <li><a href="{{ team_url_prefix }}/_ds/{{ ds.name }}/_query">{{ ds.name }}</a></li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No datasets in this team.</p>
+    {% endif %}
+
+    {% if is_team_admin %}
+    <h3>New dataset</h3>
+    <form method="post" action="/_datasets/new" class="create-dataset-form">
+        <input type="text" name="name" placeholder="Dataset name" required>
+        <input type="hidden" name="team" value="{{ team_path }}">
+        <select name="visibility">
+            <option value="Public">Public</option>
+            <option value="LoggedUsers">Logged users only</option>
+            <option value="TeamOnly">Team only</option>
+        </select>
+        <button type="submit">Create</button>
+    </form>
+    {% endif %}
+</div>
+
+<div id="files" class="tab-content">
+    <p><a href="{{ team_url_prefix }}/_files">Browse files</a></p>
+</div>
+
+{% if is_team_admin %}
+<div id="members" class="tab-content">
+    {% if members %}
+    <table class="data-table">
+        <thead><tr><th>Username</th></tr></thead>
+        <tbody>
+            {% for m in members %}
+            <tr><td><a href="/_users/{{ m.username }}">{{ m.username }}</a></td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No members.</p>
+    {% endif %}
+</div>
 {% endif %}
 
-<h2>Datasets</h2>
-{% if datasets %}
-<ul class="dataset-list">
-    {% for ds in datasets %}
-        <li><a href="{{ team_url_prefix }}/_ds/{{ ds.name }}/_query">{{ ds.name }}</a></li>
-    {% endfor %}
-</ul>
-{% else %}
-<p>No datasets in this team.</p>
-{% endif %}
+<div id="subteams" class="tab-content">
+    {% if sub_teams %}
+    <ul class="info-list">
+        {% for t in sub_teams %}
+            <li><a href="{{ team_url_prefix }}/{{ t.name }}">{{ t.name }}</a></li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No sub-teams.</p>
+    {% endif %}
+</div>
 
-<h2>Files</h2>
-<p><a href="{{ team_url_prefix }}/_files">Browse files</a></p>
+<script>
+function showTab(event, tabId) {
+    event.preventDefault();
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+    document.getElementById(tabId).classList.add('active');
+    event.target.classList.add('active');
+}
+</script>
 {% endblock %}

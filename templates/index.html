@@ -1,43 +1,46 @@
 {% extends "base.html" %}
 
-{% block title %}MLIPE - Datasets{% endblock %}
+{% block title %}MLIPE{% endblock %}
 
 {% block content %}
-<h1>Datasets</h1>
-{% if datasets %}
-    <ul class="dataset-list">
-        {% for ds in datasets %}
-            <li>
-                <a href="{{ ds.url }}">{{ ds.name }}</a>
-                {% if username %}
-                <form method="post" action="/_datasets/delete" class="inline-form"
-                      onsubmit="return confirm('Delete dataset \'{{ ds.name }}\'?')">
-                    <input type="hidden" name="name" value="{{ ds.qualified_name }}">
-                    <button type="submit" class="btn-small-danger">delete</button>
-                </form>
-                {% endif %}
-            </li>
-        {% endfor %}
-    </ul>
-{% else %}
-    <p>No datasets available.</p>
+{% if username %}
+<h1>Dashboard</h1>
+
+{% if teams %}
+<h2>Your teams</h2>
+<ul class="info-list">
+    {% for t in teams %}
+        <li><a href="/{{ t.name }}">{{ t.name }}</a></li>
+    {% endfor %}
+</ul>
 {% endif %}
 
-{% if username %}
-<h2>Create dataset</h2>
-<form method="post" action="/_datasets/new" class="create-dataset-form">
-    <input type="text" name="name" placeholder="Dataset name" required>
-    <select name="team">
-        {% for t in teams %}
-            <option value="{{ t.iri }}">{{ t.name }}</option>
-        {% endfor %}
-    </select>
-    <select name="visibility">
-        <option value="Public">Public</option>
-        <option value="LoggedUsers">Logged users only</option>
-        <option value="TeamOnly">Team only</option>
-    </select>
-    <button type="submit">Create</button>
-</form>
+<h2>Your datasets</h2>
+{% if datasets %}
+<ul class="dataset-list">
+    {% for ds in datasets %}
+        <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
+    {% endfor %}
+</ul>
+{% else %}
+<p>No datasets accessible.</p>
+{% endif %}
+
+{% else %}
+<h1>MLIPE</h1>
+<p>Machine Learned Interatomic Potentials Environment</p>
+
+{% if datasets %}
+<h2>Public datasets</h2>
+<ul class="dataset-list">
+    {% for ds in datasets %}
+        <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
+    {% endfor %}
+</ul>
+{% else %}
+<p>No public datasets available.</p>
+{% endif %}
+
+<p><a href="/_login">Log in</a> to access more datasets and features.</p>
 {% endif %}
 {% endblock %}

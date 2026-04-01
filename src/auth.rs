@@ -436,6 +436,35 @@ pub fn can_access_files(store: &Store, user_iri: &str, team_iri: &str, action: F
     false
 }
 
+/// Get members of a team by team IRI.
+pub fn get_team_members(store: &Store, team_iri: &str) -> Vec<UserInfo> {
+    let iri = team_iri.trim_matches(|c| c == '<' || c == '>');
+    let query = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?user ?username WHERE {{
+            <{iri}> mlipe:hasMember ?user .
+            ?user mlipe:username ?username .
+        }}
+        ORDER BY ?username
+        "#,
+    );
+
+    let mut users = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+        for solution in solutions.flatten() {
+            if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
+                users.push(UserInfo {
+                    username: strip_literal(&username.to_string()),
+                    iri: user.to_string(),
+                    teams: Vec::new(),
+                });
+            }
+        }
+    }
+    users
+}
+
 /// Resolve a team path (e.g., ["materials", "atomistic"]) to a team IRI.
 /// Walks the hierarchy: root → materials → atomistic.
 /// Returns None if any segment doesn't resolve.

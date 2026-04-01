@@ -19,6 +19,10 @@ pub fn routes() -> Router<AppState> {
         .route("/_datasets/delete", axum::routing::post(delete_dataset_web))
         .route("/_change-password", get(change_password_page).post(change_password_submit))
         .route("/_teams", get(teams_list))
+        .route("/_admin", get(admin_dashboard))
+        .route("/_admin/users", get(admin_users))
+        .route("/_admin/users/new", axum::routing::post(admin_create_user))
+        .route("/_admin/users/delete", axum::routing::post(admin_delete_user))
         .route("/_users", get(users_list))
         .route("/_users/{username}", get(user_profile))
 }
@@ -48,7 +52,7 @@ async fn index(
     };
 
     let teams = match &session {
-        Some(s) => auth::get_user_admin_teams(&state.store_manager.system, &s.user_iri),
+        Some(s) => auth::get_user_member_teams(&state.store_manager.system, &s.user_iri),
         None => Vec::new(),
     };
 
@@ -356,9 +360,31 @@ pub async fn team_page(
     let team_path = team_segments.join("/");
     let team_name = team_segments.last().map(|s| s.as_str()).unwrap_or("Root");
 
+    // Resolve team IRI for permission checks
+    let team_iri = auth::resolve_team_path(&state.store_manager.system, team_segments);
+
+    // Check if current user is admin of this specific team
+    let is_team_admin = admin || session.as_ref().map_or(false, |s| {
+        team_iri.as_ref().map_or(false, |iri| {
+            let iri_clean = iri.trim_matches(|c| c == '<' || c == '>');
+            auth::get_user_admin_teams(&state.store_manager.system, &s.user_iri)
+                .iter()
+                .any(|t| t.iri.trim_matches(|c| c == '<' || c == '>') == iri_clean)
+        })
+    });
+
     // Get sub-teams and datasets for this team
     let sub_teams = auth::get_sub_teams(&state.store_manager.system, team_segments);
     let datasets = auth::get_team_datasets_by_path(&state.store_manager.system, team_segments);
+
+    // Get team members if admin
+    let members = if is_team_admin {
+        team_iri.as_ref().map_or(Vec::new(), |iri| {
+            auth::get_team_members(&state.store_manager.system, iri)
+        })
+    } else {
+        Vec::new()
+    };
 
     let team_url_prefix = if team_segments.is_empty() {
         String::new()
@@ -375,13 +401,18 @@ pub async fn team_page(
         .render(minijinja::context! {
             username => session.map(|s| s.username),
             is_admin => admin,
+            is_team_admin => is_team_admin,
             team_name => team_name,
+            team_path => team_path,
             team_url_prefix => team_url_prefix,
             sub_teams => sub_teams.iter().map(|t| minijinja::context! {
                 name => t.name,
             }).collect::<Vec<_>>(),
             datasets => datasets.iter().map(|d| minijinja::context! {
                 name => d.name,
+            }).collect::<Vec<_>>(),
+            members => members.iter().map(|u| minijinja::context! {
+                username => u.username,
             }).collect::<Vec<_>>(),
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -464,6 +495,179 @@ async fn user_profile(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Html(html))
+}
+
+// ─── Site Administration ─────────────────────────────────────────
+
+async fn admin_dashboard(
+    State(state): State<AppState>,
+    cookies: Cookies,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
+    if !admin {
+        return Redirect::to("/").into_response();
+    }
+
+    let user_count = auth::list_all_users(&state.store_manager.system).len();
+    let dataset_count = state.store_manager.list_datasets().len();
+    let team_count = auth::get_sub_teams(&state.store_manager.system, &[]).len() + 1; // +1 for root
+
+    let tmpl = match state.templates.get_template("admin/index.html") {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let html = match tmpl.render(minijinja::context! {
+        username => session.map(|s| s.username),
+        is_admin => true,
+        user_count => user_count,
+        dataset_count => dataset_count,
+        team_count => team_count,
+        schema_version => crate::migration::get_schema_version(&state.store_manager.system),
+    }) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    Html(html).into_response()
+}
+
+async fn admin_users(
+    State(state): State<AppState>,
+    cookies: Cookies,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    let admin = is_root_admin(&session, &state);
+    if !admin {
+        return Redirect::to("/").into_response();
+    }
+
+    let all_users = auth::list_all_users(&state.store_manager.system);
+
+    let tmpl = match state.templates.get_template("admin/users.html") {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let html = match tmpl.render(minijinja::context! {
+        username => session.map(|s| s.username),
+        is_admin => true,
+        users => all_users.iter().map(|u| minijinja::context! {
+            username => u.username,
+            teams => u.teams.iter().map(|t| &t.name).cloned().collect::<Vec<_>>().join(", "),
+        }).collect::<Vec<_>>(),
+        error => "",
+        success => "",
+    }) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    Html(html).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateUserForm {
+    username: String,
+    password: String,
+}
+
+async fn admin_create_user(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<CreateUserForm>,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        return Redirect::to("/").into_response();
+    }
+
+    let username = form.username.trim().to_string();
+    if username.is_empty() || form.password.is_empty() {
+        return Redirect::to("/_admin/users").into_response();
+    }
+
+    // Check if user already exists
+    if auth::find_user_by_username(&state.store_manager.system, &username).is_some() {
+        return Redirect::to("/_admin/users").into_response();
+    }
+
+    let password_hash = auth::hash_password(&form.password);
+    let user_iri = format!("https://mlipe.2mia.org/users/{}", username);
+
+    // Find root team IRI
+    let root_iri = auth::resolve_team_path(&state.store_manager.system, &[])
+        .unwrap_or_else(|| "<https://mlipe.2mia.org/teams/root>".to_string());
+    let root_clean = root_iri.trim_matches(|c| c == '<' || c == '>');
+
+    let insert = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        INSERT DATA {{
+            <{user_iri}> a mlipe:User ;
+                mlipe:username "{username}" ;
+                mlipe:passwordHash "{password_hash}" .
+            <{root_clean}> mlipe:hasMember <{user_iri}> .
+        }}
+        "#,
+    );
+    let _ = state.store_manager.system.update(&insert);
+
+    Redirect::to("/_admin/users").into_response()
+}
+
+#[derive(Deserialize)]
+struct DeleteUserForm {
+    username: String,
+}
+
+async fn admin_delete_user(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<DeleteUserForm>,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        return Redirect::to("/").into_response();
+    }
+
+    // Don't allow deleting yourself
+    if let Some(ref s) = session {
+        if s.username == form.username {
+            return Redirect::to("/_admin/users").into_response();
+        }
+    }
+
+    if let Some((user_iri, _)) = auth::find_user_by_username(&state.store_manager.system, &form.username) {
+        let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
+        let delete = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            DELETE WHERE {{ <{iri}> ?p ?o }}
+            "#,
+        );
+        let _ = state.store_manager.system.update(&delete);
+
+        // Also remove team memberships pointing to this user
+        let delete_refs = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            DELETE WHERE {{ ?team mlipe:hasMember <{iri}> }}
+            "#,
+        );
+        let _ = state.store_manager.system.update(&delete_refs);
+
+        let delete_admin = format!(
+            r#"
+            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            DELETE WHERE {{ ?team mlipe:hasAdmin <{iri}> }}
+            "#,
+        );
+        let _ = state.store_manager.system.update(&delete_admin);
+    }
+
+    Redirect::to("/_admin/users").into_response()
 }
 
 async fn teams_list(

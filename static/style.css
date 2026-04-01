@@ -122,3 +122,32 @@ h2 { margin-top: 1.5rem; margin-bottom: 0.5rem; }
 
 .actions-cell { white-space: nowrap; }
 .actions-cell a { margin-right: 0.5rem; }
+
+.admin-cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+.admin-card {
+    display: flex; flex-direction: column; gap: 0.3rem;
+    padding: 1rem 1.5rem; border: 1px solid #ddd; border-radius: 6px;
+    background: #fff; min-width: 140px; color: #222; text-decoration: none;
+}
+a.admin-card:hover { border-color: #0057b7; text-decoration: none; }
+.admin-card strong { font-size: 1.1rem; }
+
+.create-user-form { display: flex; gap: 0.5rem; align-items: center; }
+.create-user-form input {
+    padding: 0.4rem; border: 1px solid #ccc; border-radius: 4px;
+}
+.create-user-form button {
+    padding: 0.4rem 1rem; background: #0057b7; color: #fff;
+    border: none; border-radius: 4px; cursor: pointer;
+}
+.create-user-form button:hover { background: #004a9e; }
+
+.tabs { display: flex; gap: 0; border-bottom: 2px solid #ddd; margin-bottom: 1rem; }
+.tab {
+    padding: 0.5rem 1rem; color: #555; text-decoration: none;
+    border-bottom: 2px solid transparent; margin-bottom: -2px;
+}
+.tab:hover { color: #0057b7; text-decoration: none; }
+.tab.active { color: #0057b7; border-bottom-color: #0057b7; font-weight: 600; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
