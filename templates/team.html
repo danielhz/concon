@@ -67,7 +67,8 @@
                 {% if files %}
                 {% for f in files %}
                 <div class="paper-card">
-                    <h2><a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_view">{{ f.title if f.title else f.file_name }}</a></h2>
+                    {% set file_team_prefix = "/" ~ f.catalog_team if f.catalog_team and f.catalog_team != "root" else "" %}
+                    <h2><a href="{{ file_team_prefix }}/_files/{{ f.uuid }}/_view">{{ f.title if f.title else f.file_name }}</a></h2>
                     {% if f.authors %}
                     <p class="secondary-color">{{ f.authors }}</p>
                     {% endif %}
@@ -81,12 +82,12 @@
                     <p style="font-size: 0.9rem;">{{ f.abstract_snippet }}</p>
                     {% endif %}
                     <div class="paper-actions">
-                        <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}" class="button tiny">PDF</a>
+                        <a href="{{ file_team_prefix }}/_files/{{ f.uuid }}" class="button tiny">PDF</a>
                         {% if can_upload %}
-                        <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_edit" class="button tiny secondary">Edit</a>
+                        <a href="{{ file_team_prefix }}/_files/{{ f.uuid }}/_edit" class="button tiny secondary">Edit</a>
                         {% endif %}
                         {% if is_team_admin %}
-                        <form method="post" action="{{ team_url_prefix }}/_files/{{ f.uuid }}/_delete" class="inline-form"
+                        <form method="post" action="{{ file_team_prefix }}/_files/{{ f.uuid }}/_delete" class="inline-form"
                               onsubmit="return confirm('Delete this file?')">
                             <button type="submit" class="button tiny alert">Delete</button>
                         </form>
