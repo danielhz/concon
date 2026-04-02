@@ -54,88 +54,108 @@
     </div>
 
     <div class="tabs-panel" id="files">
-        {% if can_upload %}
-        <h3>Upload PDF</h3>
-        <form method="post" action="/_api/files/upload" enctype="multipart/form-data">
-            <input type="hidden" name="team_path" value="{{ team_path_for_files }}">
-            <div class="grid-x grid-margin-x">
-                <div class="cell medium-6">
-                    <input type="file" name="file" accept="application/pdf" required>
-                </div>
-                <div class="cell medium-6">
-                    <button type="submit" class="button">Upload</button>
-                </div>
-            </div>
-        </form>
-        {% endif %}
+        <ul class="tabs" data-tabs id="files-subtabs">
+            <li class="tabs-title is-active"><a href="#files-papers" aria-selected="true">Papers</a></li>
+            {% if can_upload %}
+            <li class="tabs-title"><a href="#files-upload">Upload</a></li>
+            {% endif %}
+            <li class="tabs-title"><a href="#files-query">SPARQL Query</a></li>
+        </ul>
 
-        {% if files %}
-        <h3>Files</h3>
-        <table class="hover">
-            <thead>
-                <tr>
-                    <th>Filename</th>
-                    <th>Title</th>
-                    <th>Authors</th>
-                    <th>Year</th>
-                    {% if can_upload %}
-                    <th>Actions</th>
-                    {% endif %}
-                </tr>
-            </thead>
-            <tbody>
+        <div class="tabs-content" data-tabs-content="files-subtabs">
+            <div class="tabs-panel is-active" id="files-papers">
+                {% if files %}
                 {% for f in files %}
-                <tr>
-                    <td><a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_view">{{ f.file_name }}</a></td>
-                    <td>{{ f.title }}</td>
-                    <td>{{ f.authors }}</td>
-                    <td>{{ f.year }}</td>
-                    {% if can_upload %}
-                    <td class="actions-cell">
-                        <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_edit">edit</a>
+                <div class="paper-card">
+                    <div class="paper-title">
+                        <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_view">{{ f.title if f.title else f.file_name }}</a>
+                    </div>
+                    {% if f.authors %}
+                    <div class="paper-authors">{{ f.authors }}</div>
+                    {% endif %}
+                    <div class="paper-meta">
+                        {% if f.year %}{{ f.year }}{% endif %}
+                        {% if f.journal %} &middot; {{ f.journal }}{% endif %}
+                        {% if f.doi %} &middot; DOI: <a href="https://doi.org/{{ f.doi }}">{{ f.doi }}</a>{% endif %}
+                    </div>
+                    {% if f.abstract_snippet %}
+                    <div class="paper-abstract">{{ f.abstract_snippet }}</div>
+                    {% endif %}
+                    <div class="paper-actions">
+                        <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}">PDF</a>
+                        {% if can_upload %}
+                        <a href="{{ team_url_prefix }}/_files/{{ f.uuid }}/_edit">Edit</a>
+                        {% endif %}
                         {% if is_team_admin %}
                         <form method="post" action="{{ team_url_prefix }}/_files/{{ f.uuid }}/_delete" class="inline-form"
                               onsubmit="return confirm('Delete this file?')">
-                            <button type="submit" class="btn-small-danger">delete</button>
+                            <button type="submit" class="btn-small-danger">Delete</button>
                         </form>
                         {% endif %}
-                    </td>
-                    {% endif %}
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-
-        {% if files_total_pages > 1 %}
-        <nav aria-label="Pagination">
-            <ul class="pagination">
-                {% if files_page > 1 %}
-                <li class="pagination-previous"><a href="?page={{ files_page - 1 }}#files">Previous</a></li>
-                {% else %}
-                <li class="pagination-previous disabled">Previous</li>
-                {% endif %}
-
-                {% for p in range(1, files_total_pages + 1) %}
-                    {% if p == files_page %}
-                    <li class="current">{{ p }}</li>
-                    {% else %}
-                    <li><a href="?page={{ p }}#files">{{ p }}</a></li>
-                    {% endif %}
+                    </div>
+                </div>
                 {% endfor %}
 
-                {% if files_page < files_total_pages %}
-                <li class="pagination-next"><a href="?page={{ files_page + 1 }}#files">Next</a></li>
-                {% else %}
-                <li class="pagination-next disabled">Next</li>
+                {% if files_total_pages > 1 %}
+                <nav aria-label="Pagination">
+                    <ul class="pagination">
+                        {% if files_page > 1 %}
+                        <li class="pagination-previous"><a href="?page={{ files_page - 1 }}#files">Previous</a></li>
+                        {% else %}
+                        <li class="pagination-previous disabled">Previous</li>
+                        {% endif %}
+                        {% for p in range(1, files_total_pages + 1) %}
+                            {% if p == files_page %}
+                            <li class="current">{{ p }}</li>
+                            {% else %}
+                            <li><a href="?page={{ p }}#files">{{ p }}</a></li>
+                            {% endif %}
+                        {% endfor %}
+                        {% if files_page < files_total_pages %}
+                        <li class="pagination-next"><a href="?page={{ files_page + 1 }}#files">Next</a></li>
+                        {% else %}
+                        <li class="pagination-next disabled">Next</li>
+                        {% endif %}
+                    </ul>
+                </nav>
+                <p>{{ files_total }} paper(s)</p>
                 {% endif %}
-            </ul>
-        </nav>
-        <p>{{ files_total }} file(s)</p>
-        {% endif %}
 
-        {% else %}
-        <p>No files uploaded yet.</p>
-        {% endif %}
+                {% else %}
+                <p>No papers uploaded yet.</p>
+                {% endif %}
+            </div>
+
+            {% if can_upload %}
+            <div class="tabs-panel" id="files-upload">
+                <form method="post" action="/_api/files/upload" enctype="multipart/form-data">
+                    <input type="hidden" name="team_path" value="{{ team_path_for_files }}">
+                    <label for="file-input">PDF file</label>
+                    <input type="file" id="file-input" name="file" accept="application/pdf" required>
+                    <button type="submit" class="button">Upload</button>
+                </form>
+            </div>
+            {% endif %}
+
+            <div class="tabs-panel" id="files-query">
+                <link rel="stylesheet" href="/static/vendor/yasgui.min.css">
+                <div id="files-yasgui"></div>
+                <script src="/static/vendor/yasgui.min.js"></script>
+                <script>
+                    document.addEventListener('DOMContentLoaded', function() {
+                        if (document.getElementById('files-yasgui')) {
+                            new Yasgui(document.getElementById('files-yasgui'), {
+                                requestConfig: {
+                                    endpoint: "{{ team_url_prefix|safe }}/_files/_query"
+                                },
+                                copyEndpointOnNewTab: false,
+                                persistenceId: "yasgui-files-{{ team_path_for_files|safe }}"
+                            });
+                        }
+                    });
+                </script>
+            </div>
+        </div>
     </div>
 
     {% if is_team_admin %}

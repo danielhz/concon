@@ -723,13 +723,15 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
         PREFIX dcterms: <http://purl.org/dc/terms/>
         PREFIX bibo: <http://purl.org/ontology/bibo/>
-        SELECT ?file ?fileName ?title ?authors ?year ?doi ?size ?uploadedAt WHERE {
+        SELECT ?file ?fileName ?title ?authors ?year ?doi ?abstract ?journal ?size ?uploadedAt WHERE {
             ?file a mlipe:File .
             OPTIONAL { ?file mlipe:fileName ?fileName }
             OPTIONAL { ?file dcterms:title ?title }
             OPTIONAL { ?file dcterms:creator ?authors }
             OPTIONAL { ?file dcterms:date ?year }
             OPTIONAL { ?file bibo:doi ?doi }
+            OPTIONAL { ?file dcterms:abstract ?abstract }
+            OPTIONAL { ?file dcterms:isPartOf ?journal }
             OPTIONAL { ?file mlipe:fileSize ?size }
             OPTIONAL { ?file mlipe:uploadedAt ?uploadedAt }
         }
@@ -750,6 +752,14 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
                 solution.get(name).map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default()
             };
 
+            // Truncate abstract for listing
+            let abstract_full = g("abstract");
+            let abstract_snippet = if abstract_full.len() > 300 {
+                format!("{}...", &abstract_full[..abstract_full.char_indices().take_while(|(i, _)| *i < 300).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(300)])
+            } else {
+                abstract_full
+            };
+
             files.push(minijinja::context! {
                 uuid => uuid,
                 file_name => g("fileName"),
@@ -757,6 +767,8 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
                 authors => g("authors"),
                 year => g("year"),
                 doi => g("doi"),
+                abstract_snippet => abstract_snippet,
+                journal => g("journal"),
                 size => g("size"),
                 uploaded_at => g("uploadedAt"),
             });

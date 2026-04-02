@@ -38,3 +38,29 @@ a.admin-card:hover { border-color: #1779ba; text-decoration: none; }
 
 /* Upload form */
 .upload-form { max-width: 480px; }
+
+/* ACM-style paper cards */
+.paper-card {
+    padding: 1rem 0; border-bottom: 1px solid #e0e0e0;
+}
+.paper-card:last-child { border-bottom: none; }
+.paper-title {
+    font-size: 1.1rem; font-weight: 600; margin-bottom: 0.25rem;
+}
+.paper-title a { color: #1779ba; }
+.paper-title a:hover { text-decoration: underline; }
+.paper-authors {
+    color: #555; font-size: 0.9rem; margin-bottom: 0.2rem;
+}
+.paper-meta {
+    color: #777; font-size: 0.85rem; margin-bottom: 0.4rem;
+}
+.paper-meta a { color: #777; text-decoration: underline; }
+.paper-abstract {
+    font-size: 0.9rem; color: #333; line-height: 1.5;
+    margin-bottom: 0.4rem;
+}
+.paper-actions {
+    font-size: 0.85rem; display: flex; align-items: center; gap: 0.75rem;
+}
+.paper-actions a { color: #1779ba; }
