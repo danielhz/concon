@@ -150,9 +150,19 @@ async fn content_get(
     State(state): State<AppState>,
     Path(path): Path<String>,
     Query(params): Query<sparql::SparqlQueryParams>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     cookies: Cookies,
 ) -> Response {
     let parsed = parse_path(&path);
+
+    // Extract page parameter from query string
+    let page: u32 = raw_query.as_deref()
+        .and_then(|q| {
+            q.split('&')
+                .find_map(|p| p.strip_prefix("page="))
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(1);
 
     // Require login for UI pages (team pages, dataset query UI, file browsing).
     // SPARQL endpoints remain accessible for programmatic access.
@@ -181,7 +191,7 @@ async fn content_get(
                     };
                 }
             }
-            match web::team_page(&state, team_segments, &cookies).await {
+            match web::team_page(&state, team_segments, &cookies, page).await {
                 Ok(html) => html.into_response(),
                 Err(e) => e.into_response(),
             }

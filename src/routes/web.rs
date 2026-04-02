@@ -48,7 +48,7 @@ async fn index(
 
     if session.is_some() {
         // Logged in: show root team page
-        return team_page(&state, &[], &cookies).await;
+        return team_page(&state, &[], &cookies, 1).await;
     }
 
     // Anonymous: show public landing page
@@ -374,6 +374,7 @@ pub async fn team_page(
     state: &AppState,
     team_segments: &[String],
     cookies: &Cookies,
+    files_page: u32,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let session = get_username(cookies, state);
     let admin = is_root_admin(&session, state);
@@ -433,7 +434,13 @@ pub async fn team_page(
 
     // Get files for this team
     let team_path_for_files = if team_segments.is_empty() { "root".to_string() } else { team_path.clone() };
-    let files = super::files::list_files_recursive(state, &team_path_for_files);
+    let all_files = super::files::list_files_recursive(state, &team_path_for_files);
+    let files_per_page: usize = 10;
+    let total_files = all_files.len();
+    let total_pages = ((total_files + files_per_page - 1) / files_per_page).max(1);
+    let current_page = (files_page as usize).clamp(1, total_pages);
+    let skip = (current_page - 1) * files_per_page;
+    let files: Vec<_> = all_files.into_iter().skip(skip).take(files_per_page).collect();
     let can_upload = is_team_admin || session.as_ref().map_or(false, |s| {
         team_iri.as_ref().map_or(false, |iri| {
             auth::can_access_files(&state.store_manager.system, &s.user_iri, iri, auth::FileAction::Write)
@@ -487,6 +494,9 @@ pub async fn team_page(
                 username => u.username,
             }).collect::<Vec<_>>(),
             files => files,
+            files_page => current_page,
+            files_total_pages => total_pages,
+            files_total => total_files,
             can_upload => can_upload,
             team_path_for_files => team_path_for_files,
         })
