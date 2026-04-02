@@ -632,15 +632,57 @@ pub fn list_files_recursive(state: &AppState, team_path: &str) -> Vec<minijinja:
     all_files.extend(list_files_from_catalog(state, team_path));
 
     // Scan for sub-team catalogs on disk
-    let catalogs_dir = state.store_manager.catalogs_dir();
-    if let Some(catalogs_dir) = catalogs_dir {
-        let prefix = format!("{}/", team_path);
-        if let Ok(entries) = std::fs::read_dir(&catalogs_dir) {
-            find_catalog_dirs(&catalogs_dir, &prefix, state, &mut all_files);
+    if let Some(catalogs_dir) = state.store_manager.catalogs_dir() {
+        if team_path == "root" {
+            // Root team: scan all top-level catalogs
+            scan_all_catalogs(&catalogs_dir, state, &mut all_files);
+        } else {
+            // Sub-team: scan children under this team's path
+            let target = catalogs_dir.join(team_path);
+            if target.exists() {
+                scan_subdirs(&target, team_path, state, &mut all_files);
+            }
         }
     }
 
     all_files
+}
+
+fn scan_all_catalogs(base: &std::path::Path, state: &AppState, files: &mut Vec<minijinja::Value>) {
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map_or(false, |t| t.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Check if this is an Oxigraph store (catalog)
+            if entry.path().join("CURRENT").exists() {
+                files.extend(list_files_from_catalog(state, &name));
+            }
+            // Also recurse into subdirectories
+            scan_subdirs(&entry.path(), &name, state, files);
+        }
+    }
+}
+
+fn scan_subdirs(dir: &std::path::Path, parent_path: &str, state: &AppState, files: &mut Vec<minijinja::Value>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map_or(false, |t| t.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip Oxigraph internal files
+            if name.starts_with('.') {
+                continue;
+            }
+            let child_path = format!("{}/{}", parent_path, name);
+            if entry.path().join("CURRENT").exists() {
+                files.extend(list_files_from_catalog(state, &child_path));
+            }
+            scan_subdirs(&entry.path(), &child_path, state, files);
+        }
+    }
 }
 
 fn find_catalog_dirs(base: &std::path::Path, prefix: &str, state: &AppState, files: &mut Vec<minijinja::Value>) {
