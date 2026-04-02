@@ -250,6 +250,12 @@ async fn content_get(
                 None => {
                     files::file_download(&state, &team_path, file_id).await
                 }
+                Some("_view") => {
+                    match files::file_view(&state, &team_path, &team_url_prefix, file_id, &cookies).await {
+                        Ok(html) => html.into_response(),
+                        Err(e) => e.into_response(),
+                    }
+                }
                 Some("_edit") => {
                     match files::file_edit_form(&state, &team_path, &team_url_prefix, file_id, &cookies).await {
                         Ok(html) => html.into_response(),

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}MLIPE - {{ title if title else file_name }}{% endblock %}
+
+{% block content %}
+<h1>{{ title if title else file_name }}</h1>
+
+{% if authors %}
+<p><strong>{{ authors }}</strong></p>
+{% endif %}
+
+<div class="grid-x grid-margin-x" style="margin-bottom: 1rem;">
+    <div class="cell">
+        <a href="{{ team_url_prefix }}/_files/{{ file_id }}" class="button small">Download PDF</a>
+        {% if can_edit %}
+        <a href="{{ team_url_prefix }}/_files/{{ file_id }}/_edit" class="button small secondary">Edit metadata</a>
+        {% endif %}
+    </div>
+</div>
+
+{% if abstract_text %}
+<h2>Abstract</h2>
+<p>{{ abstract_text }}</p>
+{% endif %}
+
+<h2>Details</h2>
+<table>
+    <tbody>
+        {% if year %}<tr><th>Year</th><td>{{ year }}</td></tr>{% endif %}
+        {% if doi %}<tr><th>DOI</th><td><a href="https://doi.org/{{ doi }}">{{ doi }}</a></td></tr>{% endif %}
+        {% if journal %}<tr><th>Journal</th><td>{{ journal }}</td></tr>{% endif %}
+        {% if volume %}<tr><th>Volume</th><td>{{ volume }}</td></tr>{% endif %}
+        {% if issue %}<tr><th>Issue</th><td>{{ issue }}</td></tr>{% endif %}
+        {% if pages %}<tr><th>Pages</th><td>{{ pages }}</td></tr>{% endif %}
+        {% if publisher %}<tr><th>Publisher</th><td>{{ publisher }}</td></tr>{% endif %}
+        {% if issn %}<tr><th>ISSN</th><td>{{ issn }}</td></tr>{% endif %}
+        {% if arxiv_id %}<tr><th>arXiv</th><td><a href="https://arxiv.org/abs/{{ arxiv_id }}">{{ arxiv_id }}</a></td></tr>{% endif %}
+        {% if keywords %}<tr><th>Keywords</th><td>{{ keywords }}</td></tr>{% endif %}
+        {% if affiliations %}<tr><th>Affiliations</th><td>{{ affiliations }}</td></tr>{% endif %}
+        <tr><th>Filename</th><td>{{ file_name }}</td></tr>
+    </tbody>
+</table>
+
+{% if references %}
+<h2>References ({{ references | length }})</h2>
+<ul class="no-bullet">
+    {% for ref in references %}
+    <li><a href="https://doi.org/{{ ref }}">{{ ref }}</a></li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+<p><a href="{{ team_url_prefix }}#files">Back to team</a></p>
+{% endblock %}

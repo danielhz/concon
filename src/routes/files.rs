@@ -208,6 +208,63 @@ pub async fn file_download(
     }
 }
 
+/// Show file metadata detail page (GET).
+pub async fn file_view(
+    state: &AppState,
+    team_path: &str,
+    team_url_prefix: &str,
+    file_id: &str,
+    cookies: &Cookies,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let session = get_username(cookies, state);
+    let admin = super::web::is_root_admin(&session, state);
+
+    let meta = get_file_all_metadata(state, team_path, file_id)
+        .ok_or((StatusCode::NOT_FOUND, format!("File '{}' not found", file_id)))?;
+
+    let references = get_file_references(state, team_path, file_id);
+
+    let can_edit = session.as_ref().map_or(false, |s| {
+        if let Some(team_iri) = resolve_team_iri(state, team_path) {
+            auth::can_access_files(&state.store_manager.system, &s.user_iri, &team_iri, FileAction::Write)
+        } else {
+            false
+        }
+    });
+
+    let tmpl = state.templates.get_template("file_view.html")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let html = tmpl
+        .render(minijinja::context! {
+            username => session.map(|s| s.username),
+            is_admin => admin,
+            team_path => team_path,
+            team_url_prefix => team_url_prefix,
+            file_id => file_id,
+            file_name => meta.file_name,
+            title => meta.title,
+            authors => meta.authors,
+            year => meta.year,
+            doi => meta.doi,
+            abstract_text => meta.abstract_text,
+            journal => meta.journal,
+            volume => meta.volume,
+            issue => meta.issue,
+            pages => meta.pages,
+            publisher => meta.publisher,
+            issn => meta.issn,
+            arxiv_id => meta.arxiv_id,
+            keywords => meta.keywords,
+            affiliations => meta.affiliations,
+            references => references,
+            can_edit => can_edit,
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Html(html))
+}
+
 /// Show file metadata edit form (GET).
 pub async fn file_edit_form(
     state: &AppState,
@@ -533,6 +590,38 @@ fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, fie
     }
 
     None
+}
+
+fn get_file_references(state: &AppState, team_path: &str, file_id: &str) -> Vec<String> {
+    let catalog = match state.store_manager.get_file_catalog(team_path) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let file_iri = format!("https://mlipe.2mia.org/files/{}", file_id);
+
+    let query = format!(
+        r#"
+        PREFIX bibo: <http://purl.org/ontology/bibo/>
+        SELECT ?ref WHERE {{
+            <{file_iri}> bibo:cites ?ref .
+        }}
+        "#,
+    );
+
+    let mut refs = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = catalog.query(&query) {
+        for solution in solutions.flatten() {
+            if let Some(val) = solution.get("ref") {
+                let iri = val.to_string();
+                let doi = iri.trim_matches(|c| c == '<' || c == '>')
+                    .strip_prefix("https://doi.org/")
+                    .unwrap_or(&iri)
+                    .to_string();
+                refs.push(doi);
+            }
+        }
+    }
+    refs
 }
 
 /// List files from this team's catalog and all sub-team catalogs recursively.
