@@ -334,11 +334,21 @@ async fn content_post(
         }
         ParsedPath::FileCatalog { team_segments, view } => {
             let team_path = team_path_str(team_segments);
-            let team_url_prefix = build_team_url_prefix(team_segments);
+            let body_str = String::from_utf8_lossy(&body).to_string();
             match view.as_deref() {
+                Some("_query") => {
+                    let catalog = state.store_manager.get_file_catalog(&team_path);
+                    match catalog {
+                        Some(store) => {
+                            match sparql::sparql_query_post_on_store(&store, &headers, &body_str).await {
+                                Ok(resp) => resp.into_response(),
+                                Err(e) => e.into_response(),
+                            }
+                        }
+                        None => (StatusCode::NOT_FOUND, "No file catalog for this team").into_response(),
+                    }
+                }
                 Some("_upload") => {
-                    // File uploads are handled by the dedicated route in web.rs
-                    // This path shouldn't be reached, but redirect just in case
                     (StatusCode::BAD_REQUEST, "Use the file upload form".to_string())
                         .into_response()
                 }

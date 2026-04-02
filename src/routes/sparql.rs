@@ -38,6 +38,33 @@ pub async fn sparql_query_get_on_store(
     execute_query_on_store(store, query)
 }
 
+/// Execute a SPARQL query (POST) directly on a given store (used for file catalogs).
+pub async fn sparql_query_post_on_store(
+    store: &Store,
+    headers: &HeaderMap,
+    body: &str,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let sparql = if content_type.starts_with("application/x-www-form-urlencoded") {
+        #[derive(Deserialize)]
+        struct FormParams {
+            query: Option<String>,
+        }
+        let params: FormParams = serde_urlencoded::from_str(body)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        params.query
+            .ok_or((StatusCode::BAD_REQUEST, "Missing 'query' parameter".into()))?
+    } else {
+        body.to_string()
+    };
+
+    execute_query_on_store(store, &sparql)
+}
+
 pub async fn sparql_query_post(
     state: &AppState,
     dataset_name: &str,
