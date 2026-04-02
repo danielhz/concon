@@ -1,0 +1,78 @@
+#+TITLE: MLIPE CLI Tools
+
+Administrative command-line tools located in =src/bin/=.  These tools
+operate directly on the data stores and require the service to be stopped
+first (except =test_grobid=).
+
+* Usage
+
+#+begin_example
+# Stop the service before running tools that modify data
+sudo systemctl stop kg.degu.cl.service
+
+# Run a tool
+cd ~/kg.degu.cl
+./target/release/<tool_name> [arguments]
+
+# Start the service again
+sudo systemctl start kg.degu.cl.service
+#+end_example
+
+* Tools
+
+** reset_password
+
+Reset a user's password.
+
+#+begin_example
+./target/release/reset_password <username> <new_password>
+#+end_example
+
+Example:
+#+begin_example
+./target/release/reset_password yuji.ikeda@imw.uni-stuttgart.de 1234
+#+end_example
+
+** migrate
+
+Run schema migrations.  Creates a backup of the data directory before
+applying changes.
+
+#+begin_example
+./target/release/migrate
+#+end_example
+
+** dump_system
+
+Dump all triples from the system store as Turtle.  Useful for debugging.
+
+#+begin_example
+./target/release/dump_system
+#+end_example
+
+** dump_catalog
+
+Dump all triples from a team's file catalog as Turtle.
+
+#+begin_example
+./target/release/dump_catalog <team_path>
+#+end_example
+
+Example:
+#+begin_example
+./target/release/dump_catalog MetaLearn
+#+end_example
+
+** test_grobid
+
+Test GROBID metadata extraction against a PDF file.  Does not require
+stopping the service.
+
+#+begin_example
+./target/release/test_grobid <pdf_path> [grobid_url]
+#+end_example
+
+Example:
+#+begin_example
+./target/release/test_grobid paper.pdf http://10.0.0.2:8070
+#+end_example
