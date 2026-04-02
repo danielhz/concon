@@ -769,6 +769,7 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
                 doi => g("doi"),
                 abstract_snippet => abstract_snippet,
                 journal => g("journal"),
+                catalog_team => team_path,
                 size => g("size"),
                 uploaded_at => g("uploadedAt"),
             });
