@@ -14,7 +14,7 @@ fn main() {
     let new_password = &args[2];
 
     let store = Store::open("data/system").expect("Failed to open system store");
-    let hash = mlipe::auth::hash_password(new_password);
+    let hash = concon::auth::hash_password(new_password);
 
     let query = format!(
         r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>

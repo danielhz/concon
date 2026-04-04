@@ -17,7 +17,7 @@ async fn main() {
     println!("GROBID URL: {}", grobid_url);
     println!();
 
-    match mlipe::grobid::extract_metadata(path, grobid_url).await {
+    match concon::grobid::extract_metadata(path, grobid_url).await {
         Ok(meta) => {
             println!("Title:        {}", meta.title);
             println!("Authors:      {}", meta.authors);

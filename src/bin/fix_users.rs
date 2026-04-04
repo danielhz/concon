@@ -97,7 +97,7 @@ fn main() {
 
     // 2. Add wenchuan.liu@imw.uni-stuttgart.de
     let new_username = "wenchuan.liu@imw.uni-stuttgart.de";
-    let password_hash = mlipe::auth::hash_password("1234");
+    let password_hash = concon::auth::hash_password("1234");
     let new_iri = format!("https://mlipe.2mia.org/users/{}", new_username);
 
     let ins = format!(

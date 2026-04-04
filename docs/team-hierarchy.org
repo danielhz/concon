@@ -1,4 +1,4 @@
-#+TITLE: MLIPE Team Hierarchy and Permissions
+#+TITLE: Concon Team Hierarchy and Permissions
 
 * Team tree structure
 

@@ -1,10 +1,11 @@
 [package]
-name = "mlipe"
+name = "concon"
 version = "0.1.0"
 edition = "2024"
-description = "Machine Learned Interatomic Potentials Environment"
+description = "Collaborative knowledge graph platform for teams — manage RDF datasets, share scientific papers, and query with SPARQL"
 license = "MIT"
-default-run = "mlipe"
+repository = "https://git.degu.cl/daniel/concon"
+default-run = "concon"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth;
 
-const DEFAULT_CONFIG_PATH: &str = "mlipe.toml";
+const DEFAULT_CONFIG_PATH: &str = "concon.toml";
 const DEFAULT_SYSTEM_DATA_PATH: &str = "system.ttl";
 
 #[derive(Debug, Deserialize, Serialize)]

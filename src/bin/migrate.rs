@@ -2,11 +2,11 @@
 //!
 //! Usage: ./target/release/migrate
 //!
-//! Reads mlipe.toml for the data directory, creates a backup, and runs
+//! Reads concon.toml for the data directory, creates a backup, and runs
 //! all pending migrations.
 
 // Import from the mlipe library crate.
-// Since this is a binary in the same package, we use `mlipe::` to access lib items.
+// Since this is a binary in the same package, we use `concon::` to access lib items.
 // However, mlipe is a binary crate (no lib.rs). We need to restructure slightly
 // or duplicate the config loading. For simplicity, we duplicate the config load.
 
@@ -17,7 +17,7 @@ use oxigraph::store::Store;
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let config_path = "mlipe.toml";
+    let config_path = "concon.toml";
     let config_contents = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(_) => {
@@ -59,16 +59,16 @@ fn main() {
         }
     };
 
-    let version = mlipe::migration::get_schema_version(&store);
+    let version = concon::migration::get_schema_version(&store);
     println!("Current schema version: {}", version);
-    println!("Target schema version:  {}", mlipe::migration::CURRENT_SCHEMA_VERSION);
+    println!("Target schema version:  {}", concon::migration::CURRENT_SCHEMA_VERSION);
 
-    if version == mlipe::migration::CURRENT_SCHEMA_VERSION {
+    if version == concon::migration::CURRENT_SCHEMA_VERSION {
         println!("Already up to date. Nothing to do.");
         return;
     }
 
-    match mlipe::migration::migrate(data_dir, &store) {
+    match concon::migration::migrate(data_dir, &store) {
         Ok(()) => {
             println!("Migration completed successfully.");
         }

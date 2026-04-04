@@ -1,8 +1,8 @@
-#+TITLE: MLIPE URL Design
+#+TITLE: Concon URL Design
 
 * Principles
 
-MLIPE uses a unified URL namespace where application views and content
+Concon uses a unified URL namespace where application views and content
 coexist. Two key ideas govern the design:
 
 1. *Application routes use the =_= prefix.* All built-in views and actions
@@ -19,7 +19,7 @@ The root team is implicit and does not appear in the URL path.
 
 The =_= prefix is inspired by Zope and Plone's =@@= and =++namespace++=
 conventions, which use special markers to distinguish traversal of content
-from invocation of views. MLIPE uses =_= instead of =@@= because:
+from invocation of views. Concon uses =_= instead of =@@= because:
 
 - It is shorter and easier to type.
 - It is a single character that is valid in URLs without encoding.
