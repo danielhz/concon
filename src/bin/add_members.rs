@@ -3,6 +3,8 @@
 use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
+use concon::store::{sparql_query, sparql_update};
+
 fn main() {
     let store = Store::open("data/system").expect("Failed to open system store");
 
@@ -15,7 +17,7 @@ fn main() {
     "#;
 
     let mut team_iri = String::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(team_query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,team_query) {
         for solution in solutions.flatten() {
             if let Some(t) = solution.get("team") {
                 team_iri = t.to_string().trim_matches(|c| c == '<' || c == '>').to_string();
@@ -39,7 +41,7 @@ fn main() {
     "#;
 
     let mut users = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(users_query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,users_query) {
         for solution in solutions.flatten() {
             if let (Some(user), Some(name)) = (solution.get("user"), solution.get("username")) {
                 let iri = user.to_string().trim_matches(|c| c == '<' || c == '>').to_string();
@@ -58,7 +60,7 @@ fn main() {
             }}
             "#,
         );
-        match store.update(&insert) {
+        match sparql_update(&store,&insert) {
             Ok(()) => println!("  Added {} to MetaLearn", username),
             Err(e) => eprintln!("  Failed to add {}: {}", username, e),
         }

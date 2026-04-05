@@ -7,6 +7,8 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
+use crate::store::{sparql_query, sparql_update};
+
 pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -88,7 +90,7 @@ pub fn find_user_by_username(store: &Store, username: &str) -> Option<(String, S
         username.replace('"', r#"\""#)
     );
 
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
         for solution in solutions.flatten() {
             let user_iri = solution.get("user")?.to_string();
             let hash = solution.get("hash")?.to_string();
@@ -111,7 +113,7 @@ pub fn update_password_hash(store: &Store, user_iri: &str, new_hash: &str) -> Re
         WHERE {{ <{iri}> mlipe:passwordHash ?old }}
         "#,
     );
-    store.update(&update).map_err(|e| e.to_string())
+    sparql_update(store,&update).map_err(|e| e.to_string())
 }
 
 /// Get all public datasets from the system store.
@@ -126,7 +128,7 @@ pub fn get_public_datasets(store: &Store) -> Vec<DatasetInfo> {
     "#;
 
     let mut datasets = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,query) {
         for solution in solutions.flatten() {
             if let Some(name) = solution.get("name") {
                 datasets.push(DatasetInfo {
@@ -151,8 +153,7 @@ pub fn is_root_admin(store: &Store, user_iri: &str) -> bool {
         }}
         "#,
     );
-    store
-        .query(&query)
+    sparql_query(store, &query)
         .ok()
         .and_then(|r| match r {
             QueryResults::Boolean(b) => Some(b),
@@ -214,7 +215,7 @@ pub fn get_user_datasets(store: &Store, user_iri: &str) -> Vec<DatasetInfo> {
 
 fn query_dataset_names(store: &Store, query: &str) -> Vec<DatasetInfo> {
     let mut datasets = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,query) {
         for solution in solutions.flatten() {
             if let Some(name) = solution.get("name") {
                 datasets.push(DatasetInfo {
@@ -241,7 +242,7 @@ pub fn get_user_admin_teams(store: &Store, user_iri: &str) -> Vec<TeamInfo> {
     );
 
     let mut teams = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
         for solution in solutions.flatten() {
             if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
                 teams.push(TeamInfo {
@@ -274,7 +275,7 @@ pub fn list_all_users(store: &Store) -> Vec<UserInfo> {
     "#;
 
     let mut users = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,query) {
         for solution in solutions.flatten() {
             if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
                 let iri = user.to_string();
@@ -302,7 +303,7 @@ pub fn get_user_member_teams(store: &Store, user_iri: &str) -> Vec<TeamInfo> {
     );
 
     let mut teams = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
         for solution in solutions.flatten() {
             if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
                 teams.push(TeamInfo {
@@ -370,7 +371,7 @@ pub fn can_access_files(store: &Store, user_iri: &str, team_iri: &str, action: F
             ASK {{ <{current_team}> mlipe:hasAdmin <{user_clean}> }}
             "#,
         );
-        if let Ok(QueryResults::Boolean(true)) = store.query(&admin_query) {
+        if let Ok(QueryResults::Boolean(true)) = sparql_query(store,&admin_query) {
             return true; // Admins can do anything
         }
 
@@ -382,7 +383,7 @@ pub fn can_access_files(store: &Store, user_iri: &str, team_iri: &str, action: F
                 ASK {{ <{current_team}> mlipe:hasMember <{user_clean}> }}
                 "#,
             );
-            if let Ok(QueryResults::Boolean(true)) = store.query(&member_query) {
+            if let Ok(QueryResults::Boolean(true)) = sparql_query(store,&member_query) {
                 return true;
             }
         }
@@ -403,7 +404,7 @@ pub fn can_access_files(store: &Store, user_iri: &str, team_iri: &str, action: F
             }}
             "#,
         );
-        if let Ok(QueryResults::Boolean(true)) = store.query(&role_query) {
+        if let Ok(QueryResults::Boolean(true)) = sparql_query(store,&role_query) {
             return true;
         }
 
@@ -419,7 +420,7 @@ pub fn can_access_files(store: &Store, user_iri: &str, team_iri: &str, action: F
         );
 
         let mut parent = None;
-        if let Ok(QueryResults::Solutions(solutions)) = store.query(&parent_query) {
+        if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&parent_query) {
             for solution in solutions.flatten() {
                 parent = solution.get("parent").map(|v| {
                     v.to_string().trim_matches(|c| c == '<' || c == '>').to_string()
@@ -459,7 +460,7 @@ pub fn can_see_team(store: &Store, user_iri: &str, team_iri: &str) -> bool {
             ASK {{ <{current_team}> mlipe:hasMember <{user_clean}> }}
             "#,
         );
-        if let Ok(QueryResults::Boolean(true)) = store.query(&member_query) {
+        if let Ok(QueryResults::Boolean(true)) = sparql_query(store,&member_query) {
             return true;
         }
 
@@ -470,7 +471,7 @@ pub fn can_see_team(store: &Store, user_iri: &str, team_iri: &str) -> bool {
             ASK {{ <{current_team}> mlipe:hasAdmin <{user_clean}> }}
             "#,
         );
-        if let Ok(QueryResults::Boolean(true)) = store.query(&admin_query) {
+        if let Ok(QueryResults::Boolean(true)) = sparql_query(store,&admin_query) {
             return true;
         }
 
@@ -486,7 +487,7 @@ pub fn can_see_team(store: &Store, user_iri: &str, team_iri: &str) -> bool {
         );
 
         let mut parent = None;
-        if let Ok(QueryResults::Solutions(solutions)) = store.query(&parent_query) {
+        if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&parent_query) {
             for solution in solutions.flatten() {
                 parent = solution.get("parent").map(|v| {
                     v.to_string().trim_matches(|c| c == '<' || c == '>').to_string()
@@ -537,7 +538,7 @@ pub fn get_team_members_recursive(store: &Store, team_iri: &str) -> Vec<UserInfo
     );
 
     let mut users = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
         for solution in solutions.flatten() {
             if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
                 users.push(UserInfo {
@@ -565,7 +566,7 @@ pub fn get_team_members(store: &Store, team_iri: &str) -> Vec<UserInfo> {
     );
 
     let mut users = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
         for solution in solutions.flatten() {
             if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
                 users.push(UserInfo {
@@ -594,7 +595,7 @@ pub fn resolve_team_path(store: &Store, segments: &[String]) -> Option<String> {
     "#;
 
     let mut current_iri = None;
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(root_query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,root_query) {
         for solution in solutions.flatten() {
             current_iri = solution.get("team").map(|v| v.to_string());
         }
@@ -617,7 +618,7 @@ pub fn resolve_team_path(store: &Store, segments: &[String]) -> Option<String> {
         );
 
         let mut found = None;
-        if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+        if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
             for solution in solutions.flatten() {
                 found = solution.get("team").map(|v| v.to_string());
             }
@@ -658,7 +659,7 @@ pub fn get_sub_teams(store: &Store, parent_segments: &[String]) -> Vec<TeamInfo>
     );
 
     let mut teams = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
         for solution in solutions.flatten() {
             if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
                 teams.push(TeamInfo {
@@ -692,7 +693,7 @@ pub fn get_team_datasets_by_path(store: &Store, team_segments: &[String]) -> Vec
     "#;
 
     let mut datasets = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,query) {
         for solution in solutions.flatten() {
             if let Some(name) = solution.get("name") {
                 let name = strip_literal(&name.to_string());

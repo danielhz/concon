@@ -4,8 +4,29 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use oxigraph::io::RdfFormat;
-use oxigraph::sparql::QueryResults;
+use oxigraph::sparql::{QueryEvaluationError, QueryResults, SparqlEvaluator, UpdateEvaluationError};
 use oxigraph::store::Store;
+
+/// Execute a SPARQL query on a store using the new SparqlEvaluator API.
+pub fn sparql_query<'a>(
+    store: &'a Store,
+    query: &str,
+) -> Result<QueryResults<'a>, QueryEvaluationError> {
+    SparqlEvaluator::new()
+        .parse_query(query)
+        .map_err(QueryEvaluationError::from)?
+        .on_store(store)
+        .execute()
+}
+
+/// Execute a SPARQL update on a store using the new SparqlEvaluator API.
+pub fn sparql_update(store: &Store, update: &str) -> Result<(), UpdateEvaluationError> {
+    SparqlEvaluator::new()
+        .parse_update(update)
+        .map_err(UpdateEvaluationError::from)?
+        .on_store(store)
+        .execute()
+}
 
 /// Manages multiple Oxigraph stores, one per dataset.
 pub struct StoreManager {
@@ -59,7 +80,7 @@ impl StoreManager {
         "#;
 
         let mut names = Vec::new();
-        if let Ok(QueryResults::Solutions(solutions)) = self.system.query(query) {
+        if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&self.system, query) {
             for solution in solutions.flatten() {
                 if let Some(name) = solution.get("name") {
                     let name = crate::auth::strip_literal(&name.to_string());
@@ -138,7 +159,7 @@ impl StoreManager {
             }}
             "#,
         );
-        let _ = self.system.update(&update);
+        let _ = sparql_update(&self.system, &update);
         Ok(())
     }
 
@@ -183,13 +204,12 @@ impl StoreManager {
             }}
             "#,
         );
-        self.system.update(&update).map_err(|e| e.to_string())
+        sparql_update(&self.system, &update).map_err(|e| e.to_string())
     }
 
     /// Check whether the system store has any triples.
     pub fn is_system_empty(&self) -> bool {
-        self.system
-            .query("ASK { ?s ?p ?o }")
+        sparql_query(&self.system, "ASK { ?s ?p ?o }")
             .ok()
             .and_then(|r| match r {
                 QueryResults::Boolean(b) => Some(!b),
@@ -276,5 +296,106 @@ impl StoreManager {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_store_query_new_api() {
+        let store = Store::new().unwrap();
+        sparql_update(
+            &store,
+            "INSERT DATA { <urn:s> <urn:p> <urn:o> }",
+        )
+        .unwrap();
+        let results = sparql_query(&store, "SELECT * WHERE { ?s ?p ?o }").unwrap();
+        let mut count = 0;
+        if let QueryResults::Solutions(solutions) = results {
+            for solution in solutions {
+                solution.unwrap();
+                count += 1;
+            }
+        }
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_store_update_transaction() {
+        let store = Store::new().unwrap();
+
+        // Commit persists
+        let mut tx = store.start_transaction().unwrap();
+        SparqlEvaluator::new()
+            .parse_update("INSERT DATA { <urn:s> <urn:p> <urn:o> }")
+            .unwrap()
+            .on_transaction(&mut tx)
+            .execute()
+            .unwrap();
+        tx.commit().unwrap();
+
+        let results = sparql_query(&store, "ASK { <urn:s> <urn:p> <urn:o> }").unwrap();
+        assert!(matches!(results, QueryResults::Boolean(true)));
+
+        // Drop (rollback) discards
+        let mut tx2 = store.start_transaction().unwrap();
+        SparqlEvaluator::new()
+            .parse_update("INSERT DATA { <urn:a> <urn:b> <urn:c> }")
+            .unwrap()
+            .on_transaction(&mut tx2)
+            .execute()
+            .unwrap();
+        drop(tx2); // rollback
+
+        let results = sparql_query(&store, "ASK { <urn:a> <urn:b> <urn:c> }").unwrap();
+        assert!(matches!(results, QueryResults::Boolean(false)));
+    }
+
+    #[test]
+    fn test_rdf12_quoted_triples() {
+        use oxigraph::io::RdfFormat;
+
+        let store = Store::new().unwrap();
+
+        // RDF 1.2 triple terms are loaded via Turtle I/O (rdf-12 feature).
+        // The <<( s p o )>> syntax is for triple terms (object position),
+        // while << s p o >> is for reified triples (subject position).
+        let turtle = r#"
+            @prefix concon: <https://concon.2mia.org/ontology#> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            <urn:s> <urn:p> <urn:o> .
+            << <urn:s> <urn:p> <urn:o> >> a concon:StatedTriple .
+        "#;
+        store
+            .load_from_reader(RdfFormat::Turtle, turtle.as_bytes())
+            .unwrap();
+
+        // Verify the base triple exists
+        let results = sparql_query(&store, "ASK { <urn:s> <urn:p> <urn:o> }").unwrap();
+        assert!(matches!(results, QueryResults::Boolean(true)));
+
+        // Verify the reified triple annotation was stored.
+        // Oxigraph 0.5 decomposes << s p o >> into a blank node with rdf:reifies.
+        let results = sparql_query(
+            &store,
+            r#"
+            PREFIX concon: <https://concon.2mia.org/ontology#>
+            SELECT ?reifier WHERE {
+                ?reifier a concon:StatedTriple .
+            }
+            "#,
+        )
+        .unwrap();
+
+        let mut found = false;
+        if let QueryResults::Solutions(solutions) = results {
+            for solution in solutions {
+                solution.unwrap();
+                found = true;
+            }
+        }
+        assert!(found, "Expected to find RDF 1.2 reified triple annotation");
     }
 }

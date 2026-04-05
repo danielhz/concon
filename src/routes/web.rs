@@ -7,6 +7,7 @@ use tower_cookies::Cookies;
 
 use crate::auth;
 use crate::state::AppState;
+use crate::store::{sparql_update};
 
 const SESSION_COOKIE: &str = "mlipe_session";
 
@@ -697,7 +698,7 @@ async fn admin_create_user(
         }}
         "#,
     );
-    let _ = state.store_manager.system.update(&insert);
+    let _ = sparql_update(&state.store_manager.system,&insert);
 
     Redirect::to("/_admin/users").into_response()
 }
@@ -732,7 +733,7 @@ async fn admin_delete_user(
             DELETE WHERE {{ <{iri}> ?p ?o }}
             "#,
         );
-        let _ = state.store_manager.system.update(&delete);
+        let _ = sparql_update(&state.store_manager.system,&delete);
 
         // Also remove team memberships pointing to this user
         let delete_refs = format!(
@@ -741,7 +742,7 @@ async fn admin_delete_user(
             DELETE WHERE {{ ?team mlipe:hasMember <{iri}> }}
             "#,
         );
-        let _ = state.store_manager.system.update(&delete_refs);
+        let _ = sparql_update(&state.store_manager.system,&delete_refs);
 
         let delete_admin = format!(
             r#"
@@ -749,7 +750,7 @@ async fn admin_delete_user(
             DELETE WHERE {{ ?team mlipe:hasAdmin <{iri}> }}
             "#,
         );
-        let _ = state.store_manager.system.update(&delete_admin);
+        let _ = sparql_update(&state.store_manager.system,&delete_admin);
     }
 
     Redirect::to("/_admin/users").into_response()
@@ -801,7 +802,7 @@ pub async fn create_team(
         }}
         "#,
     );
-    let _ = state.store_manager.system.update(&insert);
+    let _ = sparql_update(&state.store_manager.system,&insert);
 
     // Redirect back to the parent team page
     if parent_path.is_empty() {
@@ -927,7 +928,7 @@ async fn upload_file(
         "#,
     );
 
-    if let Err(e) = catalog.update(&insert) {
+    if let Err(e) = sparql_update(&catalog,&insert) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to insert metadata: {}", e)).into_response();
     }
 
@@ -1007,7 +1008,7 @@ async fn upload_file(
                     affiliations = esc(&meta.affiliations),
                 );
 
-                match catalog_clone.update(&update) {
+                match sparql_update(&catalog_clone,&update) {
                     Ok(()) => tracing::info!("GROBID: extracted metadata for {}: '{}'", uuid_clone, meta.title),
                     Err(e) => tracing::warn!("GROBID: failed to update metadata: {}", e),
                 }
@@ -1023,7 +1024,7 @@ async fn upload_file(
                         }}
                         "#,
                     );
-                    let _ = catalog_clone.update(&ref_insert);
+                    let _ = sparql_update(&catalog_clone,&ref_insert);
                 }
 
             }

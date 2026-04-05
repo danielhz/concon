@@ -2,6 +2,8 @@
 
 use oxigraph::store::Store;
 
+use concon::store::{sparql_query, sparql_update};
+
 fn main() {
     let store = Store::open("data/system").expect("Failed to open system store");
 
@@ -16,7 +18,7 @@ fn main() {
         }
     "#;
 
-    match store.update(update) {
+    match sparql_update(&store,update) {
         Ok(()) => println!("Inserted dataset metadata for MetaLearn/MLIPs Literature"),
         Err(e) => eprintln!("Failed: {}", e),
     }
@@ -30,7 +32,7 @@ fn main() {
             ?team mlipe:ownsDataset ?ds .
         }
     "#;
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,query) {
         for solution in solutions.flatten() {
             println!("  dataset: {:?}, team: {:?}",
                 solution.get("name"), solution.get("team"));

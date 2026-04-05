@@ -3,11 +3,12 @@ use axum::response::IntoResponse;
 use oxigraph::io::RdfFormat;
 use oxigraph::model::{GraphNameRef, QuadRef};
 use oxigraph::sparql::QueryResults;
-use oxigraph::sparql::results::QueryResultsFormat;
+use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
 use oxigraph::store::Store;
 use serde::Deserialize;
 
 use crate::state::AppState;
+use crate::store::{sparql_query, sparql_update};
 
 #[derive(Deserialize)]
 pub struct SparqlQueryParams {
@@ -100,12 +101,11 @@ pub async fn sparql_query_post(
         .get_dataset(dataset_name)
         .ok_or((StatusCode::NOT_FOUND, format!("Dataset '{}' not found", dataset_name)))?;
 
-    match store.query(&sparql) {
+    match sparql_query(&store, &sparql) {
         Ok(results) => format_results(results, &store),
         Err(_query_err) => {
             // Not a valid query — try as a SPARQL Update
-            store
-                .update(&sparql)
+            sparql_update(&store, &sparql)
                 .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
             let mut headers = HeaderMap::new();
@@ -128,8 +128,7 @@ fn execute_query(
         .get_dataset(dataset_name)
         .ok_or((StatusCode::NOT_FOUND, format!("Dataset '{}' not found", dataset_name)))?;
 
-    let results = store
-        .query(query)
+    let results = sparql_query(&store, query)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     format_results(results, &store)
@@ -139,8 +138,7 @@ fn execute_query_on_store(
     store: &Store,
     query: &str,
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {
-    let results = store
-        .query(query)
+    let results = sparql_query(store, query)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     format_results(results, store)
 }
@@ -151,39 +149,64 @@ fn format_results(
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {
     let mut headers = HeaderMap::new();
 
-    let body = if let QueryResults::Graph(triples) = results {
-        headers.insert(
-            header::CONTENT_TYPE,
-            "text/turtle".parse().unwrap(),
-        );
-        for triple in triples {
-            let triple = triple.map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            })?;
-            store
-                .insert(QuadRef::new(
-                    triple.subject.as_ref(),
-                    triple.predicate.as_ref(),
-                    triple.object.as_ref(),
-                    GraphNameRef::DefaultGraph,
-                ))
+    let body = match results {
+        QueryResults::Graph(triples) => {
+            headers.insert(
+                header::CONTENT_TYPE,
+                "text/turtle".parse().unwrap(),
+            );
+            for triple in triples {
+                let triple = triple.map_err(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })?;
+                store
+                    .insert(QuadRef::new(
+                        triple.subject.as_ref(),
+                        triple.predicate.as_ref(),
+                        triple.object.as_ref(),
+                        GraphNameRef::DefaultGraph,
+                    ))
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            }
+            let buf = store
+                .dump_graph_to_writer(GraphNameRef::DefaultGraph, RdfFormat::Turtle, Vec::new())
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            String::from_utf8(buf)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         }
-        let buf = store
-            .dump_graph_to_writer(GraphNameRef::DefaultGraph, RdfFormat::Turtle, Vec::new())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        String::from_utf8(buf)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    } else {
-        headers.insert(
-            header::CONTENT_TYPE,
-            "application/sparql-results+json".parse().unwrap(),
-        );
-        let buf = results
-            .write(Vec::new(), QueryResultsFormat::Json)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        String::from_utf8(buf)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        QueryResults::Boolean(value) => {
+            headers.insert(
+                header::CONTENT_TYPE,
+                "application/sparql-results+json".parse().unwrap(),
+            );
+            let serializer = QueryResultsSerializer::from_format(QueryResultsFormat::Json);
+            let buf = serializer
+                .serialize_boolean_to_writer(Vec::new(), value)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            String::from_utf8(buf)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        }
+        QueryResults::Solutions(solutions) => {
+            headers.insert(
+                header::CONTENT_TYPE,
+                "application/sparql-results+json".parse().unwrap(),
+            );
+            let serializer = QueryResultsSerializer::from_format(QueryResultsFormat::Json);
+            let mut writer = serializer
+                .serialize_solutions_to_writer(Vec::new(), solutions.variables().to_vec())
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            for solution in solutions {
+                let solution = solution.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                writer
+                    .serialize(&solution)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            }
+            let buf = writer
+                .finish()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            String::from_utf8(buf)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        }
     };
 
     Ok((headers, body))
@@ -219,8 +242,7 @@ pub async fn sparql_update_post(
         body.to_string()
     };
 
-    store
-        .update(&update)
+    sparql_update(&store, &update)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)

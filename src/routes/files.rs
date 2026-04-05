@@ -4,6 +4,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use oxigraph::sparql::QueryResults;
 use serde::Deserialize;
+
+use crate::store::{sparql_query, sparql_update};
 use tower_cookies::Cookies;
 use uuid::Uuid;
 
@@ -175,7 +177,7 @@ pub async fn files_upload(
         "#,
     );
 
-    if let Err(e) = catalog.update(&insert) {
+    if let Err(e) = sparql_update(&catalog,&insert) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to insert metadata: {}", e)).into_response();
     }
 
@@ -426,7 +428,7 @@ pub async fn file_edit_submit(
         "#,
     );
 
-    if let Err(e) = catalog.update(&update) {
+    if let Err(e) = sparql_update(&catalog,&update) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update: {}", e)).into_response();
     }
 
@@ -466,7 +468,7 @@ pub async fn file_delete(
             }}
             "#,
         );
-        let _ = catalog.update(&delete);
+        let _ = sparql_update(&catalog,&delete);
     }
 
     // Remove from disk
@@ -542,7 +544,7 @@ fn get_file_all_metadata(state: &AppState, team_path: &str, file_id: &str) -> Op
         sol.get(name).map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default()
     };
 
-    if let Ok(QueryResults::Solutions(solutions)) = catalog.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,&query) {
         for solution in solutions.flatten() {
             return Some(FileMeta {
                 file_name: g(&solution, "fileName"),
@@ -583,7 +585,7 @@ fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, fie
         "#,
     );
 
-    if let Ok(QueryResults::Solutions(solutions)) = catalog.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,&query) {
         for solution in solutions.flatten() {
             return solution.get("val").map(|v| auth::strip_literal(&v.to_string()));
         }
@@ -609,7 +611,7 @@ fn get_file_references(state: &AppState, team_path: &str, file_id: &str) -> Vec<
     );
 
     let mut refs = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = catalog.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,&query) {
         for solution in solutions.flatten() {
             if let Some(val) = solution.get("ref") {
                 let iri = val.to_string();
@@ -739,7 +741,7 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
     "#;
 
     let mut files = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = catalog.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,query) {
         for solution in solutions.flatten() {
             let file_iri = solution.get("file").map(|v| v.to_string()).unwrap_or_default();
             let uuid = file_iri

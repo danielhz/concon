@@ -4,6 +4,7 @@ use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
 use crate::auth;
+use crate::store::{sparql_query, sparql_update};
 
 /// The schema version expected by this build of the application.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -23,7 +24,7 @@ pub fn get_schema_version(store: &Store) -> u32 {
         "#,
     );
 
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
         for solution in solutions.flatten() {
             if let Some(val) = solution.get("v") {
                 let s = auth::strip_literal(&val.to_string());
@@ -142,7 +143,7 @@ fn set_schema_version(store: &Store, version: u32) -> Result<(), String> {
         }}
         "#,
     );
-    let _ = store.update(&delete);
+    let _ = sparql_update(store,&delete);
 
     // Insert new version
     let insert = format!(
@@ -153,7 +154,7 @@ fn set_schema_version(store: &Store, version: u32) -> Result<(), String> {
         }}
         "#,
     );
-    store.update(&insert).map_err(|e| e.to_string())
+    sparql_update(store,&insert).map_err(|e| e.to_string())
 }
 
 /// Migration 1→2: Qualify dataset names with owning team path.
@@ -176,7 +177,7 @@ fn migrate_v1_to_v2(data_dir: &str, store: &Store) -> Result<(), String> {
 
     let mut renames: Vec<(String, String, String)> = Vec::new(); // (ds_iri, old_name, new_name)
 
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,query) {
         for solution in solutions.flatten() {
             let ds_iri = solution.get("ds").map(|v| v.to_string()).unwrap_or_default();
             let old_name = solution.get("name").map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default();
@@ -220,7 +221,7 @@ fn migrate_v1_to_v2(data_dir: &str, store: &Store) -> Result<(), String> {
             WHERE {{ <{ds_iri_clean}> mlipe:datasetName "{old_name}" }}
             "#,
         );
-        store.update(&update).map_err(|e| format!("Failed to update dataset name: {}", e))?;
+        sparql_update(store,&update).map_err(|e| format!("Failed to update dataset name: {}", e))?;
     }
 
     tracing::info!("  Migrated {} dataset(s)", renames.len());
@@ -251,7 +252,7 @@ fn resolve_team_path_from_iri(store: &Store, team_iri: &str) -> String {
         let mut name = None;
         let mut parent = None;
 
-        if let Ok(QueryResults::Solutions(solutions)) = store.query(&query) {
+        if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store,&query) {
             for solution in solutions.flatten() {
                 name = solution.get("name").map(|v| auth::strip_literal(&v.to_string()));
                 parent = solution.get("parent").map(|v| {

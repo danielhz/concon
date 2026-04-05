@@ -4,6 +4,8 @@
 use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
+use concon::store::{sparql_query, sparql_update};
+
 fn main() {
     let data_dir = std::env::var("MLIPE_DATA_DIR").unwrap_or_else(|_| "data".into());
     let system_path = format!("{}/system", data_dir);
@@ -21,7 +23,7 @@ fn main() {
     "#;
 
     let mut datasets = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,query) {
         for solution in solutions.flatten() {
             let ds_iri = solution.get("ds").unwrap().to_string();
             let name = solution.get("name").unwrap().to_string();
@@ -48,7 +50,7 @@ fn main() {
     "#;
 
     let mut already_owned = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(check_query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,check_query) {
         for solution in solutions.flatten() {
             already_owned.push(solution.get("ds").unwrap().to_string());
         }
@@ -72,7 +74,7 @@ fn main() {
             "#,
         );
 
-        match store.update(&update) {
+        match sparql_update(&store,&update) {
             Ok(()) => println!("  OK assigned {} to root team", name),
             Err(e) => println!("  ERROR on {}: {}", name, e),
         }
