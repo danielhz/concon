@@ -1,5 +1,5 @@
-use axum::{Router, routing::get};
 use axum::http::StatusCode;
+use axum::{Router, routing::get};
 
 use crate::state::AppState;
 

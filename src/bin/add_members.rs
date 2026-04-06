@@ -17,10 +17,13 @@ fn main() {
     "#;
 
     let mut team_iri = String::new();
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,team_query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store, team_query) {
         for solution in solutions.flatten() {
             if let Some(t) = solution.get("team") {
-                team_iri = t.to_string().trim_matches(|c| c == '<' || c == '>').to_string();
+                team_iri = t
+                    .to_string()
+                    .trim_matches(|c| c == '<' || c == '>')
+                    .to_string();
             }
         }
     }
@@ -41,10 +44,13 @@ fn main() {
     "#;
 
     let mut users = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,users_query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store, users_query) {
         for solution in solutions.flatten() {
             if let (Some(user), Some(name)) = (solution.get("user"), solution.get("username")) {
-                let iri = user.to_string().trim_matches(|c| c == '<' || c == '>').to_string();
+                let iri = user
+                    .to_string()
+                    .trim_matches(|c| c == '<' || c == '>')
+                    .to_string();
                 let name = name.to_string();
                 users.push((iri, name));
             }
@@ -60,7 +66,7 @@ fn main() {
             }}
             "#,
         );
-        match sparql_update(&store,&insert) {
+        match sparql_update(&store, &insert) {
             Ok(()) => println!("  Added {} to MetaLearn", username),
             Err(e) => eprintln!("  Failed to add {}: {}", username, e),
         }

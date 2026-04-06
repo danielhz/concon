@@ -9,9 +9,9 @@ use crate::store::{sparql_query, sparql_update};
 use tower_cookies::Cookies;
 use uuid::Uuid;
 
+use super::web::get_username;
 use crate::auth::{self, FileAction};
 use crate::state::AppState;
-use super::web::get_username;
 
 /// Browse files for a team.
 pub async fn files_browse(
@@ -27,7 +27,12 @@ pub async fn files_browse(
 
     let can_upload = session.as_ref().map_or(false, |s| {
         if let Some(team_iri) = resolve_team_iri(state, team_path) {
-            auth::can_access_files(&state.store_manager.system, &s.user_iri, &team_iri, FileAction::Write)
+            auth::can_access_files(
+                &state.store_manager.system,
+                &s.user_iri,
+                &team_iri,
+                FileAction::Write,
+            )
         } else {
             false
         }
@@ -35,7 +40,12 @@ pub async fn files_browse(
 
     let can_delete = session.as_ref().map_or(false, |s| {
         if let Some(team_iri) = resolve_team_iri(state, team_path) {
-            auth::can_access_files(&state.store_manager.system, &s.user_iri, &team_iri, FileAction::Delete)
+            auth::can_access_files(
+                &state.store_manager.system,
+                &s.user_iri,
+                &team_iri,
+                FileAction::Delete,
+            )
         } else {
             false
         }
@@ -47,10 +57,14 @@ pub async fn files_browse(
     } else {
         team_path.split('/').filter(|s| !s.is_empty()).collect()
     };
-    let breadcrumbs: Vec<_> = team_segments.iter().enumerate().map(|(i, name)| {
-        let url = format!("/{}", team_segments[..=i].join("/"));
-        minijinja::context! { name => *name, url => url }
-    }).collect();
+    let breadcrumbs: Vec<_> = team_segments
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let url = format!("/{}", team_segments[..=i].join("/"));
+            minijinja::context! { name => *name, url => url }
+        })
+        .collect();
 
     let tmpl = state
         .templates
@@ -91,7 +105,12 @@ pub async fn files_upload(
         None => return (StatusCode::NOT_FOUND, "Team not found").into_response(),
     };
 
-    if !auth::can_access_files(&state.store_manager.system, &session.user_iri, &team_iri, FileAction::Write) {
+    if !auth::can_access_files(
+        &state.store_manager.system,
+        &session.user_iri,
+        &team_iri,
+        FileAction::Write,
+    ) {
         return (StatusCode::FORBIDDEN, "Not authorized to upload files").into_response();
     }
 
@@ -107,19 +126,37 @@ pub async fn files_upload(
         match name.as_str() {
             "file" => {
                 file_name = field.file_name().unwrap_or("unknown.pdf").to_string();
-                let content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
                 if content_type != "application/pdf" {
-                    return (StatusCode::BAD_REQUEST, "Only PDF files are accepted").into_response();
+                    return (StatusCode::BAD_REQUEST, "Only PDF files are accepted")
+                        .into_response();
                 }
                 match field.bytes().await {
                     Ok(bytes) => file_data = Some(bytes.to_vec()),
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("Failed to read file: {}", e)).into_response(),
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Failed to read file: {}", e),
+                        )
+                            .into_response();
+                    }
                 }
             }
-            "title" => { title = field.text().await.unwrap_or_default(); }
-            "authors" => { authors = field.text().await.unwrap_or_default(); }
-            "year" => { year = field.text().await.unwrap_or_default(); }
-            "doi" => { doi = field.text().await.unwrap_or_default(); }
+            "title" => {
+                title = field.text().await.unwrap_or_default();
+            }
+            "authors" => {
+                authors = field.text().await.unwrap_or_default();
+            }
+            "year" => {
+                year = field.text().await.unwrap_or_default();
+            }
+            "doi" => {
+                doi = field.text().await.unwrap_or_default();
+            }
             _ => {}
         }
     }
@@ -135,18 +172,32 @@ pub async fn files_upload(
     // Save file to disk
     let file_dir = state.files_dir.join(team_path);
     if let Err(e) = std::fs::create_dir_all(&file_dir) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create directory: {}", e)).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create directory: {}", e),
+        )
+            .into_response();
     }
 
     let file_path = file_dir.join(format!("{}.pdf", uuid));
     if let Err(e) = std::fs::write(&file_path, &data) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write file: {}", e)).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write file: {}", e),
+        )
+            .into_response();
     }
 
     // Insert metadata into catalog
     let catalog = match state.store_manager.get_or_create_file_catalog(team_path) {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to open catalog: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to open catalog: {}", e),
+            )
+                .into_response();
+        }
     };
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -177,24 +228,28 @@ pub async fn files_upload(
         "#,
     );
 
-    if let Err(e) = sparql_update(&catalog,&insert) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to insert metadata: {}", e)).into_response();
+    if let Err(e) = sparql_update(&catalog, &insert) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to insert metadata: {}", e),
+        )
+            .into_response();
     }
 
     Redirect::to(&format!("{}/_files", team_url_prefix)).into_response()
 }
 
 /// Download a file by UUID.
-pub async fn file_download(
-    state: &AppState,
-    team_path: &str,
-    file_id: &str,
-) -> Response {
+pub async fn file_download(state: &AppState, team_path: &str, file_id: &str) -> Response {
     // Get original filename from catalog
-    let original_name = get_file_metadata_field(state, team_path, file_id, "mlipe:fileName", "mlipe")
-        .unwrap_or_else(|| format!("{}.pdf", file_id));
+    let original_name =
+        get_file_metadata_field(state, team_path, file_id, "mlipe:fileName", "mlipe")
+            .unwrap_or_else(|| format!("{}.pdf", file_id));
 
-    let file_path = state.files_dir.join(team_path).join(format!("{}.pdf", file_id));
+    let file_path = state
+        .files_dir
+        .join(team_path)
+        .join(format!("{}.pdf", file_id));
 
     match tokio::fs::read(&file_path).await {
         Ok(data) => {
@@ -202,7 +257,9 @@ pub async fn file_download(
             headers.insert(header::CONTENT_TYPE, "application/pdf".parse().unwrap());
             headers.insert(
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", original_name).parse().unwrap(),
+                format!("attachment; filename=\"{}\"", original_name)
+                    .parse()
+                    .unwrap(),
             );
             (headers, Body::from(data)).into_response()
         }
@@ -221,20 +278,29 @@ pub async fn file_view(
     let session = get_username(cookies, state);
     let admin = super::web::is_root_admin(&session, state);
 
-    let meta = get_file_all_metadata(state, team_path, file_id)
-        .ok_or((StatusCode::NOT_FOUND, format!("File '{}' not found", file_id)))?;
+    let meta = get_file_all_metadata(state, team_path, file_id).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("File '{}' not found", file_id),
+    ))?;
 
     let references = get_file_references(state, team_path, file_id);
 
     let can_edit = session.as_ref().map_or(false, |s| {
         if let Some(team_iri) = resolve_team_iri(state, team_path) {
-            auth::can_access_files(&state.store_manager.system, &s.user_iri, &team_iri, FileAction::Write)
+            auth::can_access_files(
+                &state.store_manager.system,
+                &s.user_iri,
+                &team_iri,
+                FileAction::Write,
+            )
         } else {
             false
         }
     });
 
-    let tmpl = state.templates.get_template("file_view.html")
+    let tmpl = state
+        .templates
+        .get_template("file_view.html")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let html = tmpl
@@ -283,14 +349,23 @@ pub async fn file_edit_form(
     let team_iri = resolve_team_iri(state, team_path)
         .ok_or((StatusCode::NOT_FOUND, "Team not found".into()))?;
 
-    if !auth::can_access_files(&state.store_manager.system, &session.user_iri, &team_iri, FileAction::Write) {
+    if !auth::can_access_files(
+        &state.store_manager.system,
+        &session.user_iri,
+        &team_iri,
+        FileAction::Write,
+    ) {
         return Err((StatusCode::FORBIDDEN, "Not authorized".into()));
     }
 
-    let meta = get_file_all_metadata(state, team_path, file_id)
-        .ok_or((StatusCode::NOT_FOUND, format!("File '{}' not found", file_id)))?;
+    let meta = get_file_all_metadata(state, team_path, file_id).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("File '{}' not found", file_id),
+    ))?;
 
-    let tmpl = state.templates.get_template("file_edit.html")
+    let tmpl = state
+        .templates
+        .get_template("file_edit.html")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let html = tmpl
@@ -357,7 +432,12 @@ pub async fn file_edit_submit(
         None => return (StatusCode::NOT_FOUND, "Team not found").into_response(),
     };
 
-    if !auth::can_access_files(&state.store_manager.system, &session.user_iri, &team_iri, FileAction::Write) {
+    if !auth::can_access_files(
+        &state.store_manager.system,
+        &session.user_iri,
+        &team_iri,
+        FileAction::Write,
+    ) {
         return (StatusCode::FORBIDDEN, "Not authorized").into_response();
     }
 
@@ -428,8 +508,12 @@ pub async fn file_edit_submit(
         "#,
     );
 
-    if let Err(e) = sparql_update(&catalog,&update) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update: {}", e)).into_response();
+    if let Err(e) = sparql_update(&catalog, &update) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to update: {}", e),
+        )
+            .into_response();
     }
 
     Redirect::to(&format!("{}/_files", team_url_prefix)).into_response()
@@ -453,7 +537,12 @@ pub async fn file_delete(
         None => return (StatusCode::NOT_FOUND, "Team not found").into_response(),
     };
 
-    if !auth::can_access_files(&state.store_manager.system, &session.user_iri, &team_iri, FileAction::Delete) {
+    if !auth::can_access_files(
+        &state.store_manager.system,
+        &session.user_iri,
+        &team_iri,
+        FileAction::Delete,
+    ) {
         return (StatusCode::FORBIDDEN, "Not authorized to delete files").into_response();
     }
 
@@ -468,11 +557,14 @@ pub async fn file_delete(
             }}
             "#,
         );
-        let _ = sparql_update(&catalog,&delete);
+        let _ = sparql_update(&catalog, &delete);
     }
 
     // Remove from disk
-    let file_path = state.files_dir.join(team_path).join(format!("{}.pdf", file_id));
+    let file_path = state
+        .files_dir
+        .join(team_path)
+        .join(format!("{}.pdf", file_id));
     let _ = std::fs::remove_file(&file_path);
 
     Redirect::to(&format!("{}/_files", team_url_prefix)).into_response()
@@ -541,11 +633,13 @@ fn get_file_all_metadata(state: &AppState, team_path: &str, file_id: &str) -> Op
     );
 
     let g = |sol: &oxigraph::sparql::QuerySolution, name: &str| -> String {
-        sol.get(name).map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default()
+        sol.get(name)
+            .map(|v| auth::strip_literal(&v.to_string()))
+            .unwrap_or_default()
     };
 
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,&query) {
-        for solution in solutions.flatten() {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog, &query) {
+        if let Some(solution) = solutions.flatten().next() {
             return Some(FileMeta {
                 file_name: g(&solution, "fileName"),
                 title: g(&solution, "title"),
@@ -569,7 +663,13 @@ fn get_file_all_metadata(state: &AppState, team_path: &str, file_id: &str) -> Op
     None
 }
 
-fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, field: &str, _ns_hint: &str) -> Option<String> {
+fn get_file_metadata_field(
+    state: &AppState,
+    team_path: &str,
+    file_id: &str,
+    field: &str,
+    _ns_hint: &str,
+) -> Option<String> {
     let catalog = state.store_manager.get_file_catalog(team_path)?;
     let file_iri = format!("https://mlipe.2mia.org/files/{}", file_id);
 
@@ -585,9 +685,11 @@ fn get_file_metadata_field(state: &AppState, team_path: &str, file_id: &str, fie
         "#,
     );
 
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,&query) {
-        for solution in solutions.flatten() {
-            return solution.get("val").map(|v| auth::strip_literal(&v.to_string()));
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog, &query) {
+        if let Some(solution) = solutions.flatten().next() {
+            return solution
+                .get("val")
+                .map(|v| auth::strip_literal(&v.to_string()));
         }
     }
 
@@ -611,11 +713,12 @@ fn get_file_references(state: &AppState, team_path: &str, file_id: &str) -> Vec<
     );
 
     let mut refs = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog, &query) {
         for solution in solutions.flatten() {
             if let Some(val) = solution.get("ref") {
                 let iri = val.to_string();
-                let doi = iri.trim_matches(|c| c == '<' || c == '>')
+                let doi = iri
+                    .trim_matches(|c| c == '<' || c == '>')
                     .strip_prefix("https://doi.org/")
                     .unwrap_or(&iri)
                     .to_string();
@@ -667,7 +770,12 @@ fn scan_all_catalogs(base: &std::path::Path, state: &AppState, files: &mut Vec<m
     }
 }
 
-fn scan_subdirs(dir: &std::path::Path, parent_path: &str, state: &AppState, files: &mut Vec<minijinja::Value>) {
+fn scan_subdirs(
+    dir: &std::path::Path,
+    parent_path: &str,
+    state: &AppState,
+    files: &mut Vec<minijinja::Value>,
+) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if !entry.file_type().map_or(false, |t| t.is_dir()) {
@@ -687,7 +795,12 @@ fn scan_subdirs(dir: &std::path::Path, parent_path: &str, state: &AppState, file
     }
 }
 
-fn find_catalog_dirs(base: &std::path::Path, prefix: &str, state: &AppState, files: &mut Vec<minijinja::Value>) {
+fn find_catalog_dirs(
+    base: &std::path::Path,
+    prefix: &str,
+    state: &AppState,
+    files: &mut Vec<minijinja::Value>,
+) {
     let target = base.join(prefix.trim_end_matches('/'));
     if !target.exists() {
         return;
@@ -741,23 +854,33 @@ pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijin
     "#;
 
     let mut files = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog,query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&catalog, query) {
         for solution in solutions.flatten() {
-            let file_iri = solution.get("file").map(|v| v.to_string()).unwrap_or_default();
-            let uuid = file_iri
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .trim_matches('>');
+            let file_iri = solution
+                .get("file")
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let uuid = file_iri.rsplit('/').next().unwrap_or("").trim_matches('>');
 
             let g = |name: &str| -> String {
-                solution.get(name).map(|v| auth::strip_literal(&v.to_string())).unwrap_or_default()
+                solution
+                    .get(name)
+                    .map(|v| auth::strip_literal(&v.to_string()))
+                    .unwrap_or_default()
             };
 
             // Truncate abstract for listing
             let abstract_full = g("abstract");
             let abstract_snippet = if abstract_full.len() > 300 {
-                format!("{}...", &abstract_full[..abstract_full.char_indices().take_while(|(i, _)| *i < 300).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(300)])
+                format!(
+                    "{}...",
+                    &abstract_full[..abstract_full
+                        .char_indices()
+                        .take_while(|(i, _)| *i < 300)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(300)]
+                )
             } else {
                 abstract_full
             };

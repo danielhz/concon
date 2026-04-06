@@ -18,7 +18,7 @@ fn main() {
         }
     "#;
 
-    match sparql_update(&store,update) {
+    match sparql_update(&store, update) {
         Ok(()) => println!("Inserted dataset metadata for MetaLearn/MLIPs Literature"),
         Err(e) => eprintln!("Failed: {}", e),
     }
@@ -32,10 +32,13 @@ fn main() {
             ?team mlipe:ownsDataset ?ds .
         }
     "#;
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store, query) {
         for solution in solutions.flatten() {
-            println!("  dataset: {:?}, team: {:?}",
-                solution.get("name"), solution.get("team"));
+            println!(
+                "  dataset: {:?}, team: {:?}",
+                solution.get("name"),
+                solution.get("team")
+            );
         }
     }
 }

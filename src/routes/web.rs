@@ -7,7 +7,7 @@ use tower_cookies::Cookies;
 
 use crate::auth;
 use crate::state::AppState;
-use crate::store::{sparql_update};
+use crate::store::sparql_update;
 
 const SESSION_COOKIE: &str = "mlipe_session";
 
@@ -18,13 +18,19 @@ pub fn routes() -> Router<AppState> {
         .route("/_logout", axum::routing::post(logout))
         .route("/_datasets/new", axum::routing::post(create_dataset_web))
         .route("/_datasets/delete", axum::routing::post(delete_dataset_web))
-        .route("/_change-password", get(change_password_page).post(change_password_submit))
+        .route(
+            "/_change-password",
+            get(change_password_page).post(change_password_submit),
+        )
         .route("/_teams", get(teams_list))
         .route("/_api/files/upload", axum::routing::post(upload_file))
         .route("/_admin", get(admin_dashboard))
         .route("/_admin/users", get(admin_users))
         .route("/_admin/users/new", axum::routing::post(admin_create_user))
-        .route("/_admin/users/delete", axum::routing::post(admin_delete_user))
+        .route(
+            "/_admin/users/delete",
+            axum::routing::post(admin_delete_user),
+        )
         .route("/_users", get(users_list))
         .route("/_users/{username}", get(user_profile))
 }
@@ -122,14 +128,8 @@ async fn login_submit(
         auth::find_user_by_username(&state.store_manager.system, &form.username)
     {
         if auth::verify_password(&form.password, &password_hash) {
-            let session_id =
-                state
-                    .session_store
-                    .create_session(form.username, user_iri);
-            cookies.add(tower_cookies::Cookie::new(
-                SESSION_COOKIE,
-                session_id,
-            ));
+            let session_id = state.session_store.create_session(form.username, user_iri);
+            cookies.add(tower_cookies::Cookie::new(SESSION_COOKIE, session_id));
             return Redirect::to("/").into_response();
         }
     }
@@ -151,10 +151,7 @@ async fn login_submit(
     Html(html).into_response()
 }
 
-async fn logout(
-    State(state): State<AppState>,
-    cookies: Cookies,
-) -> Redirect {
+async fn logout(State(state): State<AppState>, cookies: Cookies) -> Redirect {
     if let Some(cookie) = cookies.get(SESSION_COOKIE) {
         state.session_store.remove_session(cookie.value());
         cookies.remove(tower_cookies::Cookie::from(SESSION_COOKIE));
@@ -162,10 +159,7 @@ async fn logout(
     Redirect::to("/")
 }
 
-async fn change_password_page(
-    State(state): State<AppState>,
-    cookies: Cookies,
-) -> Response {
+async fn change_password_page(State(state): State<AppState>, cookies: Cookies) -> Response {
     let session = get_username(&cookies, &state);
     let admin = is_root_admin(&session, &state);
     if session.is_none() {
@@ -224,10 +218,11 @@ async fn change_password_submit(
     };
 
     // Verify current password
-    let current_hash = match auth::find_user_by_username(&state.store_manager.system, &session.username) {
-        Some((_, hash)) => hash,
-        None => return render("User not found.", ""),
-    };
+    let current_hash =
+        match auth::find_user_by_username(&state.store_manager.system, &session.username) {
+            Some((_, hash)) => hash,
+            None => return render("User not found.", ""),
+        };
 
     if !auth::verify_password(&form.current_password, &current_hash) {
         return render("Current password is incorrect.", "");
@@ -243,7 +238,9 @@ async fn change_password_submit(
 
     // Update password in the system store
     let new_hash = auth::hash_password(&form.new_password);
-    if let Err(e) = auth::update_password_hash(&state.store_manager.system, &session.user_iri, &new_hash) {
+    if let Err(e) =
+        auth::update_password_hash(&state.store_manager.system, &session.user_iri, &new_hash)
+    {
         return render(&format!("Failed to update password: {}", e), "");
     }
 
@@ -297,9 +294,11 @@ async fn create_dataset_web(
     };
 
     if state.store_manager.create_dataset(&qualified_name).is_ok() {
-        let _ = state
-            .store_manager
-            .insert_dataset_metadata_full(&qualified_name, visibility, &team_iri);
+        let _ = state.store_manager.insert_dataset_metadata_full(
+            &qualified_name,
+            visibility,
+            &team_iri,
+        );
     }
 
     Redirect::to("/").into_response()
@@ -331,7 +330,10 @@ pub async fn dataset_query(
 ) -> Result<Html<String>, (StatusCode, String)> {
     // Check dataset exists
     if state.store_manager.get_dataset(dataset_name).is_none() {
-        return Err((StatusCode::NOT_FOUND, format!("Dataset '{}' not found", dataset_name)));
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Dataset '{}' not found", dataset_name),
+        ));
     }
 
     let session = get_username(cookies, state);
@@ -343,15 +345,22 @@ pub async fn dataset_query(
     // Build breadcrumbs from the team segments in the qualified name
     let team_segments: Vec<&str> = match dataset_name.rsplit_once('/') {
         Some((team_path, _)) => {
-            let segs: Vec<&str> = team_path.split('/').filter(|s| !s.is_empty() && *s != "root").collect();
+            let segs: Vec<&str> = team_path
+                .split('/')
+                .filter(|s| !s.is_empty() && *s != "root")
+                .collect();
             segs
         }
         None => Vec::new(),
     };
-    let breadcrumbs: Vec<_> = team_segments.iter().enumerate().map(|(i, name)| {
-        let url = format!("/{}", team_segments[..=i].join("/"));
-        minijinja::context! { name => *name, url => url }
-    }).collect();
+    let breadcrumbs: Vec<_> = team_segments
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let url = format!("/{}", team_segments[..=i].join("/"));
+            minijinja::context! { name => *name, url => url }
+        })
+        .collect();
 
     let tmpl = state
         .templates
@@ -389,7 +398,10 @@ pub async fn team_page(
         if let Some(ref iri) = team_iri_check {
             if let Some(ref s) = session {
                 if !auth::can_see_team(&state.store_manager.system, &s.user_iri, iri) {
-                    return Err((StatusCode::FORBIDDEN, "You do not have access to this team".into()));
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "You do not have access to this team".into(),
+                    ));
                 }
             } else {
                 return Err((StatusCode::UNAUTHORIZED, "Login required".into()));
@@ -398,23 +410,28 @@ pub async fn team_page(
     }
 
     // Build breadcrumbs: each ancestor team as (name, url)
-    let breadcrumbs: Vec<_> = team_segments.iter().enumerate().map(|(i, name)| {
-        let url = format!("/{}", team_segments[..=i].join("/"));
-        minijinja::context! { name => name, url => url }
-    }).collect();
+    let breadcrumbs: Vec<_> = team_segments
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let url = format!("/{}", team_segments[..=i].join("/"));
+            minijinja::context! { name => name, url => url }
+        })
+        .collect();
 
     // Resolve team IRI for permission checks
     let team_iri = auth::resolve_team_path(&state.store_manager.system, team_segments);
 
     // Check if current user is admin of this specific team
-    let is_team_admin = admin || session.as_ref().map_or(false, |s| {
-        team_iri.as_ref().map_or(false, |iri| {
-            let iri_clean = iri.trim_matches(|c| c == '<' || c == '>');
-            auth::get_user_admin_teams(&state.store_manager.system, &s.user_iri)
-                .iter()
-                .any(|t| t.iri.trim_matches(|c| c == '<' || c == '>') == iri_clean)
-        })
-    });
+    let is_team_admin = admin
+        || session.as_ref().map_or(false, |s| {
+            team_iri.as_ref().map_or(false, |iri| {
+                let iri_clean = iri.trim_matches(|c| c == '<' || c == '>');
+                auth::get_user_admin_teams(&state.store_manager.system, &s.user_iri)
+                    .iter()
+                    .any(|t| t.iri.trim_matches(|c| c == '<' || c == '>') == iri_clean)
+            })
+        });
 
     // Get sub-teams (filtered by visibility) and datasets
     let sub_teams = if let Some(ref s) = session {
@@ -434,19 +451,33 @@ pub async fn team_page(
     };
 
     // Get files for this team
-    let team_path_for_files = if team_segments.is_empty() { "root".to_string() } else { team_path.clone() };
+    let team_path_for_files = if team_segments.is_empty() {
+        "root".to_string()
+    } else {
+        team_path.clone()
+    };
     let all_files = super::files::list_files_recursive(state, &team_path_for_files);
     let files_per_page: usize = 10;
     let total_files = all_files.len();
     let total_pages = ((total_files + files_per_page - 1) / files_per_page).max(1);
     let current_page = (files_page as usize).clamp(1, total_pages);
     let skip = (current_page - 1) * files_per_page;
-    let files: Vec<_> = all_files.into_iter().skip(skip).take(files_per_page).collect();
-    let can_upload = is_team_admin || session.as_ref().map_or(false, |s| {
-        team_iri.as_ref().map_or(false, |iri| {
-            auth::can_access_files(&state.store_manager.system, &s.user_iri, iri, auth::FileAction::Write)
-        })
-    });
+    let files: Vec<_> = all_files
+        .into_iter()
+        .skip(skip)
+        .take(files_per_page)
+        .collect();
+    let can_upload = is_team_admin
+        || session.as_ref().map_or(false, |s| {
+            team_iri.as_ref().map_or(false, |iri| {
+                auth::can_access_files(
+                    &state.store_manager.system,
+                    &s.user_iri,
+                    iri,
+                    auth::FileAction::Write,
+                )
+            })
+        });
 
     let team_url_prefix = if team_segments.is_empty() {
         String::new()
@@ -542,8 +573,10 @@ async fn user_profile(
     let session = get_username(&cookies, &state);
     let admin = is_root_admin(&session, &state);
 
-    let user_info = auth::get_user_info(&state.store_manager.system, &profile_name)
-        .ok_or((StatusCode::NOT_FOUND, format!("User '{}' not found", profile_name)))?;
+    let user_info = auth::get_user_info(&state.store_manager.system, &profile_name).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("User '{}' not found", profile_name),
+    ))?;
 
     let admin_teams = auth::get_user_admin_teams(&state.store_manager.system, &user_info.iri);
     let admin_team_iris: Vec<_> = admin_teams.iter().map(|t| &t.iri).collect();
@@ -585,10 +618,7 @@ async fn user_profile(
 
 // ─── Site Administration ─────────────────────────────────────────
 
-async fn admin_dashboard(
-    State(state): State<AppState>,
-    cookies: Cookies,
-) -> Response {
+async fn admin_dashboard(State(state): State<AppState>, cookies: Cookies) -> Response {
     let session = get_username(&cookies, &state);
     let admin = is_root_admin(&session, &state);
     if !admin {
@@ -619,10 +649,7 @@ async fn admin_dashboard(
     Html(html).into_response()
 }
 
-async fn admin_users(
-    State(state): State<AppState>,
-    cookies: Cookies,
-) -> Response {
+async fn admin_users(State(state): State<AppState>, cookies: Cookies) -> Response {
     let session = get_username(&cookies, &state);
     let admin = is_root_admin(&session, &state);
     if !admin {
@@ -698,7 +725,7 @@ async fn admin_create_user(
         }}
         "#,
     );
-    let _ = sparql_update(&state.store_manager.system,&insert);
+    let _ = sparql_update(&state.store_manager.system, &insert);
 
     Redirect::to("/_admin/users").into_response()
 }
@@ -725,7 +752,9 @@ async fn admin_delete_user(
         }
     }
 
-    if let Some((user_iri, _)) = auth::find_user_by_username(&state.store_manager.system, &form.username) {
+    if let Some((user_iri, _)) =
+        auth::find_user_by_username(&state.store_manager.system, &form.username)
+    {
         let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
         let delete = format!(
             r#"
@@ -733,7 +762,7 @@ async fn admin_delete_user(
             DELETE WHERE {{ <{iri}> ?p ?o }}
             "#,
         );
-        let _ = sparql_update(&state.store_manager.system,&delete);
+        let _ = sparql_update(&state.store_manager.system, &delete);
 
         // Also remove team memberships pointing to this user
         let delete_refs = format!(
@@ -742,7 +771,7 @@ async fn admin_delete_user(
             DELETE WHERE {{ ?team mlipe:hasMember <{iri}> }}
             "#,
         );
-        let _ = sparql_update(&state.store_manager.system,&delete_refs);
+        let _ = sparql_update(&state.store_manager.system, &delete_refs);
 
         let delete_admin = format!(
             r#"
@@ -750,7 +779,7 @@ async fn admin_delete_user(
             DELETE WHERE {{ ?team mlipe:hasAdmin <{iri}> }}
             "#,
         );
-        let _ = sparql_update(&state.store_manager.system,&delete_admin);
+        let _ = sparql_update(&state.store_manager.system, &delete_admin);
     }
 
     Redirect::to("/_admin/users").into_response()
@@ -802,7 +831,7 @@ pub async fn create_team(
         }}
         "#,
     );
-    let _ = sparql_update(&state.store_manager.system,&insert);
+    let _ = sparql_update(&state.store_manager.system, &insert);
 
     // Redirect back to the parent team page
     if parent_path.is_empty() {
@@ -838,7 +867,13 @@ async fn upload_file(
                 file_name = field.file_name().unwrap_or("unknown.pdf").to_string();
                 match field.bytes().await {
                     Ok(bytes) => file_data = Some(bytes.to_vec()),
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("Failed to read file: {}", e)).into_response(),
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("Failed to read file: {}", e),
+                        )
+                            .into_response();
+                    }
                 }
             }
             _ => {}
@@ -863,13 +898,22 @@ async fn upload_file(
     // Check permissions
     let team_iri = match auth::resolve_team_path(
         &state.store_manager.system,
-        &if team_path == "root" { Vec::new() } else { team_path.split('/').map(|s| s.to_string()).collect() },
+        &if team_path == "root" {
+            Vec::new()
+        } else {
+            team_path.split('/').map(|s| s.to_string()).collect()
+        },
     ) {
         Some(iri) => iri,
         None => return (StatusCode::NOT_FOUND, "Team not found").into_response(),
     };
 
-    if !auth::can_access_files(&state.store_manager.system, &session.user_iri, &team_iri, auth::FileAction::Write) {
+    if !auth::can_access_files(
+        &state.store_manager.system,
+        &session.user_iri,
+        &team_iri,
+        auth::FileAction::Write,
+    ) {
         return (StatusCode::FORBIDDEN, "Not authorized to upload files").into_response();
     }
 
@@ -879,18 +923,32 @@ async fn upload_file(
     // Save file to disk
     let file_dir = state.files_dir.join(&team_path);
     if let Err(e) = std::fs::create_dir_all(&file_dir) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create directory: {}", e)).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create directory: {}", e),
+        )
+            .into_response();
     }
 
     let file_path_on_disk = file_dir.join(format!("{}.pdf", uuid));
     if let Err(e) = std::fs::write(&file_path_on_disk, &data) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write file: {}", e)).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write file: {}", e),
+        )
+            .into_response();
     }
 
     // Insert metadata into catalog
     let catalog = match state.store_manager.get_or_create_file_catalog(&team_path) {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to open catalog: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to open catalog: {}", e),
+            )
+                .into_response();
+        }
     };
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -928,8 +986,12 @@ async fn upload_file(
         "#,
     );
 
-    if let Err(e) = sparql_update(&catalog,&insert) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to insert metadata: {}", e)).into_response();
+    if let Err(e) = sparql_update(&catalog, &insert) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to insert metadata: {}", e),
+        )
+            .into_response();
     }
 
     // Extract metadata from PDF using GROBID (best-effort, don't fail upload)
@@ -1008,8 +1070,12 @@ async fn upload_file(
                     affiliations = esc(&meta.affiliations),
                 );
 
-                match sparql_update(&catalog_clone,&update) {
-                    Ok(()) => tracing::info!("GROBID: extracted metadata for {}: '{}'", uuid_clone, meta.title),
+                match sparql_update(&catalog_clone, &update) {
+                    Ok(()) => tracing::info!(
+                        "GROBID: extracted metadata for {}: '{}'",
+                        uuid_clone,
+                        meta.title
+                    ),
                     Err(e) => tracing::warn!("GROBID: failed to update metadata: {}", e),
                 }
 
@@ -1024,9 +1090,8 @@ async fn upload_file(
                         }}
                         "#,
                     );
-                    let _ = sparql_update(&catalog_clone,&ref_insert);
+                    let _ = sparql_update(&catalog_clone, &ref_insert);
                 }
-
             }
             Err(e) => {
                 tracing::warn!("GROBID extraction failed for {}: {}", uuid_clone, e);
@@ -1037,10 +1102,7 @@ async fn upload_file(
     Redirect::to(&format!("{}/_files", team_url_prefix)).into_response()
 }
 
-async fn teams_list(
-    State(state): State<AppState>,
-    cookies: Cookies,
-) -> Response {
+async fn teams_list(State(state): State<AppState>, cookies: Cookies) -> Response {
     let session = get_username(&cookies, &state);
     if session.is_none() {
         return Redirect::to("/_login").into_response();

@@ -32,7 +32,11 @@ impl AppState {
     }
 
     /// Create AppState with persistent stores on disk.
-    pub fn new_persistent(data_dir: &str, files_dir: &str, grobid_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_persistent(
+        data_dir: &str,
+        files_dir: &str,
+        grobid_url: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let store_manager = StoreManager::new_persistent(data_dir)?;
 
         let mut env = minijinja::Environment::new();

@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use oxigraph::io::RdfFormat;
-use oxigraph::sparql::{QueryEvaluationError, QueryResults, SparqlEvaluator, UpdateEvaluationError};
+use oxigraph::sparql::{
+    QueryEvaluationError, QueryResults, SparqlEvaluator, UpdateEvaluationError,
+};
 use oxigraph::store::Store;
 
 /// Execute a SPARQL query on a store using the new SparqlEvaluator API.
@@ -179,11 +181,7 @@ impl StoreManager {
         name: &str,
         visibility: &str,
     ) -> Result<(), String> {
-        self.insert_dataset_metadata_full(
-            name,
-            visibility,
-            "https://mlipe.2mia.org/teams/root",
-        )
+        self.insert_dataset_metadata_full(name, visibility, "https://mlipe.2mia.org/teams/root")
     }
 
     /// Insert dataset metadata triples with visibility and team ownership.
@@ -306,11 +304,7 @@ mod tests {
     #[test]
     fn test_store_query_new_api() {
         let store = Store::new().unwrap();
-        sparql_update(
-            &store,
-            "INSERT DATA { <urn:s> <urn:p> <urn:o> }",
-        )
-        .unwrap();
+        sparql_update(&store, "INSERT DATA { <urn:s> <urn:p> <urn:o> }").unwrap();
         let results = sparql_query(&store, "SELECT * WHERE { ?s ?p ?o }").unwrap();
         let mut count = 0;
         if let QueryResults::Solutions(solutions) = results {

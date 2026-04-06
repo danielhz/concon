@@ -57,7 +57,8 @@ pub async fn sparql_query_post_on_store(
         }
         let params: FormParams = serde_urlencoded::from_str(body)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-        params.query
+        params
+            .query
             .ok_or((StatusCode::BAD_REQUEST, "Missing 'query' parameter".into()))?
     } else {
         body.to_string()
@@ -87,33 +88,32 @@ pub async fn sparql_query_post(
         }
         let params: FormParams = serde_urlencoded::from_str(body)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-        params
-            .query
-            .or(params.update)
-            .ok_or((StatusCode::BAD_REQUEST, "Missing 'query' or 'update' parameter".into()))?
+        params.query.or(params.update).ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing 'query' or 'update' parameter".into(),
+        ))?
     } else {
         body.to_string()
     };
 
     // Try as a read query first; if that fails, try as an update
-    let store = state
-        .store_manager
-        .get_dataset(dataset_name)
-        .ok_or((StatusCode::NOT_FOUND, format!("Dataset '{}' not found", dataset_name)))?;
+    let store = state.store_manager.get_dataset(dataset_name).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Dataset '{}' not found", dataset_name),
+    ))?;
 
     match sparql_query(&store, &sparql) {
         Ok(results) => format_results(results, &store),
         Err(_query_err) => {
             // Not a valid query — try as a SPARQL Update
-            sparql_update(&store, &sparql)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            sparql_update(&store, &sparql).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
             let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                "application/json".parse().unwrap(),
-            );
-            Ok((headers, r#"{"message":"Update executed successfully."}"#.to_string()))
+            headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+            Ok((
+                headers,
+                r#"{"message":"Update executed successfully."}"#.to_string(),
+            ))
         }
     }
 }
@@ -123,13 +123,13 @@ fn execute_query(
     dataset_name: &str,
     query: &str,
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {
-    let store = state
-        .store_manager
-        .get_dataset(dataset_name)
-        .ok_or((StatusCode::NOT_FOUND, format!("Dataset '{}' not found", dataset_name)))?;
+    let store = state.store_manager.get_dataset(dataset_name).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Dataset '{}' not found", dataset_name),
+    ))?;
 
-    let results = sparql_query(&store, query)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let results =
+        sparql_query(&store, query).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     format_results(results, &store)
 }
@@ -138,8 +138,8 @@ fn execute_query_on_store(
     store: &Store,
     query: &str,
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {
-    let results = sparql_query(store, query)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let results =
+        sparql_query(store, query).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     format_results(results, store)
 }
 
@@ -151,14 +151,10 @@ fn format_results(
 
     let body = match results {
         QueryResults::Graph(triples) => {
-            headers.insert(
-                header::CONTENT_TYPE,
-                "text/turtle".parse().unwrap(),
-            );
+            headers.insert(header::CONTENT_TYPE, "text/turtle".parse().unwrap());
             for triple in triples {
-                let triple = triple.map_err(|e| {
-                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-                })?;
+                let triple =
+                    triple.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 store
                     .insert(QuadRef::new(
                         triple.subject.as_ref(),
@@ -196,7 +192,8 @@ fn format_results(
                 .serialize_solutions_to_writer(Vec::new(), solutions.variables().to_vec())
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             for solution in solutions {
-                let solution = solution.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                let solution =
+                    solution.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 writer
                     .serialize(&solution)
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -218,10 +215,10 @@ pub async fn sparql_update_post(
     headers: &HeaderMap,
     body: &str,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let store = state
-        .store_manager
-        .get_dataset(dataset_name)
-        .ok_or((StatusCode::NOT_FOUND, format!("Dataset '{}' not found", dataset_name)))?;
+    let store = state.store_manager.get_dataset(dataset_name).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Dataset '{}' not found", dataset_name),
+    ))?;
 
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -242,8 +239,7 @@ pub async fn sparql_update_post(
         body.to_string()
     };
 
-    sparql_update(&store, &update)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    sparql_update(&store, &update).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -299,9 +295,7 @@ mod tests {
             .json(&serde_json::json!({"name": "root/sparql-test-2"}))
             .await;
 
-        let response = server
-            .get("/_ds/sparql-test-2/_sparql")
-            .await;
+        let response = server.get("/_ds/sparql-test-2/_sparql").await;
         response.assert_status(axum::http::StatusCode::BAD_REQUEST);
     }
 

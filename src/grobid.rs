@@ -25,7 +25,10 @@ pub struct PaperMetadata {
 
 /// Extract metadata from a PDF file using GROBID.
 /// Calls processHeaderDocument first, then processFulltextDocument.
-pub async fn extract_metadata(pdf_path: &std::path::Path, base_url: &str) -> Result<PaperMetadata, String> {
+pub async fn extract_metadata(
+    pdf_path: &std::path::Path,
+    base_url: &str,
+) -> Result<PaperMetadata, String> {
     let file_bytes = tokio::fs::read(pdf_path)
         .await
         .map_err(|e| format!("Failed to read PDF: {}", e))?;
@@ -58,7 +61,9 @@ pub async fn extract_metadata(pdf_path: &std::path::Path, base_url: &str) -> Res
             return Err(format!("GROBID header returned status {}", resp.status()));
         }
 
-        let xml = resp.text().await
+        let xml = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read header response: {}", e))?;
         parse_tei_header(&xml)
     };
@@ -80,11 +85,16 @@ pub async fn extract_metadata(pdf_path: &std::path::Path, base_url: &str) -> Res
             .map_err(|e| format!("GROBID fulltext request failed: {}", e))?;
 
         if resp.status().is_success() {
-            let xml = resp.text().await
+            let xml = resp
+                .text()
+                .await
                 .map_err(|e| format!("Failed to read fulltext response: {}", e))?;
             Some(parse_tei_fulltext(&xml))
         } else {
-            tracing::warn!("GROBID fulltext returned status {}, using header only", resp.status());
+            tracing::warn!(
+                "GROBID fulltext returned status {}, using header only",
+                resp.status()
+            );
             None
         }
     };
@@ -341,7 +351,9 @@ fn extract_abstract(xml: &str) -> String {
     while let Some(start) = section[search_from..].find("<p>") {
         let abs_start = search_from + start + "<p>".len();
         if let Some(end) = section[abs_start..].find("</p>") {
-            let text = strip_xml_tags(&section[abs_start..abs_start + end]).trim().to_string();
+            let text = strip_xml_tags(&section[abs_start..abs_start + end])
+                .trim()
+                .to_string();
             if !text.is_empty() {
                 parts.push(text);
             }
@@ -405,7 +417,11 @@ fn strip_xml_tags(s: &str) -> String {
 
 fn clean_entities(meta: &mut PaperMetadata) {
     let clean = |s: &mut String| {
-        *s = s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"");
+        *s = s
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"");
     };
     clean(&mut meta.title);
     clean(&mut meta.authors);
@@ -475,7 +491,10 @@ mod tests {
         assert_eq!(meta.pages, "1-15");
         assert_eq!(meta.publisher, "APS");
         assert_eq!(meta.issn, "1098-0121");
-        assert_eq!(meta.abstract_text, "We present a review of machine learning potentials.");
+        assert_eq!(
+            meta.abstract_text,
+            "We present a review of machine learning potentials."
+        );
         assert_eq!(meta.keywords, "machine learning; interatomic potentials");
         assert_eq!(meta.affiliations, "MIT; Stanford");
     }

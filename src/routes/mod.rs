@@ -5,8 +5,8 @@ mod health;
 mod sparql;
 pub mod web;
 
-use axum::extract::DefaultBodyLimit;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use tower_cookies::CookieManagerLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;

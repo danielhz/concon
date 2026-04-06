@@ -5,7 +5,9 @@ use oxigraph::model::GraphNameRef;
 use oxigraph::store::Store;
 
 fn main() {
-    let team = std::env::args().nth(1).unwrap_or_else(|| "MetaLearn".into());
+    let team = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "MetaLearn".into());
     let path = format!("data/catalogs/{}", team);
     println!("Opening catalog at: {}", path);
     match Store::open(&path) {

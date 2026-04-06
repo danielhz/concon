@@ -4,8 +4,13 @@
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let pdf_path = args.get(1).expect("Usage: test_grobid <pdf_path> [grobid_url]");
-    let grobid_url = args.get(2).map(|s| s.as_str()).unwrap_or("http://localhost:8070");
+    let pdf_path = args
+        .get(1)
+        .expect("Usage: test_grobid <pdf_path> [grobid_url]");
+    let grobid_url = args
+        .get(2)
+        .map(|s| s.as_str())
+        .unwrap_or("http://localhost:8070");
 
     let path = std::path::Path::new(pdf_path);
     if !path.exists() {
@@ -32,7 +37,10 @@ async fn main() {
             println!("arXiv ID:     {}", meta.arxiv_id);
             println!("Keywords:     {}", meta.keywords);
             println!("Affiliations: {}", meta.affiliations);
-            println!("Abstract:     {}...", &meta.abstract_text[..meta.abstract_text.len().min(200)]);
+            println!(
+                "Abstract:     {}...",
+                &meta.abstract_text[..meta.abstract_text.len().min(200)]
+            );
             println!("References:   {} DOIs", meta.references.len());
             for r in &meta.references {
                 println!("  - {}", r);

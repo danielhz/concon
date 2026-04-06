@@ -24,7 +24,7 @@ fn main() {
     );
 
     let mut found = false;
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store,&query) {
+    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store, &query) {
         for solution in solutions.flatten() {
             let iri = solution.get("user").unwrap().to_string();
             let iri = iri.trim_matches(|c| c == '<' || c == '>');
@@ -34,7 +34,7 @@ fn main() {
                 INSERT {{ <{iri}> mlipe:passwordHash "{hash}" }}
                 WHERE {{ <{iri}> mlipe:passwordHash ?old }}"#
             );
-            sparql_update(&store,&update).expect("update password");
+            sparql_update(&store, &update).expect("update password");
             println!("Password reset for {}", username);
             found = true;
         }

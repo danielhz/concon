@@ -27,7 +27,9 @@ fn default_grobid_url() -> String {
 
 impl Default for GrobidConfig {
     fn default() -> Self {
-        Self { url: default_grobid_url() }
+        Self {
+            url: default_grobid_url(),
+        }
     }
 }
 
@@ -90,10 +92,8 @@ pub fn ensure_system_data(path: &str) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    let admin_user =
-        std::env::var("MLIPE_ADMIN_USER").unwrap_or_else(|_| "admin".into());
-    let admin_pass =
-        std::env::var("MLIPE_ADMIN_PASS").unwrap_or_else(|_| "admin".into());
+    let admin_user = std::env::var("MLIPE_ADMIN_USER").unwrap_or_else(|_| "admin".into());
+    let admin_pass = std::env::var("MLIPE_ADMIN_PASS").unwrap_or_else(|_| "admin".into());
     let password_hash = auth::hash_password(&admin_pass);
 
     let ttl = format!(

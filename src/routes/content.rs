@@ -4,10 +4,10 @@ use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use tower_cookies::Cookies;
 
-use crate::state::AppState;
 use super::files;
 use super::sparql;
 use super::web;
+use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/{*path}", get(content_get).post(content_post))
@@ -17,9 +17,7 @@ pub fn routes() -> Router<AppState> {
 #[derive(Debug, PartialEq)]
 pub enum ParsedPath {
     /// /{team-path} — show team page
-    TeamPage {
-        team_segments: Vec<String>,
-    },
+    TeamPage { team_segments: Vec<String> },
     /// /{team-path}/_ds/{dataset}/{_view} — dataset view
     DatasetView {
         team_segments: Vec<String>,
@@ -38,9 +36,7 @@ pub enum ParsedPath {
         action: Option<String>,
     },
     /// /{team-path}/_new_team — create sub-team action
-    NewTeam {
-        team_segments: Vec<String>,
-    },
+    NewTeam { team_segments: Vec<String> },
 }
 
 impl ParsedPath {
@@ -60,7 +56,11 @@ impl ParsedPath {
     /// Only valid for DatasetView.
     pub fn qualified_dataset_name(&self) -> Option<String> {
         match self {
-            Self::DatasetView { team_segments, dataset, .. } => {
+            Self::DatasetView {
+                team_segments,
+                dataset,
+                ..
+            } => {
                 if team_segments.is_empty() {
                     Some(format!("root/{}", dataset))
                 } else {
@@ -104,7 +104,11 @@ pub fn parse_path(path: &str) -> ParsedPath {
             } else {
                 None
             };
-            return ParsedPath::DatasetView { team_segments, dataset, view };
+            return ParsedPath::DatasetView {
+                team_segments,
+                dataset,
+                view,
+            };
         }
 
         if seg == "_new_team" {
@@ -115,12 +119,18 @@ pub fn parse_path(path: &str) -> ParsedPath {
             i += 1;
             // Check what follows: nothing, a view (_query, _upload), or a file UUID
             if i >= segments.len() {
-                return ParsedPath::FileCatalog { team_segments, view: None };
+                return ParsedPath::FileCatalog {
+                    team_segments,
+                    view: None,
+                };
             }
             let next = segments[i];
             if next.starts_with('_') {
                 // It's a view on the catalog (_query, _upload, etc.)
-                return ParsedPath::FileCatalog { team_segments, view: Some(next.to_string()) };
+                return ParsedPath::FileCatalog {
+                    team_segments,
+                    view: Some(next.to_string()),
+                };
             }
             // It's a file UUID
             let file_id = next.to_string();
@@ -130,7 +140,11 @@ pub fn parse_path(path: &str) -> ParsedPath {
             } else {
                 None
             };
-            return ParsedPath::FileItem { team_segments, file_id, action };
+            return ParsedPath::FileItem {
+                team_segments,
+                file_id,
+                action,
+            };
         }
 
         if seg.starts_with('_') {
@@ -156,7 +170,8 @@ async fn content_get(
     let parsed = parse_path(&path);
 
     // Extract page parameter from query string
-    let page: u32 = raw_query.as_deref()
+    let page: u32 = raw_query
+        .as_deref()
         .and_then(|q| {
             q.split('&')
                 .find_map(|p| p.strip_prefix("page="))
@@ -185,7 +200,14 @@ async fn content_get(
             if team_segments.len() == 1 {
                 let legacy_name = format!("root/{}", team_segments[0]);
                 if state.store_manager.get_dataset(&legacy_name).is_some() {
-                    return match web::dataset_query(&state, &legacy_name, &team_segments.join("/"), &cookies).await {
+                    return match web::dataset_query(
+                        &state,
+                        &legacy_name,
+                        &team_segments.join("/"),
+                        &cookies,
+                    )
+                    .await
+                    {
                         Ok(html) => html.into_response(),
                         Err(e) => e.into_response(),
                     };
@@ -212,16 +234,20 @@ async fn content_get(
                         Err(e) => e.into_response(),
                     }
                 }
-                Some("_update") => {
-                    (StatusCode::METHOD_NOT_ALLOWED, "Use POST for SPARQL Update".to_string())
-                        .into_response()
-                }
+                Some("_update") => (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "Use POST for SPARQL Update".to_string(),
+                )
+                    .into_response(),
                 Some(unknown) => {
                     (StatusCode::NOT_FOUND, format!("Unknown view: {}", unknown)).into_response()
                 }
             }
         }
-        ParsedPath::FileCatalog { team_segments, view } => {
+        ParsedPath::FileCatalog {
+            team_segments,
+            view,
+        } => {
             let team_path = team_path_str(team_segments);
             let team_url_prefix = build_team_url_prefix(team_segments);
             match view.as_deref() {
@@ -235,56 +261,78 @@ async fn content_get(
                                 Err(e) => e.into_response(),
                             }
                         }
-                        None => (StatusCode::NOT_FOUND, "No file catalog for this team").into_response(),
+                        None => {
+                            (StatusCode::NOT_FOUND, "No file catalog for this team").into_response()
+                        }
                     }
                 }
-                Some("_upload") => {
-                    (StatusCode::METHOD_NOT_ALLOWED, "Use POST for file upload".to_string())
-                        .into_response()
-                }
+                Some("_upload") => (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "Use POST for file upload".to_string(),
+                )
+                    .into_response(),
                 None => {
-                    match files::files_browse(&state, &team_path, &team_url_prefix, &cookies).await {
+                    match files::files_browse(&state, &team_path, &team_url_prefix, &cookies).await
+                    {
                         Ok(html) => html.into_response(),
                         Err(e) => e.into_response(),
                     }
                 }
-                Some(unknown) => {
-                    (StatusCode::NOT_FOUND, format!("Unknown files view: {}", unknown)).into_response()
-                }
+                Some(unknown) => (
+                    StatusCode::NOT_FOUND,
+                    format!("Unknown files view: {}", unknown),
+                )
+                    .into_response(),
             }
         }
-        ParsedPath::FileItem { team_segments, file_id, action } => {
+        ParsedPath::FileItem {
+            team_segments,
+            file_id,
+            action,
+        } => {
             let team_path = team_path_str(team_segments);
             let team_url_prefix = build_team_url_prefix(team_segments);
             match action.as_deref() {
-                None => {
-                    files::file_download(&state, &team_path, file_id).await
-                }
+                None => files::file_download(&state, &team_path, file_id).await,
                 Some("_view") => {
-                    match files::file_view(&state, &team_path, &team_url_prefix, file_id, &cookies).await {
+                    match files::file_view(&state, &team_path, &team_url_prefix, file_id, &cookies)
+                        .await
+                    {
                         Ok(html) => html.into_response(),
                         Err(e) => e.into_response(),
                     }
                 }
                 Some("_edit") => {
-                    match files::file_edit_form(&state, &team_path, &team_url_prefix, file_id, &cookies).await {
+                    match files::file_edit_form(
+                        &state,
+                        &team_path,
+                        &team_url_prefix,
+                        file_id,
+                        &cookies,
+                    )
+                    .await
+                    {
                         Ok(html) => html.into_response(),
                         Err(e) => e.into_response(),
                     }
                 }
-                Some("_delete") => {
-                    (StatusCode::METHOD_NOT_ALLOWED, "Use POST to delete files".to_string())
-                        .into_response()
-                }
-                Some(unknown) => {
-                    (StatusCode::NOT_FOUND, format!("Unknown file action: {}", unknown)).into_response()
-                }
+                Some("_delete") => (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "Use POST to delete files".to_string(),
+                )
+                    .into_response(),
+                Some(unknown) => (
+                    StatusCode::NOT_FOUND,
+                    format!("Unknown file action: {}", unknown),
+                )
+                    .into_response(),
             }
         }
-        ParsedPath::NewTeam { .. } => {
-            (StatusCode::METHOD_NOT_ALLOWED, "Use POST to create a team".to_string())
-                .into_response()
-        }
+        ParsedPath::NewTeam { .. } => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Use POST to create a team".to_string(),
+        )
+            .into_response(),
     }
 }
 
@@ -321,18 +369,23 @@ async fn content_post(
                     }
                 }
                 Some("_update") => {
-                    match sparql::sparql_update_post(&state, &qualified, &headers, &body_str).await {
+                    match sparql::sparql_update_post(&state, &qualified, &headers, &body_str).await
+                    {
                         Ok(status) => status.into_response(),
                         Err(e) => e.into_response(),
                     }
                 }
-                _ => {
-                    (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this dataset view".to_string())
-                        .into_response()
-                }
+                _ => (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "POST not supported for this dataset view".to_string(),
+                )
+                    .into_response(),
             }
         }
-        ParsedPath::FileCatalog { team_segments, view } => {
+        ParsedPath::FileCatalog {
+            team_segments,
+            view,
+        } => {
             let team_path = team_path_str(team_segments);
             let body_str = String::from_utf8_lossy(&body).to_string();
             match view.as_deref() {
@@ -340,53 +393,76 @@ async fn content_post(
                     let catalog = state.store_manager.get_file_catalog(&team_path);
                     match catalog {
                         Some(store) => {
-                            match sparql::sparql_query_post_on_store(&store, &headers, &body_str).await {
+                            match sparql::sparql_query_post_on_store(&store, &headers, &body_str)
+                                .await
+                            {
                                 Ok(resp) => resp.into_response(),
                                 Err(e) => e.into_response(),
                             }
                         }
-                        None => (StatusCode::NOT_FOUND, "No file catalog for this team").into_response(),
+                        None => {
+                            (StatusCode::NOT_FOUND, "No file catalog for this team").into_response()
+                        }
                     }
                 }
-                Some("_upload") => {
-                    (StatusCode::BAD_REQUEST, "Use the file upload form".to_string())
-                        .into_response()
-                }
-                _ => {
-                    (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this files view".to_string())
-                        .into_response()
-                }
+                Some("_upload") => (
+                    StatusCode::BAD_REQUEST,
+                    "Use the file upload form".to_string(),
+                )
+                    .into_response(),
+                _ => (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "POST not supported for this files view".to_string(),
+                )
+                    .into_response(),
             }
         }
-        ParsedPath::FileItem { team_segments, file_id, action } => {
+        ParsedPath::FileItem {
+            team_segments,
+            file_id,
+            action,
+        } => {
             let team_path = team_path_str(team_segments);
             let team_url_prefix = build_team_url_prefix(team_segments);
             match action.as_deref() {
                 Some("_edit") => {
                     let body_str = String::from_utf8_lossy(&body).to_string();
-                    let form: files::FileEditForm = serde_urlencoded::from_str(&body_str)
-                        .unwrap_or_default();
-                    files::file_edit_submit(&state, &team_path, &team_url_prefix, file_id, &cookies, form).await
+                    let form: files::FileEditForm =
+                        serde_urlencoded::from_str(&body_str).unwrap_or_default();
+                    files::file_edit_submit(
+                        &state,
+                        &team_path,
+                        &team_url_prefix,
+                        file_id,
+                        &cookies,
+                        form,
+                    )
+                    .await
                 }
                 Some("_delete") => {
-                    files::file_delete(&state, &team_path, &team_url_prefix, file_id, &cookies).await
+                    files::file_delete(&state, &team_path, &team_url_prefix, file_id, &cookies)
+                        .await
                 }
-                _ => {
-                    (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this file path".to_string())
-                        .into_response()
-                }
+                _ => (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "POST not supported for this file path".to_string(),
+                )
+                    .into_response(),
             }
         }
         ParsedPath::NewTeam { team_segments } => {
             let body_str = String::from_utf8_lossy(&body).to_string();
-            let form: web::CreateTeamForm = serde_urlencoded::from_str(&body_str)
-                .unwrap_or(web::CreateTeamForm { name: String::new() });
+            let form: web::CreateTeamForm =
+                serde_urlencoded::from_str(&body_str).unwrap_or(web::CreateTeamForm {
+                    name: String::new(),
+                });
             web::create_team(&state, team_segments, &cookies, form).await
         }
-        _ => {
-            (StatusCode::METHOD_NOT_ALLOWED, "POST not supported for this path".to_string())
-                .into_response()
-        }
+        _ => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            "POST not supported for this path".to_string(),
+        )
+            .into_response(),
     }
 }
 
@@ -412,7 +488,11 @@ fn build_team_url_prefix(segments: &[String]) -> String {
 /// E.g., "/materials/_ds/potentials" for team materials, dataset potentials.
 fn build_dataset_url_prefix(parsed: &ParsedPath) -> String {
     match parsed {
-        ParsedPath::DatasetView { team_segments, dataset, .. } => {
+        ParsedPath::DatasetView {
+            team_segments,
+            dataset,
+            ..
+        } => {
             if team_segments.is_empty() {
                 format!("/_ds/{}", dataset)
             } else {
@@ -431,11 +511,15 @@ mod tests {
     fn test_parse_team_page() {
         assert_eq!(
             parse_path("materials"),
-            ParsedPath::TeamPage { team_segments: vec!["materials".into()] }
+            ParsedPath::TeamPage {
+                team_segments: vec!["materials".into()]
+            }
         );
         assert_eq!(
             parse_path("materials/atomistic"),
-            ParsedPath::TeamPage { team_segments: vec!["materials".into(), "atomistic".into()] }
+            ParsedPath::TeamPage {
+                team_segments: vec!["materials".into(), "atomistic".into()]
+            }
         );
     }
 
@@ -443,7 +527,9 @@ mod tests {
     fn test_parse_root_team() {
         assert_eq!(
             parse_path(""),
-            ParsedPath::TeamPage { team_segments: vec![] }
+            ParsedPath::TeamPage {
+                team_segments: vec![]
+            }
         );
     }
 
@@ -578,13 +664,19 @@ mod tests {
     #[test]
     fn test_qualified_dataset_name() {
         let p = parse_path("materials/_ds/potentials/_query");
-        assert_eq!(p.qualified_dataset_name(), Some("materials/potentials".into()));
+        assert_eq!(
+            p.qualified_dataset_name(),
+            Some("materials/potentials".into())
+        );
 
         let p = parse_path("_ds/my-dataset/_query");
         assert_eq!(p.qualified_dataset_name(), Some("root/my-dataset".into()));
 
         let p = parse_path("materials/atomistic/_ds/gap17/_sparql");
-        assert_eq!(p.qualified_dataset_name(), Some("materials/atomistic/gap17".into()));
+        assert_eq!(
+            p.qualified_dataset_name(),
+            Some("materials/atomistic/gap17".into())
+        );
     }
 
     #[test]

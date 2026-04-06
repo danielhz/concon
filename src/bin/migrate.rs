@@ -21,7 +21,10 @@ fn main() {
     let config_contents = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(_) => {
-            eprintln!("Error: Cannot read {}. Run this from the application directory.", config_path);
+            eprintln!(
+                "Error: Cannot read {}. Run this from the application directory.",
+                config_path
+            );
             std::process::exit(1);
         }
     };
@@ -47,7 +50,10 @@ fn main() {
     let system_path = Path::new(data_dir).join("system");
 
     if !system_path.exists() {
-        eprintln!("Error: System store not found at {}. Is the data directory correct?", system_path.display());
+        eprintln!(
+            "Error: System store not found at {}. Is the data directory correct?",
+            system_path.display()
+        );
         std::process::exit(1);
     }
 
@@ -61,7 +67,10 @@ fn main() {
 
     let version = concon::migration::get_schema_version(&store);
     println!("Current schema version: {}", version);
-    println!("Target schema version:  {}", concon::migration::CURRENT_SCHEMA_VERSION);
+    println!(
+        "Target schema version:  {}",
+        concon::migration::CURRENT_SCHEMA_VERSION
+    );
 
     if version == concon::migration::CURRENT_SCHEMA_VERSION {
         println!("Already up to date. Nothing to do.");

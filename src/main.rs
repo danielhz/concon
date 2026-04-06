@@ -14,8 +14,7 @@ async fn main() {
 
     let cfg = config::load_or_create().expect("Failed to load config");
 
-    config::ensure_system_data(&cfg.store.system_data)
-        .expect("Failed to ensure system data file");
+    config::ensure_system_data(&cfg.store.system_data).expect("Failed to ensure system data file");
 
     let app_state =
         state::AppState::new_persistent(&cfg.store.data_dir, &cfg.store.files_dir, &cfg.grobid.url)
@@ -49,7 +48,5 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind to address");
-    axum::serve(listener, app)
-        .await
-        .expect("Server error");
+    axum::serve(listener, app).await.expect("Server error");
 }
