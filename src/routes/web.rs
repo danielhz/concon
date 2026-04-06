@@ -1102,6 +1102,71 @@ async fn upload_file(
     Redirect::to(&format!("{}/_files", team_url_prefix)).into_response()
 }
 
+// ─── Entity Editor ──────────────────────────────────────────────
+
+pub async fn entity_editor(
+    state: &AppState,
+    dataset_name: &str,
+    url_prefix: &str,
+    cookies: &Cookies,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let session = get_username(cookies, state);
+    let admin = is_root_admin(&session, state);
+
+    // Check dataset exists
+    if state.store_manager.get_dataset(dataset_name).is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Dataset '{}' not found", dataset_name),
+        ));
+    }
+
+    // Parse SHACL shapes from the dataset's SHACL store
+    let shapes_json = match state.store_manager.get_shacl_store(dataset_name) {
+        Some(shacl_store) => {
+            let descriptors = crate::shacl::parse_shapes_from_store(&shacl_store);
+            crate::shacl::form_descriptors_to_json(&descriptors)
+        }
+        None => serde_json::json!([]),
+    };
+
+    // Extract display name and breadcrumbs
+    let display_name = dataset_name.rsplit('/').next().unwrap_or(dataset_name);
+    let team_segments: Vec<&str> = match dataset_name.rsplit_once('/') {
+        Some((team_path, _)) => team_path
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != "root")
+            .collect(),
+        None => Vec::new(),
+    };
+    let breadcrumbs: Vec<_> = team_segments
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let url = format!("/{}", team_segments[..=i].join("/"));
+            minijinja::context! { name => *name, url => url }
+        })
+        .collect();
+
+    let tmpl = state
+        .templates
+        .get_template("entity_editor.html")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let html = tmpl
+        .render(minijinja::context! {
+            username => session.map(|s| s.username),
+            is_admin => admin,
+            dataset_name => display_name,
+            url_prefix => url_prefix,
+            breadcrumbs => breadcrumbs,
+            shapes_json => shapes_json.to_string(),
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Html(html))
+}
+
 async fn teams_list(State(state): State<AppState>, cookies: Cookies) -> Response {
     let session = get_username(&cookies, &state);
     if session.is_none() {

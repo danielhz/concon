@@ -3,6 +3,7 @@ mod config;
 mod grobid;
 mod migration;
 mod routes;
+mod shacl;
 mod state;
 mod store;
 

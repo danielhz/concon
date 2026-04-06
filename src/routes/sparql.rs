@@ -244,6 +244,36 @@ pub async fn sparql_update_post(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Execute a SPARQL Update directly on a given store (used for SHACL stores).
+pub async fn sparql_update_post_on_store(
+    store: &Store,
+    headers: &HeaderMap,
+    body: &str,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let update = if content_type.starts_with("application/x-www-form-urlencoded") {
+        #[derive(Deserialize)]
+        struct UpdateParams {
+            update: Option<String>,
+        }
+        let params: UpdateParams = serde_urlencoded::from_str(body)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        params
+            .update
+            .ok_or((StatusCode::BAD_REQUEST, "Missing 'update' parameter".into()))?
+    } else {
+        body.to_string()
+    };
+
+    sparql_update(store, &update).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use axum_test::TestServer;

@@ -1,8 +1,9 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::{Json, Router, routing::get};
 use serde::{Deserialize, Serialize};
 
+use crate::shacl;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -12,6 +13,7 @@ pub fn routes() -> Router<AppState> {
             "/_api/datasets/{name}",
             axum::routing::delete(delete_dataset),
         )
+        .route("/_api/search", get(entity_search))
 }
 
 #[derive(Serialize)]
@@ -54,6 +56,26 @@ async fn delete_dataset(
         .delete_dataset(&name)
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| (StatusCode::NOT_FOUND, e))
+}
+
+#[derive(Deserialize)]
+struct SearchParams {
+    q: String,
+    dataset: String,
+    class: Option<String>,
+}
+
+async fn entity_search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Vec<shacl::SearchResult>>, (StatusCode, String)> {
+    let store = state.store_manager.get_dataset(&params.dataset).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Dataset '{}' not found", params.dataset),
+    ))?;
+
+    let results = shacl::search_entities(&store, &params.q, params.class.as_deref());
+    Ok(Json(results))
 }
 
 #[cfg(test)]
@@ -131,5 +153,38 @@ mod tests {
         let server = test_server();
         let response = server.delete("/_api/datasets/nonexistent").await;
         response.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_entity_search_endpoint() {
+        let server = test_server();
+
+        // Create dataset
+        server
+            .post("/_api/datasets")
+            .json(&serde_json::json!({"name": "root/search-test"}))
+            .await;
+
+        // Insert entities via SPARQL Update
+        let sparql = r#"
+            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+            PREFIX ex: <http://example.org/>
+            INSERT DATA {
+                ex:alice a ex:Person ; rdfs:label "Alice Smith" .
+                ex:bob a ex:Person ; rdfs:label "Bob Jones" .
+            }
+        "#;
+        server.post("/_ds/search-test/_update").text(sparql).await;
+
+        // Search
+        let response = server
+            .get("/_api/search")
+            .add_query_param("q", "alice")
+            .add_query_param("dataset", "root/search-test")
+            .await;
+        response.assert_status_ok();
+        let body: Vec<serde_json::Value> = response.json();
+        assert_eq!(body.len(), 1);
+        assert!(body[0]["label"].as_str().unwrap().contains("Alice"));
     }
 }

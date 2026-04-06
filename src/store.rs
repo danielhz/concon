@@ -38,6 +38,8 @@ pub struct StoreManager {
     datasets: RwLock<HashMap<String, Store>>,
     /// File catalog stores, keyed by team path (e.g., "root", "materials").
     catalogs: RwLock<HashMap<String, Store>>,
+    /// SHACL stores, keyed by dataset name. Each dataset can have its own SHACL shapes.
+    shacl_stores: RwLock<HashMap<String, Store>>,
     /// Base directory for dataset storage.
     data_dir: PathBuf,
 }
@@ -50,6 +52,7 @@ impl StoreManager {
             system,
             datasets: RwLock::new(HashMap::new()),
             catalogs: RwLock::new(HashMap::new()),
+            shacl_stores: RwLock::new(HashMap::new()),
             data_dir: PathBuf::new(),
         })
     }
@@ -60,6 +63,7 @@ impl StoreManager {
         std::fs::create_dir_all(data_path.join("system"))?;
         std::fs::create_dir_all(data_path.join("datasets"))?;
         std::fs::create_dir_all(data_path.join("catalogs"))?;
+        std::fs::create_dir_all(data_path.join("shacl"))?;
 
         let system = Store::open(data_path.join("system"))?;
 
@@ -67,6 +71,7 @@ impl StoreManager {
             system,
             datasets: RwLock::new(HashMap::new()),
             catalogs: RwLock::new(HashMap::new()),
+            shacl_stores: RwLock::new(HashMap::new()),
             data_dir: data_path.to_path_buf(),
         })
     }
@@ -147,6 +152,17 @@ impl StoreManager {
             let path = self.data_dir.join("datasets").join(name);
             if path.exists() {
                 let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+
+        // Remove SHACL store
+        if let Ok(mut shacl) = self.shacl_stores.write() {
+            shacl.remove(name);
+        }
+        if !self.data_dir.as_os_str().is_empty() {
+            let shacl_path = self.data_dir.join("shacl").join(name);
+            if shacl_path.exists() {
+                let _ = std::fs::remove_dir_all(&shacl_path);
             }
         }
 
@@ -295,6 +311,65 @@ impl StoreManager {
 
         None
     }
+
+    /// Get or create a SHACL store for a dataset.
+    pub fn get_or_create_shacl_store(&self, dataset_name: &str) -> Result<Store, String> {
+        // Check if already loaded
+        {
+            let stores = self.shacl_stores.read().map_err(|e| e.to_string())?;
+            if let Some(store) = stores.get(dataset_name) {
+                return Ok(store.clone());
+            }
+        }
+
+        // Create or open
+        let mut stores = self.shacl_stores.write().map_err(|e| e.to_string())?;
+        // Double-check after acquiring write lock
+        if let Some(store) = stores.get(dataset_name) {
+            return Ok(store.clone());
+        }
+
+        let store = if self.data_dir.as_os_str().is_empty() {
+            Store::new().map_err(|e| e.to_string())?
+        } else {
+            let path = self.data_dir.join("shacl").join(dataset_name);
+            std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+            Store::open(&path).map_err(|e| e.to_string())?
+        };
+
+        stores.insert(dataset_name.to_string(), store.clone());
+        Ok(store)
+    }
+
+    /// Get a SHACL store for a dataset (read-only, returns None if not yet created).
+    pub fn get_shacl_store(&self, dataset_name: &str) -> Option<Store> {
+        // Check in-memory first
+        if let Ok(stores) = self.shacl_stores.read() {
+            if let Some(store) = stores.get(dataset_name) {
+                return Some(store.clone());
+            }
+        }
+
+        // Try to open from disk if persistent
+        if self.data_dir.as_os_str().is_empty() {
+            return None;
+        }
+
+        let path = self.data_dir.join("shacl").join(dataset_name);
+        if !path.exists() {
+            return None;
+        }
+
+        // Open and cache it
+        if let Ok(mut stores) = self.shacl_stores.write() {
+            if let Ok(store) = Store::open(&path) {
+                stores.insert(dataset_name.to_string(), store.clone());
+                return Some(store);
+            }
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]
@@ -391,5 +466,62 @@ mod tests {
             }
         }
         assert!(found, "Expected to find RDF 1.2 reified triple annotation");
+    }
+
+    #[test]
+    fn test_shacl_store_create_and_get() {
+        let manager = StoreManager::new_in_memory().unwrap();
+        manager.create_dataset("root/test-ds").unwrap();
+
+        // Create SHACL store and insert a shape
+        let shacl = manager.get_or_create_shacl_store("root/test-ds").unwrap();
+        sparql_update(
+            &shacl,
+            r#"
+            PREFIX sh: <http://www.w3.org/ns/shacl#>
+            PREFIX ex: <http://example.org/>
+            INSERT DATA {
+                ex:PersonShape a sh:NodeShape ;
+                    sh:targetClass ex:Person ;
+                    sh:property ex:nameShape .
+                ex:nameShape a sh:PropertyShape ;
+                    sh:path ex:name ;
+                    sh:minCount 1 .
+            }
+            "#,
+        )
+        .unwrap();
+
+        // Retrieve the same store and verify data persisted
+        let shacl2 = manager.get_shacl_store("root/test-ds").unwrap();
+        let results = sparql_query(
+            &shacl2,
+            r#"
+            PREFIX sh: <http://www.w3.org/ns/shacl#>
+            SELECT ?shape WHERE { ?shape a sh:NodeShape }
+            "#,
+        )
+        .unwrap();
+        let mut count = 0;
+        if let QueryResults::Solutions(solutions) = results {
+            for solution in solutions {
+                solution.unwrap();
+                count += 1;
+            }
+        }
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_shacl_store_deleted_with_dataset() {
+        let manager = StoreManager::new_in_memory().unwrap();
+        manager.create_dataset("root/del-ds").unwrap();
+
+        let shacl = manager.get_or_create_shacl_store("root/del-ds").unwrap();
+        sparql_update(&shacl, "INSERT DATA { <urn:x> <urn:y> <urn:z> }").unwrap();
+
+        // Delete dataset should also remove SHACL store from memory
+        manager.delete_dataset("root/del-ds").unwrap();
+        assert!(manager.get_shacl_store("root/del-ds").is_none());
     }
 }

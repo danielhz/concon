@@ -99,10 +99,16 @@ pub fn parse_path(path: &str) -> ParsedPath {
             } else {
                 return ParsedPath::TeamPage { team_segments };
             };
-            let view = if i < segments.len() && segments[i].starts_with('_') {
-                Some(segments[i].to_string())
-            } else {
+            // Collect all remaining _-prefixed segments as a compound view
+            let mut view_parts = Vec::new();
+            while i < segments.len() && segments[i].starts_with('_') {
+                view_parts.push(segments[i].to_string());
+                i += 1;
+            }
+            let view = if view_parts.is_empty() {
                 None
+            } else {
+                Some(view_parts.join("/"))
             };
             return ParsedPath::DatasetView {
                 team_segments,
@@ -234,11 +240,30 @@ async fn content_get(
                         Err(e) => e.into_response(),
                     }
                 }
-                Some("_update") => (
+                Some("_update") | Some("_shacl/_update") => (
                     StatusCode::METHOD_NOT_ALLOWED,
                     "Use POST for SPARQL Update".to_string(),
                 )
                     .into_response(),
+                Some("_shacl/_query") => {
+                    let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
+                    match shacl_store {
+                        Ok(store) => {
+                            match sparql::sparql_query_get_on_store(&store, &params).await {
+                                Ok(resp) => resp.into_response(),
+                                Err(e) => e.into_response(),
+                            }
+                        }
+                        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+                    }
+                }
+                Some("_entities") => {
+                    let url_prefix = build_dataset_url_prefix(&parsed);
+                    match web::entity_editor(&state, &qualified, &url_prefix, &cookies).await {
+                        Ok(html) => html.into_response(),
+                        Err(e) => e.into_response(),
+                    }
+                }
                 Some(unknown) => {
                     (StatusCode::NOT_FOUND, format!("Unknown view: {}", unknown)).into_response()
                 }
@@ -347,9 +372,10 @@ async fn content_post(
 
     // SPARQL endpoints remain accessible; everything else requires login
     let needs_login = match &parsed {
-        ParsedPath::DatasetView { view, .. } => {
-            view.as_deref() != Some("_sparql") && view.as_deref() != Some("_update")
-        }
+        ParsedPath::DatasetView { view, .. } => !matches!(
+            view.as_deref(),
+            Some("_sparql") | Some("_update") | Some("_shacl/_query") | Some("_shacl/_update")
+        ),
         _ => true,
     };
 
@@ -373,6 +399,34 @@ async fn content_post(
                     {
                         Ok(status) => status.into_response(),
                         Err(e) => e.into_response(),
+                    }
+                }
+                Some("_shacl/_query") => {
+                    let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
+                    match shacl_store {
+                        Ok(store) => {
+                            match sparql::sparql_query_post_on_store(&store, &headers, &body_str)
+                                .await
+                            {
+                                Ok(resp) => resp.into_response(),
+                                Err(e) => e.into_response(),
+                            }
+                        }
+                        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+                    }
+                }
+                Some("_shacl/_update") => {
+                    let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
+                    match shacl_store {
+                        Ok(store) => {
+                            match sparql::sparql_update_post_on_store(&store, &headers, &body_str)
+                                .await
+                            {
+                                Ok(status) => status.into_response(),
+                                Err(e) => e.into_response(),
+                            }
+                        }
+                        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
                     }
                 }
                 _ => (
@@ -686,5 +740,41 @@ mod tests {
 
         let p = parse_path("_ds/my-dataset/_query");
         assert_eq!(build_dataset_url_prefix(&p), "/_ds/my-dataset");
+    }
+
+    #[test]
+    fn test_parse_shacl_query_path() {
+        assert_eq!(
+            parse_path("materials/_ds/pot/_shacl/_query"),
+            ParsedPath::DatasetView {
+                team_segments: vec!["materials".into()],
+                dataset: "pot".into(),
+                view: Some("_shacl/_query".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_shacl_update_path() {
+        assert_eq!(
+            parse_path("_ds/my-ds/_shacl/_update"),
+            ParsedPath::DatasetView {
+                team_segments: vec![],
+                dataset: "my-ds".into(),
+                view: Some("_shacl/_update".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_entities_view() {
+        assert_eq!(
+            parse_path("materials/_ds/pot/_entities"),
+            ParsedPath::DatasetView {
+                team_segments: vec!["materials".into()],
+                dataset: "pot".into(),
+                view: Some("_entities".into()),
+            }
+        );
     }
 }

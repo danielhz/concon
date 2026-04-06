@@ -1,0 +1,336 @@
+{% extends "base.html" %}
+
+{% block title %}Concon - {{ dataset_name }} - Entities{% endblock %}
+
+{% block content %}
+<h1>
+    {% for crumb in breadcrumbs %}
+        <a href="{{ crumb.url }}">{{ crumb.name }}</a> /
+    {% endfor %}
+    <a href="{{ url_prefix|safe }}/_query">{{ dataset_name }}</a> /
+    Entities
+</h1>
+
+<div class="grid-x grid-padding-x">
+    <!-- Left panel: shape/class selector -->
+    <div class="cell medium-3">
+        <h3>Entity types</h3>
+        <div id="shape-list">
+            <p class="help-text">Loading shapes...</p>
+        </div>
+
+        <hr>
+        <h4>Entities</h4>
+        <input type="text" id="entity-search" placeholder="Search entities...">
+        <ul id="entity-list" class="no-bullet"></ul>
+        <button id="new-entity-btn" class="button small" style="display:none">+ New entity</button>
+    </div>
+
+    <!-- Right panel: entity form -->
+    <div class="cell medium-9">
+        <div id="no-shape-selected">
+            <p>Select an entity type from the left panel to begin editing.</p>
+            <p class="help-text">
+                SHACL shapes define the structure of entities.
+                Load shapes via the
+                <a href="{{ url_prefix|safe }}/_shacl/_query">SHACL SPARQL endpoint</a>.
+            </p>
+        </div>
+
+        <div id="entity-form-container" style="display:none">
+            <div class="grid-x grid-padding-x">
+                <div class="cell">
+                    <label>Entity IRI
+                        <input type="text" id="entity-iri" placeholder="Enter or generate IRI">
+                    </label>
+                    <button id="generate-iri-btn" class="button small secondary">Generate UUID IRI</button>
+                </div>
+            </div>
+
+            <hr>
+
+            <div id="mandatory-fields"></div>
+
+            <div id="optional-fields-section" style="display:none">
+                <hr>
+                <h4>Optional properties
+                    <button id="toggle-optional" class="button tiny secondary">+ Add property</button>
+                </h4>
+                <div id="optional-fields-menu" style="display:none">
+                    <ul id="optional-fields-list" class="no-bullet"></ul>
+                </div>
+                <div id="added-optional-fields"></div>
+            </div>
+
+            <div id="save-status" class="update-result" style="display:none"></div>
+        </div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+(function() {
+    const SHAPES = JSON.parse('{{ shapes_json|safe }}');
+    const UPDATE_URL = "{{ url_prefix|safe }}/_update";
+    const SEARCH_URL = "/_api/search";
+    const DATASET = "{{ dataset_name }}";
+
+    let currentShape = null;
+    let currentEntityIri = null;
+
+    // --- Shape list ---
+    const shapeListEl = document.getElementById("shape-list");
+    if (SHAPES.length === 0) {
+        shapeListEl.innerHTML = '<p class="help-text">No SHACL shapes loaded. Use the SHACL SPARQL endpoint to load shapes.</p>';
+    } else {
+        let html = '<ul class="no-bullet">';
+        SHAPES.forEach(function(shape, idx) {
+            const label = shape.label || shape.target_class.split('/').pop().split('#').pop();
+            html += '<li><a href="#" class="shape-link" data-idx="' + idx + '">' + escapeHtml(label) + '</a></li>';
+        });
+        html += '</ul>';
+        shapeListEl.innerHTML = html;
+    }
+
+    document.querySelectorAll(".shape-link").forEach(function(link) {
+        link.addEventListener("click", function(e) {
+            e.preventDefault();
+            const idx = parseInt(this.dataset.idx);
+            selectShape(SHAPES[idx]);
+        });
+    });
+
+    function selectShape(shape) {
+        currentShape = shape;
+        document.getElementById("no-shape-selected").style.display = "none";
+        document.getElementById("entity-form-container").style.display = "block";
+        document.getElementById("new-entity-btn").style.display = "block";
+
+        // Highlight selected
+        document.querySelectorAll(".shape-link").forEach(function(l) { l.style.fontWeight = "normal"; });
+        document.querySelectorAll(".shape-link").forEach(function(l) {
+            if (SHAPES[parseInt(l.dataset.idx)] === shape) l.style.fontWeight = "bold";
+        });
+
+        renderFields(shape);
+        currentEntityIri = null;
+        document.getElementById("entity-iri").value = "";
+    }
+
+    // --- Field rendering ---
+    function renderFields(shape) {
+        const mandatoryEl = document.getElementById("mandatory-fields");
+        const optMenuEl = document.getElementById("optional-fields-list");
+        const optSection = document.getElementById("optional-fields-section");
+        const addedOptEl = document.getElementById("added-optional-fields");
+
+        mandatoryEl.innerHTML = "";
+        optMenuEl.innerHTML = "";
+        addedOptEl.innerHTML = "";
+
+        let hasOptional = false;
+
+        shape.properties.forEach(function(prop) {
+            if (prop.required) {
+                mandatoryEl.appendChild(createFieldElement(prop));
+            } else {
+                hasOptional = true;
+                const li = document.createElement("li");
+                const a = document.createElement("a");
+                a.href = "#";
+                a.textContent = prop.name || prop.path.split('/').pop().split('#').pop();
+                a.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    addedOptEl.appendChild(createFieldElement(prop));
+                    li.remove();
+                });
+                li.appendChild(a);
+                optMenuEl.appendChild(li);
+            }
+        });
+
+        optSection.style.display = hasOptional ? "block" : "none";
+    }
+
+    function createFieldElement(prop) {
+        const div = document.createElement("div");
+        div.className = "grid-x grid-padding-x";
+        const label = prop.name || prop.path.split('/').pop().split('#').pop();
+        const inputId = "field-" + prop.path.replace(/[^a-zA-Z0-9]/g, "-");
+
+        let inputHtml = "";
+        const inputType = prop.input_type;
+        if (inputType.type === "Select") {
+            inputHtml = '<select id="' + inputId + '">';
+            inputHtml += '<option value="">-- select --</option>';
+            (inputType.options || []).forEach(function(opt) {
+                inputHtml += '<option value="' + escapeHtml(opt) + '">' + escapeHtml(opt) + '</option>';
+            });
+            inputHtml += '</select>';
+        } else if (inputType.type === "Boolean") {
+            inputHtml = '<select id="' + inputId + '"><option value="">--</option><option value="true">true</option><option value="false">false</option></select>';
+        } else if (inputType.type === "Number") {
+            inputHtml = '<input type="number" id="' + inputId + '" step="any">';
+        } else if (inputType.type === "Date") {
+            inputHtml = '<input type="date" id="' + inputId + '">';
+        } else if (inputType.type === "DateTime") {
+            inputHtml = '<input type="datetime-local" id="' + inputId + '">';
+        } else if (inputType.type === "Url") {
+            inputHtml = '<input type="url" id="' + inputId + '">';
+        } else if (inputType.type === "EntityAutocomplete") {
+            inputHtml = '<input type="text" id="' + inputId + '" class="entity-autocomplete" data-class="' + escapeHtml(inputType.class_iri) + '" placeholder="Search...">';
+        } else {
+            inputHtml = '<input type="text" id="' + inputId + '">';
+        }
+
+        const desc = prop.description ? '<p class="help-text">' + escapeHtml(prop.description) + '</p>' : '';
+        const requiredMark = prop.required ? ' <span style="color:red">*</span>' : '';
+
+        div.innerHTML = '<div class="cell medium-10"><label>' + escapeHtml(label) + requiredMark + inputHtml + '</label>' + desc + '</div>' +
+            '<div class="cell medium-2" style="padding-top:1.5rem">' +
+            '<label><input type="checkbox" class="stated-toggle" data-path="' + escapeHtml(prop.path) + '" data-input="' + inputId + '" checked> Stated</label>' +
+            '<button class="button tiny save-field-btn" data-path="' + escapeHtml(prop.path) + '" data-input="' + inputId + '" data-datatype="' + escapeHtml(prop.datatype || '') + '">Save</button>' +
+            '</div>';
+
+        // Attach save handler
+        div.querySelector(".save-field-btn").addEventListener("click", function() {
+            saveField(this.dataset.path, this.dataset.input, this.dataset.datatype, div.querySelector(".stated-toggle").checked);
+        });
+
+        return div;
+    }
+
+    // --- Save field ---
+    async function saveField(path, inputId, datatype, stated) {
+        const entityIri = document.getElementById("entity-iri").value.trim();
+        if (!entityIri) {
+            showStatus("Enter or generate an entity IRI first.", true);
+            return;
+        }
+        const inputEl = document.getElementById(inputId);
+        const value = inputEl ? inputEl.value : "";
+        if (!value) return;
+
+        // Build literal or IRI value
+        let rdfValue;
+        if (datatype) {
+            rdfValue = '"' + escapeSparql(value) + '"^^<' + datatype + '>';
+        } else {
+            rdfValue = '"' + escapeSparql(value) + '"';
+        }
+
+        // Type the entity if needed
+        const typeClause = currentShape ? '<' + entityIri + '> a <' + currentShape.target_class + '> .' : '';
+
+        let sparql;
+        if (stated) {
+            sparql = 'INSERT DATA { ' + typeClause + ' <' + entityIri + '> <' + path + '> ' + rdfValue + ' . }';
+        } else {
+            // Non-stated: only annotation (would require Turtle I/O for RDF 1.2 reification)
+            // For now, just skip insert of the triple itself
+            sparql = 'INSERT DATA { ' + typeClause + ' }';
+        }
+
+        try {
+            const resp = await fetch(UPDATE_URL, {
+                method: "POST",
+                headers: {"Content-Type": "application/sparql-update"},
+                body: sparql
+            });
+            if (resp.ok) {
+                showStatus("Saved: " + path.split('/').pop().split('#').pop(), false);
+            } else {
+                const err = await resp.text();
+                showStatus("Error: " + err, true);
+            }
+        } catch (e) {
+            showStatus("Network error: " + e.message, true);
+        }
+    }
+
+    // --- IRI generation ---
+    document.getElementById("generate-iri-btn").addEventListener("click", function() {
+        if (!currentShape) return;
+        const base = currentShape.target_class.replace(/[^/]*$/, "");
+        const uuid = crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function(c) {
+            const r = Math.random() * 16 | 0;
+            return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+        document.getElementById("entity-iri").value = base + uuid;
+    });
+
+    // --- New entity button ---
+    document.getElementById("new-entity-btn").addEventListener("click", function() {
+        document.getElementById("entity-iri").value = "";
+        currentEntityIri = null;
+        if (currentShape) renderFields(currentShape);
+    });
+
+    // --- Entity search ---
+    let searchTimeout = null;
+    document.getElementById("entity-search").addEventListener("input", function() {
+        clearTimeout(searchTimeout);
+        const q = this.value.trim();
+        if (q.length < 2) {
+            document.getElementById("entity-list").innerHTML = "";
+            return;
+        }
+        searchTimeout = setTimeout(function() {
+            searchEntities(q);
+        }, 300);
+    });
+
+    async function searchEntities(q) {
+        const classParam = currentShape ? "&class=" + encodeURIComponent(currentShape.target_class) : "";
+        try {
+            const resp = await fetch(SEARCH_URL + "?q=" + encodeURIComponent(q) + "&dataset=" + encodeURIComponent(DATASET) + classParam);
+            if (resp.ok) {
+                const results = await resp.json();
+                const ul = document.getElementById("entity-list");
+                ul.innerHTML = "";
+                results.forEach(function(r) {
+                    const li = document.createElement("li");
+                    const a = document.createElement("a");
+                    a.href = "#";
+                    a.textContent = r.label + " (" + r.iri.split('/').pop() + ")";
+                    a.addEventListener("click", function(e) {
+                        e.preventDefault();
+                        document.getElementById("entity-iri").value = r.iri;
+                        currentEntityIri = r.iri;
+                    });
+                    li.appendChild(a);
+                    ul.appendChild(li);
+                });
+            }
+        } catch (e) {
+            // ignore search errors
+        }
+    }
+
+    // --- Toggle optional fields menu ---
+    document.getElementById("toggle-optional").addEventListener("click", function() {
+        const menu = document.getElementById("optional-fields-menu");
+        menu.style.display = menu.style.display === "none" ? "block" : "none";
+    });
+
+    // --- Helpers ---
+    function showStatus(msg, isError) {
+        const el = document.getElementById("save-status");
+        el.className = "update-result " + (isError ? "error" : "success");
+        el.textContent = msg;
+        el.style.display = "block";
+        setTimeout(function() { el.style.display = "none"; }, 3000);
+    }
+
+    function escapeHtml(s) {
+        if (!s) return "";
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function escapeSparql(s) {
+        return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    }
+})();
+</script>
+{% endblock %}
+{% endblock %}
