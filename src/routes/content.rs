@@ -268,6 +268,7 @@ async fn content_get(
                         &legacy_name,
                         &team_segments.join("/"),
                         &cookies,
+                        None,
                     )
                     .await
                     {
@@ -307,7 +308,16 @@ async fn content_get(
                 },
                 Some("_query") => {
                     let url_prefix = build_dataset_url_prefix(&parsed);
-                    match web::dataset_query(&state, &qualified, &url_prefix, &cookies).await {
+                    // B1: a `?query=` deep link pre-fills the YASGUI editor.
+                    match web::dataset_query(
+                        &state,
+                        &qualified,
+                        &url_prefix,
+                        &cookies,
+                        params.query.as_deref(),
+                    )
+                    .await
+                    {
                         Ok(html) => html.into_response(),
                         Err(e) => e.into_response(),
                     }
@@ -329,8 +339,14 @@ async fn content_get(
                                 // not public.
                                 axum::response::Redirect::to("/_login").into_response()
                             } else {
-                                match web::dataset_query(&state, &qualified, &url_prefix, &cookies)
-                                    .await
+                                match web::dataset_query(
+                                    &state,
+                                    &qualified,
+                                    &url_prefix,
+                                    &cookies,
+                                    None,
+                                )
+                                .await
                                 {
                                     Ok(html) => html.into_response(),
                                     Err(e) => e.into_response(),

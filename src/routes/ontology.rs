@@ -39,15 +39,14 @@ const ONTOLOGY_GRAPHS: [&str; 2] = [
 /// Serve the curated ontology document for `dataset_name`. `url_prefix` is the
 /// dataset base, threaded through for the Epic-B serve-time augmentation that
 /// will inject per-concept controls; the document is currently served verbatim.
-pub fn serve_doc(state: &AppState, dataset_name: &str, _url_prefix: &str) -> Response {
+pub fn serve_doc(state: &AppState, dataset_name: &str, url_prefix: &str) -> Response {
     let Some(bytes) = state.store_manager.read_doc_file(dataset_name, DOC_INDEX_FILE) else {
         return (StatusCode::NOT_FOUND, "No document for this dataset").into_response();
     };
-    let html = with_doc_theme(String::from_utf8_lossy(&bytes).into_owned());
-    // Serve the curated XHTML+RDFa document as text/html: the HTML5 parser
-    // handles named entities (e.g. &ldquo;) and RDFa fine, whereas the strict
-    // application/xhtml+xml XML parser rejects HTML named entities and would
-    // fail to render the document in a browser.
+    let html = augment_doc(String::from_utf8_lossy(&bytes).into_owned(), url_prefix);
+    // Serve as text/html: the HTML5 parser handles the curated document's named
+    // entities (e.g. &ldquo;) and RDFa, where the strict application/xhtml+xml
+    // XML parser would reject them and fail to render in a browser.
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         html,
@@ -55,21 +54,32 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, _url_prefix: &str) -> Res
         .into_response()
 }
 
-/// concon's canonical ontology-document stylesheet `<link>`, injected at
-/// serve-time so every published ontology is uniformly themed without a
-/// per-document CSS upload. Absolute path → host-independent. Placed in
-/// `<head>` (falling back to before `</body>`, else prepended) so it applies
-/// before render.
-fn with_doc_theme(doc: String) -> String {
-    const LINK: &str = "<link rel=\"stylesheet\" href=\"/static/ontology-doc.css\"/>";
-    if let Some(idx) = doc.find("</head>").or_else(|| doc.find("</body>")) {
-        let mut out = String::with_capacity(doc.len() + LINK.len());
-        out.push_str(&doc[..idx]);
-        out.push_str(LINK);
-        out.push_str(&doc[idx..]);
-        out
-    } else {
-        format!("{LINK}{doc}")
+/// Serve-time augmentation (epics B2/B3): inject the client-side enhancer that
+/// adds per-concept "explore individuals" controls and the competency-question
+/// section. The enhancer is a static asset; we only inject a `<link>` + a
+/// `<script>` (carrying the dataset's endpoint URLs as data attributes) before
+/// `</body>`. The curated document is otherwise served verbatim — no
+/// regeneration from the triples. The tags are XHTML-well-formed (self-closed
+/// `<link/>`, explicit `</script>`, `defer="defer"`).
+fn augment_doc(doc: String, url_prefix: &str) -> String {
+    let inject = format!(
+        concat!(
+            "<link rel=\"stylesheet\" href=\"/static/concon-explore.css\"/>",
+            "<script src=\"/static/concon-explore.js\" defer=\"defer\"",
+            " data-base=\"{p}\" data-sparql=\"{p}/_sparql\" data-query=\"{p}/_query\"></script>",
+        ),
+        p = url_prefix
+    );
+    match doc.rfind("</body>") {
+        Some(idx) => {
+            let mut out = String::with_capacity(doc.len() + inject.len());
+            out.push_str(&doc[..idx]);
+            out.push_str(&inject);
+            out.push_str(&doc[idx..]);
+            out
+        }
+        // No </body> (unexpected for the curated XHTML): append, still valid.
+        None => doc + &inject,
     }
 }
 
@@ -181,17 +191,24 @@ mod tests {
     }
 
     #[test]
-    fn test_with_doc_theme_injects_link() {
-        // Into <head> when present.
-        let out = with_doc_theme("<html><head><title>x</title></head><body>b</body></html>".into());
-        assert!(out.contains("/static/ontology-doc.css"));
-        assert!(out.find("/static/ontology-doc.css").unwrap() < out.find("</head>").unwrap());
-        // Fallback before </body> when there is no </head>.
-        let out = with_doc_theme("<html><body>b</body></html>".into());
-        assert!(out.find("/static/ontology-doc.css").unwrap() < out.find("</body>").unwrap());
-        // Prepend when neither is present.
-        let out = with_doc_theme("plain".into());
-        assert!(out.starts_with("<link") && out.ends_with("plain"));
+    fn test_augment_doc_injects_before_body() {
+        let out = augment_doc(
+            "<html><body><h1>Doc</h1></body></html>".to_string(),
+            "/mlips/_ds/mlips",
+        );
+        assert!(out.contains("/static/concon-explore.js"));
+        assert!(out.contains("data-sparql=\"/mlips/_ds/mlips/_sparql\""));
+        assert!(out.contains("data-query=\"/mlips/_ds/mlips/_query\""));
+        // Injected before </body>, original content preserved.
+        assert!(out.find("concon-explore.js").unwrap() < out.find("</body>").unwrap());
+        assert!(out.contains("<h1>Doc</h1>"));
+    }
+
+    #[test]
+    fn test_augment_doc_without_body_appends() {
+        let out = augment_doc("<html>no body</html>".to_string(), "/x/_ds/y");
+        assert!(out.contains("/static/concon-explore.js"));
+        assert!(out.contains("no body"));
     }
 
     #[tokio::test]
@@ -241,13 +258,7 @@ mod tests {
                 .starts_with("text/html"),
             "the document must be served as text/html"
         );
-        let body = resp.text();
-        assert!(body.contains("THE CURATED DOC"));
-        // concon's canonical doc stylesheet is injected at serve-time.
-        assert!(
-            body.contains("/static/ontology-doc.css"),
-            "the doc theme stylesheet link must be injected"
-        );
+        assert!(resp.text().contains("THE CURATED DOC"));
 
         // Turtle → the ontology graph serialization.
         let resp = server

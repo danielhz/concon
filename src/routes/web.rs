@@ -366,6 +366,7 @@ pub async fn dataset_query(
     dataset_name: &str,
     url_prefix: &str,
     cookies: &Cookies,
+    initial_query: Option<&str>,
 ) -> Result<Html<String>, (StatusCode, String)> {
     // Check dataset exists
     if state.store_manager.get_dataset(dataset_name).is_none() {
@@ -413,6 +414,7 @@ pub async fn dataset_query(
             dataset_name => display_name,
             url_prefix => url_prefix,
             breadcrumbs => breadcrumbs,
+            initial_query => initial_query,
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

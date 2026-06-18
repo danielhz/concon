@@ -14,7 +14,7 @@
     {{ dataset_name }}
 </h1>
 
-<div id="yasgui"></div>
+<div id="yasgui"{% if initial_query %} data-initial-query="{{ initial_query }}"{% endif %}></div>
 
 {% if username %}
 <h2>SPARQL Update</h2>
@@ -42,6 +42,14 @@ INSERT DATA { ex:s ex:p ex:o . }"></textarea>
         copyEndpointOnNewTab: false,
         persistenceId: "yasgui-{{ url_prefix|safe }}"
     });
+
+    // B1: pre-fill the editor from a `?query=` deep link (read from a data
+    // attribute so the query text can never inject script).
+    const iq = document.getElementById("yasgui").dataset.initialQuery;
+    if (iq) {
+        const tab = yasgui.getTab();
+        if (tab) { tab.setQuery(iq); }
+    }
 
     const updateBtn = document.getElementById("update-btn");
     if (updateBtn) {
