@@ -1,0 +1,177 @@
+#+TITLE: concon deployment runbook (A5)
+#+AUTHOR: @concon
+
+How to run concon as a service and publish the MLIPs resource on it. *@concon prepares this; @coordinator reviews; Daniel performs the launch, data load, and edge cutover* (irreversible/outward-facing — DNS, the w3id PR, and making repos public are his). The edge rules themselves live in =docs/edge-mapping.org= (A4); this runbook covers the host, the service, provisioning, loading, and staging verification up to (but not performing) the cutover.
+
+* Host policy (read first)
+
+- *Now (temporary):* deploy to the existing =kg.degu.cl= instance, reusing the =kg-degu-cl= user — no new host or user. Reach it *directly* at its native URLs for dev/preview. Do *not* make it a w3id or =onto.degu.cl= redirect target.
+- *Final (before camera-ready):* a stable host =<HOST>= (TBD). The systemd + nginx templates below are written for that final host; for =kg.degu.cl= they apply identically with the temporary user/paths.
+- The serving host never appears in a canonical IRI, so the temporary→final move costs nothing in published identifiers (only the edge redirect target changes — see =edge-mapping.org=).
+
+* What concon needs at runtime
+
+The server reads =concon.toml= from its *working directory* and serves =templates/= and =static/= *relative to the working directory*. So the working directory must contain:
+
+- =target/release/concon= — the server binary (package =concon=; note the binary is =concon=, not the old =mlipe=).
+- =concon.toml= — configuration (below).
+- =templates/= and =static/= — shipped with the repo; required at runtime.
+- the data directory (default =data/=) and the system-data Turtle file (default =system.ttl=) — created on first run if absent.
+
+* Build
+
+Build deps: a Rust toolchain, =clang=, and — because =reqwest='s default TLS pulls =openssl-sys= — =pkg-config= and =libssl-dev= (Debian) / =openssl-devel= (Fedora). Then:
+
+#+begin_src bash
+cargo build --release
+# binaries: target/release/concon (server) and target/release/provision_mlips
+#+end_src
+
+(The committed =Dockerfile= is stale — it still copies a =mlipe= binary and omits =templates/=, =static/=, and =pkg-config=/=libssl-dev=. The systemd path below is the supported deployment; the Dockerfile needs a follow-up fix before it is usable.)
+
+* Configuration — =concon.toml=
+
+The shipped =concon.example.toml= omits =store.data_dir= and =store.files_dir=, which the server requires. Use this complete form:
+
+#+begin_src toml
+[server]
+host = "127.0.0.1"   # bind locally; nginx terminates TLS and proxies in
+port = 3000
+
+[store]
+system_data = "system.ttl"   # seed users/teams/datasets; created on first run
+data_dir    = "data"         # per-dataset Oxigraph stores live here
+files_dir   = "data/files"   # uploaded file blobs
+
+[grobid]
+url = ""                     # empty disables PDF metadata extraction
+#+end_src
+
+First-run admin: if =system.ttl= does not exist, the server creates it with a root-team admin from =MLIPE_ADMIN_USER= / =MLIPE_ADMIN_PASS= (default =admin=/=admin=). *Set these to real credentials on first launch* (see the unit below); the same account is what the loader authenticates as for ingest.
+
+* systemd unit
+
+=/etc/systemd/system/concon.service= (final host; for =kg.degu.cl= use =User=kg-degu-cl= and that home):
+
+#+begin_src ini
+[Unit]
+Description=concon (collaborative knowledge graph platform)
+After=network.target
+
+[Service]
+User=concon
+WorkingDirectory=/home/concon/concon
+ExecStart=/home/concon/concon/target/release/concon
+Restart=always
+# First-run admin credentials (only consulted when system.ttl is absent).
+# Keep real values in an untracked drop-in or EnvironmentFile, never in git.
+Environment=MLIPE_ADMIN_USER=admin
+# Environment=MLIPE_ADMIN_PASS=...    # set via `systemctl edit` drop-in
+RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+#+end_src
+
+#+begin_src bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now concon
+sudo systemctl status concon
+#+end_src
+
+* nginx vhost (reverse proxy + TLS)
+
+Mirror the existing =onto.degu.cl= proxy, with two additions: raise =client_max_body_size= so graph/doc PUTs are not truncated (the app accepts up to 100 MB), and generous proxy timeouts for ingest.
+
+#+begin_src nginx
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name <HOST>;
+    # ... ssl_certificate / ssl_certificate_key ...
+
+    client_max_body_size 100m;       # match the app's 100 MB body limit (ingest)
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+}
+#+end_src
+
+CORS for browser SPARQL clients (YASGUI) is handled *in the app*, not nginx. Do *not* add the =/mlips/…= edge rewrite to this vhost — that belongs on =onto.degu.cl= / w3id (=edge-mapping.org=), and only at the permanent cutover.
+
+* Provision the =mlips= resource
+
+The dataset must exist before the server can open it. Run the provisioner from the working directory (it reads =concon.toml=), then restart so the server opens the new store:
+
+#+begin_src bash
+./target/release/provision_mlips    # idempotent: creates the mlips team + Public mlips dataset
+sudo systemctl restart concon
+#+end_src
+
+This yields the team =mlips= and a =PublicVisibility= dataset served at =<HOST>/mlips/_ds/mlips/=.
+
+* Load the data (the D1 ingest contract)
+
+@coder's D1 loader drives this; the manual equivalent below is the contract and is used for the A1 initial load / verification. Authenticate with HTTP Basic as the admin (or a dedicated ingest) account — *credentials from the environment, never committed*. Replace-by-named-graph is idempotent, so re-running is safe.
+
+#+begin_src bash
+BASE=https://<HOST>/mlips/_ds/mlips
+CURL="curl -fsS -u $INGEST_USER:$INGEST_PASS"   # creds from env
+
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @schema.ttl   "$BASE/_graph?graph=https://w3id.org/mlips/graph/schema"
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @vocab.ttl    "$BASE/_graph?graph=https://w3id.org/mlips/graph/vocab"
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @kg.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/kg"
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @computed.ttl "$BASE/_graph?graph=https://w3id.org/mlips/graph/computed"
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @cq.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/cq"
+
+# Curated document + its stylesheet (served at the dataset base, augmented later).
+$CURL -X PUT -H 'Content-Type: application/xhtml+xml' --data-binary @mlips.source.xhtml "$BASE/_doc"
+$CURL -X PUT -H 'Content-Type: text/css'              --data-binary @mlips.css           "$BASE/_doc/mlips.css"
+#+end_src
+
+(Graph names and the schema/vocab split are the blessed ingest contract; @coder finalises the per-graph file boundaries. Writes require auth; anonymous reads require the dataset to be Public.)
+
+* Staging verification
+
+Run after provisioning + loading, before any edge cutover:
+
+#+begin_src bash
+BASE=https://<HOST>/mlips/_ds/mlips
+
+curl -sI "$BASE/"                                          # 200 — ontology document (HTML)
+curl -s  -H 'Accept: text/turtle'        "$BASE/" | head   # ontology serialization (schema+vocab)
+curl -s  -H 'Accept: application/rdf+xml' "$BASE/" | head
+curl -sI "$BASE/mlips.css"                                 # 200 text/css (companion asset)
+
+curl -s  "$BASE/_entity/kumar2025" | head                  # entity page (HTML)
+curl -s  -H 'Accept: text/turtle' "$BASE/_entity/kumar2025" | head   # entity CBD (Turtle)
+
+# Public SPARQL (union default graph — no GRAPH clause needed across named graphs).
+curl -s "$BASE/_sparql" --data-urlencode 'query=SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }'
+
+# Negative: anonymous write must be rejected.
+curl -s -o /dev/null -w '%{http_code}\n' -X PUT \
+     "$BASE/_graph?graph=https://w3id.org/mlips/graph/kg"  # expect 401
+#+end_src
+
+Expected: document and entity pages render; both negotiate Turtle/RDF-XML; the SPARQL count is non-zero and matches the loaded corpus; the unauthenticated PUT returns =401=. Only after this passes does Daniel proceed to the edge cutover in =edge-mapping.org=.
+
+* Operations
+
+- *Backups:* back up =data/= before any re-load or upgrade. (=target/release/migrate= already snapshots =data/= before a schema migration; replace-by-graph reloads do not, so snapshot manually first.)
+- *Upgrades:* rebuild, =systemctl restart concon=. If =migration::CURRENT_SCHEMA_VERSION= changed, run =./target/release/migrate= first (it backs up, then migrates).
+- *Re-loading the dataset:* re-running the PUTs replaces each graph in place; no need to delete the dataset.
+
+* Security posture (and what is still pending)
+
+- Run only behind TLS (nginx); bind concon to =127.0.0.1=.
+- Reads: anonymous access is gated to =PublicVisibility= datasets; non-Public is =404= to anonymous. Writes (=_graph=, =_doc=, =_update=, =_shacl/_update=) require HTTP Basic (or a session) and writer permission; =_sparql= is query-only.
+- File perms: =data/= and =system.ttl= hold the admin password hash — restrict to the service user.
+- *Pending B4 hardening (not yet in the platform):* SPARQL query timeout, result-row cap, explicit CORS allow-list for client-side YASGUI, and a *scoped, write-only ingest token* to replace reusing the admin account in the loader. Track these before the public launch is considered hardened.
