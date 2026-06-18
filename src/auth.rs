@@ -140,6 +140,14 @@ pub fn get_public_datasets(store: &Store) -> Vec<DatasetInfo> {
     datasets
 }
 
+/// Whether a dataset (by its qualified `datasetName`, e.g. "mlips/mlips") has
+/// `mlipe:hasVisibility = PublicVisibility`. Used for the anonymous-read gate.
+/// Resolved by membership in `get_public_datasets` so the URL-derived name is
+/// never interpolated into SPARQL (no injection).
+pub fn is_dataset_public(store: &Store, name: &str) -> bool {
+    get_public_datasets(store).iter().any(|d| d.name == name)
+}
+
 /// Check if a user is an admin of the root team.
 pub fn is_root_admin(store: &Store, user_iri: &str) -> bool {
     let iri = user_iri.trim_matches(|c| c == '<' || c == '>');

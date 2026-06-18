@@ -214,8 +214,26 @@ async fn content_get(
         ParsedPath::NewTeam { .. } => true,
     };
 
-    if needs_login && web::get_username(&cookies, &state).is_none() {
+    let session = web::get_username(&cookies, &state);
+
+    if needs_login && session.is_none() {
         return axum::response::Redirect::to("/_login").into_response();
+    }
+
+    // Minimal Public-read gate (the cheap half of Epic B4): anonymous access
+    // to a dataset's public-read views (`_sparql`, `_entity`, the base view)
+    // is allowed only when the dataset is Public. Any anonymous DatasetView
+    // reaching this point is a public-read view — the non-public views above
+    // already required login — so a non-Public dataset is 404 to anonymous
+    // (don't reveal its existence). Full team/role visibility is later B4.
+    let anon_dataset = session.is_none() && matches!(&parsed, ParsedPath::DatasetView { .. });
+    if anon_dataset
+        && !crate::auth::is_dataset_public(
+            &state.store_manager.system,
+            &parsed.qualified_dataset_name().unwrap(),
+        )
+    {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
 
     match &parsed {
@@ -440,8 +458,25 @@ async fn content_post(
         _ => true,
     };
 
-    if needs_login && web::get_username(&cookies, &state).is_none() {
+    let session = web::get_username(&cookies, &state);
+
+    if needs_login && session.is_none() {
         return axum::response::Redirect::to("/_login").into_response();
+    }
+
+    // Minimal Public-read gate for the read-via-POST endpoint: anonymous
+    // `_sparql` POST is allowed only on Public datasets. The write endpoints
+    // (`_update`, `_shacl/*`) are not gated here — they get write auth (HTTP
+    // Basic) in the A1 ingest work; until then they keep their prior behaviour.
+    let anon_sparql_post = session.is_none()
+        && matches!(&parsed, ParsedPath::DatasetView { view, .. } if view.as_deref() == Some("_sparql"));
+    if anon_sparql_post
+        && !crate::auth::is_dataset_public(
+            &state.store_manager.system,
+            &parsed.qualified_dataset_name().unwrap(),
+        )
+    {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
 
     match &parsed {
@@ -844,6 +879,46 @@ mod tests {
                 view_arg: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_anonymous_public_read_gate() {
+        use crate::routes::create_router;
+        use crate::state::AppState;
+        use axum_test::TestServer;
+
+        let state = AppState::new().unwrap();
+        // Public dataset: anonymous reads allowed.
+        state.store_manager.create_dataset("root/pub").unwrap();
+        state.store_manager.insert_dataset_metadata("root/pub").unwrap();
+        // Non-public dataset: anonymous reads denied (404, no existence leak).
+        state.store_manager.create_dataset("root/secret").unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata_with_visibility("root/secret", "LoggedUsersVisibility")
+            .unwrap();
+
+        let server = TestServer::new(create_router(state));
+
+        // _sparql GET: public → 200, non-public → 404.
+        let r = server
+            .get("/_ds/pub/_sparql")
+            .add_query_param("query", "ASK {}")
+            .await;
+        r.assert_status_ok();
+        let r = server
+            .get("/_ds/secret/_sparql")
+            .add_query_param("query", "ASK {}")
+            .await;
+        r.assert_status(StatusCode::NOT_FOUND);
+
+        // _sparql POST on non-public → 404.
+        let r = server.post("/_ds/secret/_sparql").text("ASK {}").await;
+        r.assert_status(StatusCode::NOT_FOUND);
+
+        // Entity dereferencing on a non-public dataset → 404 to anonymous.
+        let r = server.get("/_ds/secret/_entity/foo").await;
+        r.assert_status(StatusCode::NOT_FOUND);
     }
 
     #[test]

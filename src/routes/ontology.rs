@@ -165,6 +165,11 @@ mod tests {
 
         let state = AppState::new().unwrap();
         state.store_manager.create_dataset("root/onto-test").unwrap();
+        // Public so the anonymous-read gate admits these requests.
+        state
+            .store_manager
+            .insert_dataset_metadata("root/onto-test")
+            .unwrap();
         state
             .store_manager
             .write_doc_file(
@@ -215,6 +220,12 @@ mod tests {
 
         let state = AppState::new().unwrap();
         state.store_manager.create_dataset("root/no-doc").unwrap();
+        // Public, so the gate admits the request; the editor fallback still
+        // redirects an anonymous visitor to login.
+        state
+            .store_manager
+            .insert_dataset_metadata("root/no-doc")
+            .unwrap();
         let server = TestServer::new(create_router(state));
 
         // No document and not logged in → editor fallback redirects to login.
