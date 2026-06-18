@@ -1,0 +1,116 @@
+#+TITLE: Edge mapping for the MLIPs published identifiers (A4)
+#+AUTHOR: @concon
+
+This is the specification for the *edge* rules that keep the published MLIPs identifiers stable while concon serves them under its own native URLs. concon does NOT carry =/mlips/…= compatibility routes; IRI stability lives entirely at the edge (the w3id permanent-identifier =.htaccess= and a transitional nginx vhost). *@concon writes these rules; @coordinator reviews; Daniel deploys them* (DNS, nginx, and the w3id PR are his — they are irreversible/outward-facing and must not be performed unasked). Nothing here is wired against the temporary serving host.
+
+* The two layers (never conflate them)
+
+- *Identity layer* — the permanent, citable IRIs that live inside the RDF. These never change.
+- *Serving layer* — where the app actually runs (=<HOST>=, swappable). The edge maps identity → serving.
+
+** Layer 1 — canonical IRIs (FIXED; in the triples; cited in the paper)
+
+| Kind                           | Canonical IRI                            | Example                                    |
+|--------------------------------+------------------------------------------+--------------------------------------------|
+| Ontology (namespace / document)| =https://w3id.org/mlips=                 | —                                          |
+| Class / predicate / vocab indiv| =https://w3id.org/mlips#<Term>=          | =https://w3id.org/mlips#MLIPMethod=        |
+| Per-paper instance (dataset)   | =https://w3id.org/mlips/entity/<id>=     | =https://w3id.org/mlips/entity/kumar2025=  |
+
+** Layer 2 — concon native serving URLs (=<HOST>= is the swappable serving host)
+
+| Purpose                              | concon native URL                       |
+|--------------------------------------+-----------------------------------------|
+| Ontology document + negotiation      | =<HOST>/mlips/_ds/mlips/=               |
+| Per-entity description + negotiation | =<HOST>/mlips/_ds/mlips/_entity/{id}=  |
+| Public SPARQL endpoint               | =<HOST>/mlips/_ds/mlips/_sparql=       |
+| YASGUI editor                        | =<HOST>/mlips/_ds/mlips/_query=        |
+
+Only the *ontology document* and the *entity* identifiers are dereferenced by third parties, so the edge needs only *two rules*. SPARQL/YASGUI are reached directly at the native URLs (not via w3id) and need no edge rule.
+
+* Hash vs. slash (why two rules, and why one of them is a 303)
+
+- Classes, predicates, and controlled-vocabulary individuals are =#=-IRIs. The fragment (=#MLIPMethod=) is *never sent to the server*; a client requesting =https://w3id.org/mlips#MLIPMethod= actually fetches the single resource =https://w3id.org/mlips= and then jumps to the =#MLIPMethod= anchor. So there is *one* negotiated resource for the whole ontology, and a normal redirect to the document URL is correct. Browsers *re-apply the fragment after a 3xx redirect*, so =…/mlips#MLIPMethod= lands on =<HOST>/mlips/_ds/mlips/#MLIPMethod=. (Requirement: the served document must carry =id="<Term>"= anchors matching the term local names — the curated =mlips.source.xhtml= already does.)
+- Per-paper instances are *slash* IRIs (=/entity/{id}=). These are non-information resources, so the Linked Data idiom is *303 See Other* to the document that describes them. concon answers the 303 target with =200= and the negotiated representation.
+
+* Content negotiation is preserved automatically
+
+Both rules are *redirects*, not proxies. On following a 3xx the client re-issues the request to the =Location= with its *original headers*, including =Accept=. So =Accept: text/turtle= sent to =w3id.org/mlips/entity/kumar2025= arrives at concon's native URL unchanged, and concon performs the negotiation there. No header rewriting is needed at the edge.
+
+* Rule set 1 — w3id permanent-identifier =.htaccess= (END STATE)
+
+This is the permanent mapping, deployed at the *final* cutover via a PR to the w3id perma-id repository (Daniel's). It lives in the =mlips/= namespace directory; rules match the path *after* =/mlips/=.
+
+#+begin_src apache
+RewriteEngine on
+
+# Per-paper instances: slash IRIs → 303 See Other to the entity description.
+RewriteRule "^entity/(.+)$" "https://<HOST>/mlips/_ds/mlips/_entity/$1" [R=303,L]
+
+# The ontology namespace / document itself (and, by browser fragment re-apply,
+# every w3id.org/mlips#Term). 302 while transitional, 301 once the host is stable.
+RewriteRule "^$" "https://<HOST>/mlips/_ds/mlips/" [R=301,L]
+#+end_src
+
+Notes for the deployer:
+- Confirm the namespace directory's trailing-slash handling: a bare =w3id.org/mlips= should reach this =.htaccess= (the =^$= rule). If the w3id setup canonicalises =/mlips= → =/mlips/= first, that extra hop is harmless.
+- Do *not* add rules for =_sparql=/=_query=/CSS — they are not citable identifiers.
+- CORS for cross-origin clients is set by concon at the target, not here.
+
+* Rule set 2 — transitional nginx on =onto.degu.cl= (the double-hop step)
+
+Today =onto.degu.cl= proxies everything to the standalone onto-server (=proxy_pass http://127.0.0.1:3006=, see =code/nginx/onto.degu.cl.conf=), and w3id points at =onto.degu.cl=. At cutover, *before* the w3id PR lands, replace that proxy with redirects to the concon host. This gives a transitional double hop (=w3id → onto.degu.cl → <HOST>=) so nothing breaks between steps.
+
+#+begin_src nginx
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name onto.degu.cl;
+    # ... existing TLS config ...
+
+    # Per-paper instances → entity description (regex; evaluated before the
+    # prefix fallback below, so it wins for /mlips/entity/...).
+    location ~ "^/mlips/entity/(.+)$" {
+        return 302 https://<HOST>/mlips/_ds/mlips/_entity/$1;
+    }
+
+    # The ontology namespace itself.
+    location = /mlips {
+        return 302 https://<HOST>/mlips/_ds/mlips/;
+    }
+
+    # Anything else under /mlips/ (e.g. the old onto-server's static assets) →
+    # the document base. Plain prefix (NOT `^~`), so the entity regex above is
+    # still evaluated first.
+    location /mlips/ {
+        return 302 https://<HOST>/mlips/_ds/mlips/;
+    }
+}
+#+end_src
+
+Why =302= here and =301= at w3id: this hop is temporary, so it stays a non-cached =302= until the host is declared stable; the permanent identity (w3id) is the place to commit to =301=. Once the w3id PR (rule set 1) lands and points directly at =<HOST>=, this nginx hop becomes redundant and the standalone onto-server can be retired.
+
+* Deployment sequence (Daniel's; @concon prepares, @coordinator reviews)
+
+1. Launch concon at =<HOST>=, provision the dataset (=provision_mlips=), and load it via the D1 loader. Verify directly at the native URLs.
+2. Swap =onto.degu.cl= from the onto-server proxy to *rule set 2* (=302=), pointing at =<HOST>=. Verify the double hop end-to-end, then bump to =301= and retire the onto-server.
+3. Land *rule set 1* (the w3id PR) pointing directly at =<HOST>=, collapsing the double hop. The =onto.degu.cl= redirect then becomes a courtesy alias (keep or retire).
+
+*Host policy:* =<HOST>= is the *final, stable* host (TBD before camera-ready). The temporary instance is reached *directly* for dev/preview and is *never* made a w3id or =onto.degu.cl= redirect target — a permanent identifier must never point at a throwaway host. The temporary→final swap then costs nothing in the published IRIs, because only =<HOST>= (the redirect target) moves.
+
+* Verification checklist (run after each step)
+
+#+begin_src bash
+# Ontology resource → document base, negotiation honoured through the redirect.
+curl -sI            https://w3id.org/mlips                 # 301/302 → <HOST>/mlips/_ds/mlips/
+curl -s  -L -H 'Accept: text/turtle' https://w3id.org/mlips        # Turtle of the ontology
+curl -s  -L -H 'Accept: application/rdf+xml' https://w3id.org/mlips # RDF/XML
+
+# Entity slash-IRI → 303 → entity description, CBD negotiated.
+curl -sI            https://w3id.org/mlips/entity/kumar2025         # 303 → …/_entity/kumar2025
+curl -s  -L -H 'Accept: text/turtle' https://w3id.org/mlips/entity/kumar2025
+
+# Fragment (browser): https://w3id.org/mlips#MLIPMethod should land on the
+# document base and scroll to the MLIPMethod section.
+#+end_src
+
+A passing run means: the published IRIs are unchanged, =Accept= survives the hop(s), the 303 is in place for entities, and =#Term= fragments resolve in the served document.
