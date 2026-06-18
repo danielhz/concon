@@ -47,7 +47,9 @@ files_dir   = "data/files"   # uploaded file blobs
 url = ""                     # empty disables PDF metadata extraction
 #+end_src
 
-First-run admin: if =system.ttl= does not exist, the server creates it with a root-team admin from =MLIPE_ADMIN_USER= / =MLIPE_ADMIN_PASS= (default =admin=/=admin=). *Set these to real credentials on first launch* (see the unit below); the same account is what the loader authenticates as for ingest.
+First-run admin: if =system.ttl= does not exist, the server creates it with a root-team admin from =MLIPE_ADMIN_USER= / =MLIPE_ADMIN_PASS= (default =admin=/=admin=). *Set these to real credentials on first launch* (see the unit below).
+
+Ingest token (recommended for the loader): set =CONCON_INGEST_TOKEN= to a long random secret. When present, the ingest write endpoints accept =Authorization: Bearer <token>= — a write-only credential that grants no read/UI identity — so the loader does not reuse the admin account. Leave it unset to disable bearer auth (writes then require a session or HTTP Basic). Keep the value in the untracked systemd drop-in / EnvironmentFile, never in git.
 
 * systemd unit
 
@@ -63,10 +65,12 @@ User=concon
 WorkingDirectory=/home/concon/concon
 ExecStart=/home/concon/concon/target/release/concon
 Restart=always
-# First-run admin credentials (only consulted when system.ttl is absent).
-# Keep real values in an untracked drop-in or EnvironmentFile, never in git.
+# Secrets (only the admin pair is consulted, and only when system.ttl is
+# absent). Keep real values in an untracked drop-in / EnvironmentFile, never
+# in git — e.g. `systemctl edit concon` to add an [Service] Environment= drop-in.
 Environment=MLIPE_ADMIN_USER=admin
-# Environment=MLIPE_ADMIN_PASS=...    # set via `systemctl edit` drop-in
+# Environment=MLIPE_ADMIN_PASS=...        # set via `systemctl edit` drop-in
+# Environment=CONCON_INGEST_TOKEN=...     # write-only Bearer token for the loader
 RUST_LOG=info
 
 [Install]
@@ -119,11 +123,11 @@ This yields the team =mlips= and a =PublicVisibility= dataset served at =<HOST>/
 
 * Load the data (the D1 ingest contract)
 
-@coder's D1 loader drives this; the manual equivalent below is the contract and is used for the A1 initial load / verification. Authenticate with HTTP Basic as the admin (or a dedicated ingest) account — *credentials from the environment, never committed*. Replace-by-named-graph is idempotent, so re-running is safe.
+@coder's D1 loader drives this; the manual equivalent below is the contract and is used for the A1 initial load / verification. Authenticate with the *write-only ingest token* (=Authorization: Bearer=, from =CONCON_INGEST_TOKEN= — the same secret set in the unit). A session cookie or HTTP Basic as a writer also works, but the Bearer token avoids reusing a user account. *Secret from the environment, never committed.* Replace-by-named-graph is idempotent, so re-running is safe.
 
 #+begin_src bash
 BASE=https://<HOST>/mlips/_ds/mlips
-CURL="curl -fsS -u $INGEST_USER:$INGEST_PASS"   # creds from env
+CURL="curl -fsS -H \"Authorization: Bearer $CONCON_INGEST_TOKEN\""   # secret from env
 
 $CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @schema.ttl   "$BASE/_graph?graph=https://w3id.org/mlips/graph/schema"
 $CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @vocab.ttl    "$BASE/_graph?graph=https://w3id.org/mlips/graph/vocab"
@@ -169,9 +173,10 @@ Expected: document and entity pages render; both negotiate Turtle/RDF-XML; the S
 - *Upgrades:* rebuild, =systemctl restart concon=. If =migration::CURRENT_SCHEMA_VERSION= changed, run =./target/release/migrate= first (it backs up, then migrates).
 - *Re-loading the dataset:* re-running the PUTs replaces each graph in place; no need to delete the dataset.
 
-* Security posture (and what is still pending)
+* Security posture
 
 - Run only behind TLS (nginx); bind concon to =127.0.0.1=.
-- Reads: anonymous access is gated to =PublicVisibility= datasets; non-Public is =404= to anonymous. Writes (=_graph=, =_doc=, =_update=, =_shacl/_update=) require HTTP Basic (or a session) and writer permission; =_sparql= is query-only.
-- File perms: =data/= and =system.ttl= hold the admin password hash — restrict to the service user.
-- *Pending B4 hardening (not yet in the platform):* SPARQL query timeout, result-row cap, explicit CORS allow-list for client-side YASGUI, and a *scoped, write-only ingest token* to replace reusing the admin account in the loader. Track these before the public launch is considered hardened.
+- Reads: anonymous access is gated to =PublicVisibility= datasets; non-Public is =404= to anonymous. =_sparql= is query-only (no update fallback), runs with a 30 s query timeout, and caps results at 10 000 rows (flagged with the =x-concon-results-truncated= header). CORS allows any origin to *read* (cross-origin YASGUI/WebVOWL) with no credentials; cross-origin writes are not allowed.
+- Writes (=_graph=, =_doc=, =_update=, =_shacl/_update=) require the write-only =CONCON_INGEST_TOKEN= Bearer token, or a session / HTTP Basic with writer permission (root admin or owning-team admin).
+- File perms: =data/= and =system.ttl= hold the admin password hash (and the system store) — restrict to the service user. Keep =CONCON_INGEST_TOKEN= and =MLIPE_ADMIN_PASS= out of git (untracked drop-in / EnvironmentFile).
+- *Still open (future):* finer per-team write roles and per-dataset-scoped ingest tokens; the current ingest token is a single global write credential.
