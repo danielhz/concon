@@ -52,3 +52,18 @@ A smoke test script builds the Docker image, starts a container, tests all API e
 2. Define an ontology for managing users, RDF repositories, roles, permissions, and teams.
 
 3. Integrate YASGUI as the SPARQL query editor, served as static assets from the Axum application.
+
+* License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([[file:LICENSE-APACHE][LICENSE-APACHE]] or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([[file:LICENSE-MIT][LICENSE-MIT]] or http://opensource.org/licenses/MIT)
+
+at your option.
+
+Third-party assets vendored under =static/vendor/= (jQuery, Foundation, YASGUI) remain under their own respective licenses.
+
+** Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
