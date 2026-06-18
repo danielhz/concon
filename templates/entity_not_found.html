@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}404 — entity not in current release{% endblock %}
+
+{% block content %}
+<h1>404 — entity not in current release</h1>
+<p>No triples were found for <code>&lt;{{ subject_iri }}&gt;</code> in the current
+knowledge-graph release.</p>
+<p>The MLIPs knowledge graph encodes a curated corpus; an entity IRI under this
+prefix may exist in a future release but is not currently dereferenced.</p>
+{% endblock %}

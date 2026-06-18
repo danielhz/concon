@@ -4,7 +4,9 @@ use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use tower_cookies::Cookies;
 
+use super::entity;
 use super::files;
+use super::ontology;
 use super::sparql;
 use super::web;
 use crate::state::AppState;
@@ -23,6 +25,9 @@ pub enum ParsedPath {
         team_segments: Vec<String>,
         dataset: String,
         view: Option<String>,
+        /// Trailing non-`_` path segment after the view, e.g. the entity id in
+        /// `_ds/{dataset}/_entity/{id}`. `None` for views without an argument.
+        view_arg: Option<String>,
     },
     /// /{team-path}/_files/{_view} — file catalog
     FileCatalog {
@@ -110,10 +115,18 @@ pub fn parse_path(path: &str) -> ParsedPath {
             } else {
                 Some(view_parts.join("/"))
             };
+            // Capture a single trailing non-`_` segment as the view argument,
+            // e.g. the entity id in `_ds/{dataset}/_entity/{id}`.
+            let view_arg = if i < segments.len() && !segments[i].starts_with('_') {
+                Some(segments[i].to_string())
+            } else {
+                None
+            };
             return ParsedPath::DatasetView {
                 team_segments,
                 dataset,
                 view,
+                view_arg,
             };
         }
 
@@ -171,6 +184,7 @@ async fn content_get(
     Path(path): Path<String>,
     Query(params): Query<sparql::SparqlQueryParams>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    headers: HeaderMap,
     cookies: Cookies,
 ) -> Response {
     let parsed = parse_path(&path);
@@ -189,7 +203,12 @@ async fn content_get(
     // SPARQL endpoints remain accessible for programmatic access.
     let needs_login = match &parsed {
         ParsedPath::TeamPage { .. } => true,
-        ParsedPath::DatasetView { view, .. } => view.as_deref() != Some("_sparql"),
+        ParsedPath::DatasetView { view, .. } => {
+            // Public read endpoints: the SPARQL endpoint, entity dereferencing,
+            // and the ontology-document base view (`None`). The base view's
+            // editor fallback re-checks login inside the handler.
+            !matches!(view.as_deref(), Some("_sparql") | Some("_entity") | None)
+        }
         ParsedPath::FileCatalog { view, .. } => view.as_deref() != Some("_query"),
         ParsedPath::FileItem { .. } => true,
         ParsedPath::NewTeam { .. } => true,
@@ -224,7 +243,9 @@ async fn content_get(
                 Err(e) => e.into_response(),
             }
         }
-        ParsedPath::DatasetView { dataset, view, .. } => {
+        ParsedPath::DatasetView {
+            view, view_arg, ..
+        } => {
             let qualified = parsed.qualified_dataset_name().unwrap();
             match view.as_deref() {
                 Some("_sparql") => {
@@ -233,11 +254,51 @@ async fn content_get(
                         Err(e) => e.into_response(),
                     }
                 }
-                Some("_query") | None => {
+                Some("_entity") => match view_arg.as_deref() {
+                    Some(id) => {
+                        let url_prefix = build_dataset_url_prefix(&parsed);
+                        let session = web::get_username(&cookies, &state);
+                        let is_admin = web::is_root_admin(&session, &state);
+                        let username = session.map(|s| s.username);
+                        entity::serve_entity(
+                            &state, &qualified, &url_prefix, id, &headers, username, is_admin,
+                        )
+                        .await
+                    }
+                    None => (StatusCode::NOT_FOUND, "Missing entity id".to_string()).into_response(),
+                },
+                Some("_query") => {
                     let url_prefix = build_dataset_url_prefix(&parsed);
                     match web::dataset_query(&state, &qualified, &url_prefix, &cookies).await {
                         Ok(html) => html.into_response(),
                         Err(e) => e.into_response(),
+                    }
+                }
+                None => {
+                    let url_prefix = build_dataset_url_prefix(&parsed);
+                    match view_arg.as_deref() {
+                        // Companion asset of the served document (e.g. stylesheet).
+                        Some(asset) => ontology::serve_doc_asset(&state, &qualified, asset),
+                        None => {
+                            // Content negotiation at the base URL.
+                            let fmt = entity::negotiate_format(&headers);
+                            if fmt == "ttl" || fmt == "owl" {
+                                ontology::dump_ontology_rdf(&state, &qualified, fmt)
+                            } else if state.store_manager.has_doc(&qualified) {
+                                ontology::serve_doc(&state, &qualified, &url_prefix)
+                            } else if web::get_username(&cookies, &state).is_none() {
+                                // No document: fall back to the editor, which is
+                                // not public.
+                                axum::response::Redirect::to("/_login").into_response()
+                            } else {
+                                match web::dataset_query(&state, &qualified, &url_prefix, &cookies)
+                                    .await
+                                {
+                                    Ok(html) => html.into_response(),
+                                    Err(e) => e.into_response(),
+                                }
+                            }
+                        }
                     }
                 }
                 Some("_update") | Some("_shacl/_update") => (
@@ -595,6 +656,7 @@ mod tests {
                 team_segments: vec!["materials".into()],
                 dataset: "potentials".into(),
                 view: Some("_query".into()),
+                view_arg: None,
             }
         );
     }
@@ -607,6 +669,7 @@ mod tests {
                 team_segments: vec!["materials".into()],
                 dataset: "potentials".into(),
                 view: None,
+                view_arg: None,
             }
         );
     }
@@ -619,6 +682,7 @@ mod tests {
                 team_segments: vec![],
                 dataset: "my-dataset".into(),
                 view: Some("_sparql".into()),
+                view_arg: None,
             }
         );
     }
@@ -631,6 +695,7 @@ mod tests {
                 team_segments: vec!["materials".into(), "atomistic".into()],
                 dataset: "potentials".into(),
                 view: Some("_update".into()),
+                view_arg: None,
             }
         );
     }
@@ -750,6 +815,7 @@ mod tests {
                 team_segments: vec!["materials".into()],
                 dataset: "pot".into(),
                 view: Some("_shacl/_query".into()),
+                view_arg: None,
             }
         );
     }
@@ -762,6 +828,7 @@ mod tests {
                 team_segments: vec![],
                 dataset: "my-ds".into(),
                 view: Some("_shacl/_update".into()),
+                view_arg: None,
             }
         );
     }
@@ -774,6 +841,33 @@ mod tests {
                 team_segments: vec!["materials".into()],
                 dataset: "pot".into(),
                 view: Some("_entities".into()),
+                view_arg: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_entity_view_with_id() {
+        assert_eq!(
+            parse_path("mlips/_ds/mlips/_entity/kumar2025"),
+            ParsedPath::DatasetView {
+                team_segments: vec!["mlips".into()],
+                dataset: "mlips".into(),
+                view: Some("_entity".into()),
+                view_arg: Some("kumar2025".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_entity_view_without_id() {
+        assert_eq!(
+            parse_path("mlips/_ds/mlips/_entity"),
+            ParsedPath::DatasetView {
+                team_segments: vec!["mlips".into()],
+                dataset: "mlips".into(),
+                view: Some("_entity".into()),
+                view_arg: None,
             }
         );
     }

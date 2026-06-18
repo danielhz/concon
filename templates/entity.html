@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}{{ subject_short }} — Concon{% endblock %}
+
+{% block head %}
+<style>
+  .entity-iri { font-family: monospace; word-break: break-all; color: #555; }
+  .entity-label { font-style: italic; color: #555; margin: 0.4em 0 0.8em; }
+  .entity-types { margin: 0.6em 0; }
+  .entity-types .tag { display: inline-block; margin: 0 0.4em 0.2em 0; padding: 0.15em 0.5em;
+    background: #eef; border-radius: 0.4em; font-family: monospace; font-size: 0.9em; }
+  table.entity { border-collapse: collapse; width: 100%; margin: 0.5em 0 1.5em; }
+  table.entity th, table.entity td { text-align: left; padding: 0.4em 0.6em;
+    border-bottom: 1px solid #eee; vertical-align: top; }
+  table.entity th { background: #f7f7f7; font-weight: 600; }
+  table.entity td.pred { white-space: nowrap; }
+  .literal { white-space: pre-wrap; }
+  .bnode { color: #555; }
+  .annot { color: #888; font-size: 0.85em; margin-left: 0.4em; }
+  .nolabel { font-family: monospace; font-style: italic; color: #888; }
+  .empty { color: #888; font-style: italic; }
+  .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
+  .formats code { background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 0.2em; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 style="word-break: break-all;">{{ subject_short }}</h1>
+<p class="entity-iri">&lt;{{ subject_iri }}&gt;</p>
+{% if label %}<p class="entity-label">{{ label }}</p>{% endif %}
+{% if types %}
+<p class="entity-types"><strong>Type:</strong>
+  {% for t in types %}<span class="tag"><a href="{{ t.iri }}" title="{{ t.iri }}">{% if t.label %}{{ t.label }}{% else %}{{ t.short }}{% endif %}</a></span>{% endfor %}
+</p>
+{% endif %}
+
+<h2>Properties ({{ forward_count }})</h2>
+{% if forward %}
+<table class="entity">
+  <thead><tr><th>Predicate</th><th>Value</th></tr></thead>
+  <tbody>
+  {% for r in forward %}
+    <tr>
+      <td class="pred">
+        <a href="{{ r.predicate_iri }}" title="{{ r.predicate_iri }}">{% if r.predicate_label %}{{ r.predicate_label }}{% else %}<span class="nolabel">{{ r.predicate_short }}</span>{% endif %}</a>
+      </td>
+      <td>
+        {% if r.kind == "iri" %}
+          <a href="{{ r.target_href }}" title="{{ r.target_iri }}">{% if r.target_label %}{{ r.target_label }}{% else %}<span class="nolabel">{{ r.target_display }}</span>{% endif %}</a>
+        {% elif r.kind == "bnode" %}
+          <span class="bnode">{% if r.target_label %}{{ r.target_label }}{% else %}<span class="nolabel">{{ r.target_display }}</span>{% endif %}</span>
+        {% else %}
+          <span class="literal">{{ r.target_display }}</span>{% if r.annotation %}<span class="annot">{{ r.annotation }}</span>{% endif %}
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="empty">No forward triples.</p>{% endif %}
+
+<h2>Referenced by ({{ reverse_count }})</h2>
+{% if reverse %}
+<table class="entity">
+  <thead><tr><th>Subject</th><th>Predicate</th></tr></thead>
+  <tbody>
+  {% for r in reverse %}
+    <tr>
+      <td>
+        {% if r.source_kind == "iri" %}
+          <a href="{{ r.source_href }}" title="{{ r.source_iri }}">{% if r.source_label %}{{ r.source_label }}{% else %}<span class="nolabel">{{ r.source_display }}</span>{% endif %}</a>
+        {% else %}
+          <span class="bnode">{% if r.source_label %}{{ r.source_label }}{% else %}<span class="nolabel">{{ r.source_display }}</span>{% endif %}</span>
+        {% endif %}
+      </td>
+      <td class="pred">
+        <a href="{{ r.predicate_iri }}" title="{{ r.predicate_iri }}">{% if r.predicate_label %}{{ r.predicate_label }}{% else %}<span class="nolabel">{{ r.predicate_short }}</span>{% endif %}</a>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="empty">No reverse triples.</p>{% endif %}
+
+<p class="formats">
+  Other formats:
+  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'text/turtle'}}).then(r=>r.text()).then(t=>{document.open();document.write('<pre></pre>');document.querySelector('pre').textContent=t;}); return false;">Turtle</a> ·
+  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'application/rdf+xml'}}).then(r=>r.text()).then(t=>{document.open();document.write('<pre></pre>');document.querySelector('pre').textContent=t;}); return false;">RDF/XML</a>
+  (or send <code>Accept: text/turtle</code> / <code>Accept: application/rdf+xml</code> with curl).
+</p>
+{% endblock %}

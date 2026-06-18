@@ -1,7 +1,9 @@
 mod content;
 mod datasets;
+mod entity;
 pub mod files;
 mod health;
+mod ontology;
 mod sparql;
 pub mod web;
 

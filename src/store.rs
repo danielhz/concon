@@ -21,6 +21,24 @@ pub fn sparql_query<'a>(
         .execute()
 }
 
+/// Execute a SPARQL query with union-default-graph semantics: a pattern over
+/// the default graph (no `GRAPH` clause) sees the union of all named graphs.
+///
+/// The `mlips` dataset stores schema, instances, and competency-question data
+/// in separate named graphs so the loader can replace one graph idempotently
+/// (replace-by-graph). Entity dereferencing and the public endpoint query the
+/// union so cross-graph links resolve exactly as they would in a single store.
+pub fn sparql_query_union<'a>(
+    store: &'a Store,
+    query: &str,
+) -> Result<QueryResults<'a>, QueryEvaluationError> {
+    let mut prepared = SparqlEvaluator::new()
+        .parse_query(query)
+        .map_err(QueryEvaluationError::from)?;
+    prepared.dataset_mut().set_default_graph_as_union();
+    prepared.on_store(store).execute()
+}
+
 /// Execute a SPARQL update on a store using the new SparqlEvaluator API.
 pub fn sparql_update(store: &Store, update: &str) -> Result<(), UpdateEvaluationError> {
     SparqlEvaluator::new()
@@ -29,6 +47,9 @@ pub fn sparql_update(store: &Store, update: &str) -> Result<(), UpdateEvaluation
         .on_store(store)
         .execute()
 }
+
+/// File name of the served ontology document within a dataset's doc store.
+pub const DOC_INDEX_FILE: &str = "index.xhtml";
 
 /// Manages multiple Oxigraph stores, one per dataset.
 pub struct StoreManager {
@@ -40,6 +61,11 @@ pub struct StoreManager {
     catalogs: RwLock<HashMap<String, Store>>,
     /// SHACL stores, keyed by dataset name. Each dataset can have its own SHACL shapes.
     shacl_stores: RwLock<HashMap<String, Store>>,
+    /// Curated documentation files (doc-as-file), keyed by (dataset name, file
+    /// name). Holds the served ontology document and its companion assets
+    /// (e.g. a stylesheet). In-memory mode keeps them here; persistent mode
+    /// also mirrors them under `<data_dir>/docs/<name>/`.
+    docs: RwLock<HashMap<(String, String), Vec<u8>>>,
     /// Base directory for dataset storage.
     data_dir: PathBuf,
 }
@@ -53,6 +79,7 @@ impl StoreManager {
             datasets: RwLock::new(HashMap::new()),
             catalogs: RwLock::new(HashMap::new()),
             shacl_stores: RwLock::new(HashMap::new()),
+            docs: RwLock::new(HashMap::new()),
             data_dir: PathBuf::new(),
         })
     }
@@ -64,6 +91,7 @@ impl StoreManager {
         std::fs::create_dir_all(data_path.join("datasets"))?;
         std::fs::create_dir_all(data_path.join("catalogs"))?;
         std::fs::create_dir_all(data_path.join("shacl"))?;
+        std::fs::create_dir_all(data_path.join("docs"))?;
 
         let system = Store::open(data_path.join("system"))?;
 
@@ -72,6 +100,7 @@ impl StoreManager {
             datasets: RwLock::new(HashMap::new()),
             catalogs: RwLock::new(HashMap::new()),
             shacl_stores: RwLock::new(HashMap::new()),
+            docs: RwLock::new(HashMap::new()),
             data_dir: data_path.to_path_buf(),
         })
     }
@@ -240,6 +269,40 @@ impl StoreManager {
         self.system
             .load_from_reader(RdfFormat::Turtle, reader)
             .map_err(|e| format!("Failed to parse system data '{}': {}", path, e))
+    }
+
+    /// Read a documentation file for a dataset — the served ontology document
+    /// (`DOC_INDEX_FILE`) or a companion asset (e.g. a stylesheet). Checks the
+    /// in-memory cache first, then the on-disk doc store. `None` if absent.
+    pub fn read_doc_file(&self, name: &str, filename: &str) -> Option<Vec<u8>> {
+        if let Ok(docs) = self.docs.read() {
+            if let Some(bytes) = docs.get(&(name.to_string(), filename.to_string())) {
+                return Some(bytes.clone());
+            }
+        }
+        if self.data_dir.as_os_str().is_empty() {
+            return None;
+        }
+        let path = self.data_dir.join("docs").join(name).join(filename);
+        std::fs::read(path).ok()
+    }
+
+    /// Store a documentation file for a dataset (the served document or a
+    /// companion asset). Idempotent replace: overwrites any existing file.
+    pub fn write_doc_file(&self, name: &str, filename: &str, bytes: Vec<u8>) -> Result<(), String> {
+        if !self.data_dir.as_os_str().is_empty() {
+            let dir = self.data_dir.join("docs").join(name);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            std::fs::write(dir.join(filename), &bytes).map_err(|e| e.to_string())?;
+        }
+        let mut docs = self.docs.write().map_err(|e| e.to_string())?;
+        docs.insert((name.to_string(), filename.to_string()), bytes);
+        Ok(())
+    }
+
+    /// Whether a dataset has a served ontology document.
+    pub fn has_doc(&self, name: &str) -> bool {
+        self.read_doc_file(name, DOC_INDEX_FILE).is_some()
     }
 
     /// Get the catalogs base directory path.
