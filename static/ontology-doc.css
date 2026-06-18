@@ -1,0 +1,339 @@
+/* concon — canonical ontology-document stylesheet.
+ *
+ * One theme for EVERY ontology concon publishes (injected at serve-time by
+ * routes/ontology.rs::serve_doc); there is no per-document CSS upload. Seeded
+ * from the onto-mlips documentation stylesheet (the proven W3C-TR /
+ * Widoco / LODE-style look) and reconciled with the concon site theme — the
+ * link colour matches Foundation's primary so a published ontology reads as
+ * part of concon. Covers: the ontology-metadata title block, colour-coded term
+ * sections (class / object property / datatype property / individual), the
+ * per-term property lists and metadata tables, the table of contents, and the
+ * people/individual listings.
+ */
+
+/* === Reset & base typography === */
+
+:root {
+  --c-bg:           #ffffff;
+  --c-fg:           #0a0a0a;        /* Foundation body colour */
+  --c-muted:        #5a6470;
+  --c-rule:         #d8dde2;
+  --c-link:         #1779ba;        /* Foundation primary */
+  --c-link-hover:   #126195;
+  --c-code-bg:      #f5f7fa;
+  --c-code-fg:      #1a1f25;
+
+  --c-class-bg:     #eaf3fc;   /* blue tint    — owl:Class       */
+  --c-class-rule:   #5a8fc6;
+  --c-objprop-bg:   #eaf6ec;   /* green tint   — ObjectProperty  */
+  --c-objprop-rule: #4f9b58;
+  --c-datprop-bg:   #fcf2e3;   /* orange tint  — DatatypeProperty*/
+  --c-datprop-rule: #c98a3a;
+  --c-individual-bg:#f3eafa;   /* purple tint  — NamedIndividual */
+  --c-individual-rule:#8c5dc4;
+
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI",
+               "Helvetica Neue", Helvetica, Roboto, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "Menlo", "Consolas",
+               "Liberation Mono", monospace;
+  --max-width: 60rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-bg:        #161a1f;
+    --c-fg:        #e6ebf0;
+    --c-muted:     #98a2ad;
+    --c-rule:      #2a3038;
+    --c-link:      #6cb7f0;
+    --c-link-hover:#9ed1f7;
+    --c-code-bg:   #1d242c;
+    --c-code-fg:   #d6dde4;
+    --c-class-bg:        #142537;
+    --c-class-rule:      #5a8fc6;
+    --c-objprop-bg:      #14271a;
+    --c-objprop-rule:    #4f9b58;
+    --c-datprop-bg:      #2c2114;
+    --c-datprop-rule:    #c98a3a;
+    --c-individual-bg:   #221432;
+    --c-individual-rule: #8c5dc4;
+  }
+}
+
+html { background: var(--c-bg); color: var(--c-fg); }
+
+body {
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.55;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+  max-width: var(--max-width);
+  color: var(--c-fg);
+}
+
+/* === Headings === */
+
+h1, h2, h3, h4 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  line-height: 1.2;
+  margin-top: 2.2em;
+  margin-bottom: 0.6em;
+}
+h1 { font-size: 2.0rem; border-bottom: 2px solid var(--c-rule); padding-bottom: .25em; }
+h2 { font-size: 1.5rem; border-bottom: 1px solid var(--c-rule); padding-bottom: .2em; }
+h3 { font-size: 1.2rem; color: var(--c-muted); text-transform: uppercase;
+     letter-spacing: 0.06em; }
+h4 { font-size: 1.05rem; margin: 0 0 .4em 0; }
+
+/* === Links === */
+
+a, a:visited { color: var(--c-link); text-decoration: none; }
+a:hover, a:focus { color: var(--c-link-hover); text-decoration: underline; }
+
+/* === Code & IRIs === */
+
+code, pre {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--c-code-bg);
+  color: var(--c-code-fg);
+  border-radius: 3px;
+}
+code { padding: 0.05em 0.35em; }
+pre {
+  padding: 0.9em 1.0em;
+  overflow-x: auto;
+  border: 1px solid var(--c-rule);
+  margin: 0.6em 0 1.2em;
+  white-space: pre;
+}
+pre code {
+  padding: 0; background: transparent; font-size: 0.88em;
+}
+
+/* === Tables (per-term metadata) === */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.6em 0 1.2em;
+  font-size: 0.95em;
+}
+th, td {
+  text-align: left;
+  padding: 0.4em 0.6em;
+  border-bottom: 1px solid var(--c-rule);
+  vertical-align: top;
+}
+th { font-weight: 600; color: var(--c-muted); }
+
+/* === Term sections (owl:Class, ObjectProperty, etc.) === */
+
+section.term {
+  border-left: 4px solid var(--c-rule);
+  background: var(--c-code-bg);
+  padding: 0.9em 1.2em;
+  margin: 1em 0;
+  border-radius: 0 4px 4px 0;
+}
+section.term > h4 {
+  margin-top: 0;
+}
+section.term > h4::before {
+  display: inline-block;
+  margin-right: 0.5em;
+  font-size: 0.7em;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 700;
+  vertical-align: middle;
+  padding: 0.15em 0.5em;
+  border-radius: 3px;
+  color: var(--c-fg);
+  background: var(--c-rule);
+}
+section.term.class {
+  background: var(--c-class-bg);
+  border-left-color: var(--c-class-rule);
+}
+section.term.class > h4::before { content: "Class"; background: var(--c-class-rule); color: #fff; }
+
+section.term.object-property {
+  background: var(--c-objprop-bg);
+  border-left-color: var(--c-objprop-rule);
+}
+section.term.object-property > h4::before { content: "Object Property"; background: var(--c-objprop-rule); color: #fff; }
+
+section.term.datatype-property {
+  background: var(--c-datprop-bg);
+  border-left-color: var(--c-datprop-rule);
+}
+section.term.datatype-property > h4::before { content: "Datatype Property"; background: var(--c-datprop-rule); color: #fff; }
+
+section.term.individual {
+  background: var(--c-individual-bg);
+  border-left-color: var(--c-individual-rule);
+}
+section.term.individual > h4::before { content: "Individual"; background: var(--c-individual-rule); color: #fff; }
+
+section.term p {
+  margin: 0.4em 0;
+}
+
+section.term pre.owl-xml {
+  font-size: 0.82em;
+  background: rgba(255,255,255,0.6);
+  margin-top: 0.7em;
+}
+@media (prefers-color-scheme: dark) {
+  section.term pre.owl-xml { background: rgba(0,0,0,0.35); }
+}
+
+/* === Table of contents === */
+
+nav#toc {
+  margin: 1.5em 0 2em;
+  padding: 1em 1.4em 1em 1.4em;
+  border: 1px solid var(--c-rule);
+  border-radius: 6px;
+  background: var(--c-code-bg);
+  font-size: 0.95em;
+}
+nav#toc h2.toc-heading {
+  font-size: 1.05rem;
+  margin: 0 0 0.5em 0;
+  padding: 0;
+  border: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-muted);
+}
+nav#toc ul {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+nav#toc ul ul {
+  padding-left: 1.2em;
+  border-left: 1px dashed var(--c-rule);
+  margin: 0.15em 0 0.4em;
+}
+nav#toc li { margin: 0.15em 0; }
+nav#toc a { color: var(--c-fg); }
+nav#toc a:hover { color: var(--c-link); }
+
+/* === Per-term outgoing/incoming property lists === */
+
+div.term-properties {
+  margin: 0.4em 0 0.7em;
+  font-size: 0.9em;
+}
+div.term-properties p {
+  margin: 0.2em 0;
+  line-height: 1.5;
+}
+div.term-properties strong {
+  color: var(--c-muted);
+  font-weight: 600;
+}
+div.term-properties code {
+  font-size: 0.92em;
+}
+
+/* === Definition lists (relationships) === */
+
+dl { margin: 0.6em 0 1.0em; }
+dt {
+  font-weight: 600;
+  color: var(--c-muted);
+  margin-top: 0.6em;
+}
+dd { margin-left: 1.2em; }
+
+/* === Ontology metadata block at the top === */
+
+#ontology-metadata {
+  border: 1px solid var(--c-rule);
+  border-radius: 6px;
+  padding: 1.0em 1.4em;
+  background: var(--c-code-bg);
+  margin-bottom: 2em;
+}
+#ontology-metadata h1 { margin-top: 0; border-bottom: none; padding-bottom: 0; }
+#ontology-metadata p { margin: 0.3em 0; }
+
+ul.people-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0.4em 0 0.8em;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em 0.75em;
+}
+ul.people-list > li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.15em 0.6em;
+  border: 1px solid var(--c-rule);
+  border-radius: 999px;
+  background: var(--c-bg);
+  font-size: 0.92em;
+}
+a.orcid-id {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  color: var(--c-muted);
+  border: 1px solid var(--c-rule);
+  border-radius: 3px;
+  padding: 0 0.35em;
+  text-decoration: none;
+}
+a.orcid-id:hover { color: var(--c-link); border-color: var(--c-link); }
+
+/* === Visualization (WebVOWL) === */
+
+#visualization {
+  margin: 2em 0;
+  border: 1px solid var(--c-rule);
+  border-radius: 6px;
+  background: var(--c-bg);
+  overflow: hidden;
+}
+#visualization h2 {
+  margin: 0;
+  padding: 0.8em 1.2em;
+  border-bottom: 1px solid var(--c-rule);
+  font-size: 1.1rem;
+}
+#visualization .viz-frame {
+  position: relative;
+  height: 36rem;
+  background: var(--c-code-bg);
+}
+#visualization iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+#visualization .viz-actions {
+  padding: 0.7em 1.2em;
+  font-size: 0.9em;
+  border-top: 1px solid var(--c-rule);
+  background: var(--c-code-bg);
+  color: var(--c-muted);
+}
+#visualization .viz-actions a { font-weight: 600; }
+
+/* === Print === */
+
+@media print {
+  body { max-width: none; padding: 1cm; }
+  a { color: black; text-decoration: none; }
+  a[href]::after { content: " <" attr(href) ">"; font-size: 0.8em; color: #555; }
+  pre, code { background: #f5f5f5; }
+  #visualization, .viz-actions { display: none; }
+}

@@ -43,15 +43,34 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, _url_prefix: &str) -> Res
     let Some(bytes) = state.store_manager.read_doc_file(dataset_name, DOC_INDEX_FILE) else {
         return (StatusCode::NOT_FOUND, "No document for this dataset").into_response();
     };
+    let html = with_doc_theme(String::from_utf8_lossy(&bytes).into_owned());
     // Serve the curated XHTML+RDFa document as text/html: the HTML5 parser
     // handles named entities (e.g. &ldquo;) and RDFa fine, whereas the strict
     // application/xhtml+xml XML parser rejects HTML named entities and would
     // fail to render the document in a browser.
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        bytes,
+        html,
     )
         .into_response()
+}
+
+/// concon's canonical ontology-document stylesheet `<link>`, injected at
+/// serve-time so every published ontology is uniformly themed without a
+/// per-document CSS upload. Absolute path → host-independent. Placed in
+/// `<head>` (falling back to before `</body>`, else prepended) so it applies
+/// before render.
+fn with_doc_theme(doc: String) -> String {
+    const LINK: &str = "<link rel=\"stylesheet\" href=\"/static/ontology-doc.css\"/>";
+    if let Some(idx) = doc.find("</head>").or_else(|| doc.find("</body>")) {
+        let mut out = String::with_capacity(doc.len() + LINK.len());
+        out.push_str(&doc[..idx]);
+        out.push_str(LINK);
+        out.push_str(&doc[idx..]);
+        out
+    } else {
+        format!("{LINK}{doc}")
+    }
 }
 
 /// Serve a companion asset of the document (e.g. its stylesheet) from the
@@ -161,6 +180,20 @@ mod tests {
         assert_eq!(asset_content_type("x.bin"), "application/octet-stream");
     }
 
+    #[test]
+    fn test_with_doc_theme_injects_link() {
+        // Into <head> when present.
+        let out = with_doc_theme("<html><head><title>x</title></head><body>b</body></html>".into());
+        assert!(out.contains("/static/ontology-doc.css"));
+        assert!(out.find("/static/ontology-doc.css").unwrap() < out.find("</head>").unwrap());
+        // Fallback before </body> when there is no </head>.
+        let out = with_doc_theme("<html><body>b</body></html>".into());
+        assert!(out.find("/static/ontology-doc.css").unwrap() < out.find("</body>").unwrap());
+        // Prepend when neither is present.
+        let out = with_doc_theme("plain".into());
+        assert!(out.starts_with("<link") && out.ends_with("plain"));
+    }
+
     #[tokio::test]
     async fn test_base_view_negotiation() {
         use crate::routes::create_router;
@@ -208,7 +241,13 @@ mod tests {
                 .starts_with("text/html"),
             "the document must be served as text/html"
         );
-        assert!(resp.text().contains("THE CURATED DOC"));
+        let body = resp.text();
+        assert!(body.contains("THE CURATED DOC"));
+        // concon's canonical doc stylesheet is injected at serve-time.
+        assert!(
+            body.contains("/static/ontology-doc.css"),
+            "the doc theme stylesheet link must be injected"
+        );
 
         // Turtle → the ontology graph serialization.
         let resp = server
