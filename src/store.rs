@@ -3,11 +3,17 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use std::time::Duration;
+
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::{
-    QueryEvaluationError, QueryResults, SparqlEvaluator, UpdateEvaluationError,
+    CancellationToken, QueryEvaluationError, QueryResults, SparqlEvaluator, UpdateEvaluationError,
 };
 use oxigraph::store::Store;
+
+/// Wall-clock limit for a single public SPARQL query (B4 hardening). A pathological
+/// query is cancelled past this so it can't pin a CPU on the public endpoint.
+pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Execute a SPARQL query on a store using the new SparqlEvaluator API.
 pub fn sparql_query<'a>(
@@ -33,6 +39,32 @@ pub fn sparql_query_union<'a>(
     query: &str,
 ) -> Result<QueryResults<'a>, QueryEvaluationError> {
     let mut prepared = SparqlEvaluator::new()
+        .parse_query(query)
+        .map_err(QueryEvaluationError::from)?;
+    prepared.dataset_mut().set_default_graph_as_union();
+    prepared.on_store(store).execute()
+}
+
+/// Like `sparql_query_union`, but cancels the evaluation after `timeout`. Used
+/// by the public `_sparql` endpoint so an arbitrary user query can't run
+/// unbounded. Evaluation is lazy (the result iterator), so the timer also
+/// bounds serialization of the results, not just planning.
+///
+/// A lightweight timer thread flips the cancellation token at the deadline; if
+/// the query finishes first the cancel is a harmless no-op on a dropped token.
+pub fn sparql_query_union_timeout<'a>(
+    store: &'a Store,
+    query: &str,
+    timeout: Duration,
+) -> Result<QueryResults<'a>, QueryEvaluationError> {
+    let token = CancellationToken::new();
+    let timer = token.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout);
+        timer.cancel();
+    });
+    let mut prepared = SparqlEvaluator::new()
+        .with_cancellation_token(token)
         .parse_query(query)
         .map_err(QueryEvaluationError::from)?;
     prepared.dataset_mut().set_default_graph_as_union();

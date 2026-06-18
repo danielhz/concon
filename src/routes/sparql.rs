@@ -1,14 +1,18 @@
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
-use oxigraph::io::RdfFormat;
-use oxigraph::model::{GraphNameRef, QuadRef};
+use oxigraph::io::{RdfFormat, RdfSerializer};
 use oxigraph::sparql::QueryResults;
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
 use oxigraph::store::Store;
 use serde::Deserialize;
 
 use crate::state::AppState;
-use crate::store::{sparql_query, sparql_query_union, sparql_update};
+use crate::store::{QUERY_TIMEOUT, sparql_query, sparql_query_union_timeout, sparql_update};
+
+/// Cap on the number of rows/triples serialized from a single result set (B4
+/// hardening). Beyond this the response is truncated and flagged with the
+/// `x-concon-results-truncated` header.
+const MAX_RESULT_ROWS: usize = 10_000;
 
 #[derive(Deserialize)]
 pub struct SparqlQueryParams {
@@ -105,9 +109,9 @@ pub async fn sparql_query_post(
         format!("Dataset '{}' not found", dataset_name),
     ))?;
 
-    let results =
-        sparql_query_union(&store, &sparql).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    format_results(results, &store)
+    let results = sparql_query_union_timeout(&store, &sparql, QUERY_TIMEOUT)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    format_results(results)
 }
 
 fn execute_query(
@@ -120,10 +124,10 @@ fn execute_query(
         format!("Dataset '{}' not found", dataset_name),
     ))?;
 
-    let results = sparql_query_union(&store, query)
+    let results = sparql_query_union_timeout(&store, query, QUERY_TIMEOUT)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    format_results(results, &store)
+    format_results(results)
 }
 
 fn execute_query_on_store(
@@ -132,35 +136,33 @@ fn execute_query_on_store(
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {
     let results =
         sparql_query(store, query).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    format_results(results, store)
+    format_results(results)
 }
 
-fn format_results(
-    results: QueryResults,
-    store: &Store,
-) -> Result<(HeaderMap, String), (StatusCode, String)> {
+fn ise<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// Serialize query results, capping output at `MAX_RESULT_ROWS`. CONSTRUCT/
+/// DESCRIBE results are serialized directly from the result iterator — they are
+/// NOT inserted back into the store (the previous code did, which let an
+/// anonymous CONSTRUCT mutate the dataset and dump the whole default graph).
+fn format_results(results: QueryResults) -> Result<(HeaderMap, String), (StatusCode, String)> {
     let mut headers = HeaderMap::new();
+    let mut truncated = false;
 
     let body = match results {
         QueryResults::Graph(triples) => {
             headers.insert(header::CONTENT_TYPE, "text/turtle".parse().unwrap());
-            for triple in triples {
-                let triple =
-                    triple.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                store
-                    .insert(QuadRef::new(
-                        triple.subject.as_ref(),
-                        triple.predicate.as_ref(),
-                        triple.object.as_ref(),
-                        GraphNameRef::DefaultGraph,
-                    ))
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle).for_writer(Vec::new());
+            for (n, triple) in triples.enumerate() {
+                if n >= MAX_RESULT_ROWS {
+                    truncated = true;
+                    break;
+                }
+                serializer.serialize_triple(triple.map_err(ise)?.as_ref()).map_err(ise)?;
             }
-            let buf = store
-                .dump_graph_to_writer(GraphNameRef::DefaultGraph, RdfFormat::Turtle, Vec::new())
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            String::from_utf8(buf)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            String::from_utf8(serializer.finish().map_err(ise)?).map_err(ise)?
         }
         QueryResults::Boolean(value) => {
             headers.insert(
@@ -170,9 +172,8 @@ fn format_results(
             let serializer = QueryResultsSerializer::from_format(QueryResultsFormat::Json);
             let buf = serializer
                 .serialize_boolean_to_writer(Vec::new(), value)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            String::from_utf8(buf)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map_err(ise)?;
+            String::from_utf8(buf).map_err(ise)?
         }
         QueryResults::Solutions(solutions) => {
             headers.insert(
@@ -182,22 +183,21 @@ fn format_results(
             let serializer = QueryResultsSerializer::from_format(QueryResultsFormat::Json);
             let mut writer = serializer
                 .serialize_solutions_to_writer(Vec::new(), solutions.variables().to_vec())
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            for solution in solutions {
-                let solution =
-                    solution.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                writer
-                    .serialize(&solution)
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(ise)?;
+            for (n, solution) in solutions.enumerate() {
+                if n >= MAX_RESULT_ROWS {
+                    truncated = true;
+                    break;
+                }
+                writer.serialize(&solution.map_err(ise)?).map_err(ise)?;
             }
-            let buf = writer
-                .finish()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            String::from_utf8(buf)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            String::from_utf8(writer.finish().map_err(ise)?).map_err(ise)?
         }
     };
 
+    if truncated {
+        headers.insert("x-concon-results-truncated", "true".parse().unwrap());
+    }
     Ok((headers, body))
 }
 

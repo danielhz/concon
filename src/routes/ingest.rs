@@ -29,23 +29,48 @@ use super::{ontology, web};
 use crate::state::AppState;
 use crate::store::DOC_INDEX_FILE;
 
-/// Authorize a write to `dataset_name`. Accepts a session cookie (web UI) or
-/// HTTP Basic (loader); the user must have write permission on the dataset.
-/// Returns `Err(response)` (401/403) when not authorized.
+/// Constant-time string comparison (length is not secret here; contents are).
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Authorize a write to `dataset_name`. Two credentials are accepted: the
+/// write-only ingest token (`Authorization: Bearer <token>`, used by the
+/// loader); or a session cookie / HTTP Basic, in which case the resolved user
+/// must have write permission on the dataset (`can_write_dataset`). Returns
+/// `Err(response)` (401/403) when not authorized.
 pub fn authorize_write(
     state: &AppState,
     headers: &HeaderMap,
     cookies: &Cookies,
     dataset_name: &str,
 ) -> Result<(), Response> {
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    // Write-only ingest token (a deploy secret, not a user account). Valid for
+    // any dataset's write endpoints; it grants no read/UI identity.
+    if let Some(expected) = &state.ingest_token
+        && let Some(tok) =
+            authorization.and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        && ct_eq(tok.trim(), expected)
+    {
+        return Ok(());
+    }
+
+    // 2. Session or HTTP Basic → a user identity with per-dataset write check.
     let user_iri = web::get_username(cookies, state)
         .map(|s| s.user_iri)
-        .or_else(|| {
-            let authz = headers
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok());
-            crate::auth::authenticate_basic(&state.store_manager.system, authz)
-        });
+        .or_else(|| crate::auth::authenticate_basic(&state.store_manager.system, authorization));
 
     let Some(user_iri) = user_iri else {
         return Err((
@@ -316,5 +341,48 @@ mod tests {
             .await;
         d.assert_status_ok();
         assert!(d.text().contains("THE DOC"));
+    }
+
+    #[tokio::test]
+    async fn test_put_graph_with_ingest_token() {
+        let mut state = setup_state();
+        state.ingest_token = Some("s3cr3t".to_string());
+        let server = TestServer::new(create_router(state));
+
+        // Valid Bearer ingest token → authorized (no user account).
+        let ok = server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/schema")
+            .add_header("authorization", "Bearer s3cr3t")
+            .add_header("content-type", "text/turtle")
+            .text("<urn:s> <urn:p> <urn:o> .")
+            .await;
+        ok.assert_status(StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_put_graph_wrong_ingest_token_rejected() {
+        let mut state = setup_state();
+        state.ingest_token = Some("s3cr3t".to_string());
+        let server = TestServer::new(create_router(state));
+
+        // Wrong token → falls through to user auth → 401.
+        let bad = server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/schema")
+            .add_header("authorization", "Bearer WRONG")
+            .add_header("content-type", "text/turtle")
+            .text("<urn:s> <urn:p> <urn:o> .")
+            .await;
+        bad.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_ct_eq() {
+        use super::ct_eq;
+        assert!(ct_eq("token", "token"));
+        assert!(!ct_eq("token", "tokem"));
+        assert!(!ct_eq("token", "tok"));
+        assert!(!ct_eq("", "x"));
     }
 }

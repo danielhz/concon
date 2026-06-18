@@ -12,6 +12,18 @@ pub struct AppState {
     pub templates: Arc<minijinja::Environment<'static>>,
     pub files_dir: PathBuf,
     pub grobid_url: String,
+    /// Optional write-only ingest token (from the `CONCON_INGEST_TOKEN` env var,
+    /// never committed). When set, an `Authorization: Bearer <token>` authorizes
+    /// the ingest write endpoints without reusing a user account — for the
+    /// non-interactive loader. `None` disables bearer auth.
+    pub ingest_token: Option<String>,
+}
+
+/// Read the optional write-only ingest token from the environment.
+fn ingest_token_from_env() -> Option<String> {
+    std::env::var("CONCON_INGEST_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 impl AppState {
@@ -28,6 +40,7 @@ impl AppState {
             templates: Arc::new(env),
             files_dir: PathBuf::new(),
             grobid_url: String::new(),
+            ingest_token: ingest_token_from_env(),
         })
     }
 
@@ -51,6 +64,7 @@ impl AppState {
             templates: Arc::new(env),
             files_dir: files_path,
             grobid_url: grobid_url.to_string(),
+            ingest_token: ingest_token_from_env(),
         })
     }
 }
