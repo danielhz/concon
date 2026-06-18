@@ -6,13 +6,26 @@ use tower_cookies::Cookies;
 
 use super::entity;
 use super::files;
+use super::ingest;
 use super::ontology;
 use super::sparql;
 use super::web;
+
+/// Query parameters for the Graph Store Protocol-style `_graph` endpoint.
+#[derive(serde::Deserialize)]
+pub struct GraphParams {
+    pub graph: Option<String>,
+}
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/{*path}", get(content_get).post(content_post))
+    Router::new().route(
+        "/{*path}",
+        get(content_get)
+            .post(content_post)
+            .put(content_put)
+            .delete(content_delete),
+    )
 }
 
 /// Result of parsing a URL path.
@@ -443,17 +456,24 @@ async fn content_get(
 async fn content_post(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    Query(gparams): Query<GraphParams>,
     headers: HeaderMap,
     cookies: Cookies,
     body: axum::body::Bytes,
 ) -> Response {
     let parsed = parse_path(&path);
 
-    // SPARQL endpoints remain accessible; everything else requires login
+    // SPARQL endpoints reach the handler without a login redirect; write views
+    // (`_update`, `_shacl/_update`, `_graph`) enforce write auth inside the
+    // handler (session or HTTP Basic), so they are exempt from the redirect too.
     let needs_login = match &parsed {
         ParsedPath::DatasetView { view, .. } => !matches!(
             view.as_deref(),
-            Some("_sparql") | Some("_update") | Some("_shacl/_query") | Some("_shacl/_update")
+            Some("_sparql")
+                | Some("_update")
+                | Some("_graph")
+                | Some("_shacl/_query")
+                | Some("_shacl/_update")
         ),
         _ => true,
     };
@@ -465,9 +485,8 @@ async fn content_post(
     }
 
     // Minimal Public-read gate for the read-via-POST endpoint: anonymous
-    // `_sparql` POST is allowed only on Public datasets. The write endpoints
-    // (`_update`, `_shacl/*`) are not gated here — they get write auth (HTTP
-    // Basic) in the A1 ingest work; until then they keep their prior behaviour.
+    // `_sparql` POST is allowed only on Public datasets. Write views enforce
+    // their own write auth (see `ingest::authorize_write`) in the handler.
     let anon_sparql_post = session.is_none()
         && matches!(&parsed, ParsedPath::DatasetView { view, .. } if view.as_deref() == Some("_sparql"));
     if anon_sparql_post
@@ -491,11 +510,24 @@ async fn content_post(
                     }
                 }
                 Some("_update") => {
+                    if let Err(r) =
+                        ingest::authorize_write(&state, &headers, &cookies, &qualified)
+                    {
+                        return r;
+                    }
                     match sparql::sparql_update_post(&state, &qualified, &headers, &body_str).await
                     {
                         Ok(status) => status.into_response(),
                         Err(e) => e.into_response(),
                     }
+                }
+                Some("_graph") => {
+                    if let Err(r) =
+                        ingest::authorize_write(&state, &headers, &cookies, &qualified)
+                    {
+                        return r;
+                    }
+                    ingest::post_graph(&state, &qualified, gparams.graph.as_deref(), &headers, &body)
                 }
                 Some("_shacl/_query") => {
                     let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
@@ -512,6 +544,11 @@ async fn content_post(
                     }
                 }
                 Some("_shacl/_update") => {
+                    if let Err(r) =
+                        ingest::authorize_write(&state, &headers, &cookies, &qualified)
+                    {
+                        return r;
+                    }
                     let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
                     match shacl_store {
                         Ok(store) => {
@@ -613,6 +650,65 @@ async fn content_post(
             "POST not supported for this path".to_string(),
         )
             .into_response(),
+    }
+}
+
+/// PUT — ingest writes: `_graph` (replace a named graph) and `_doc` (store the
+/// curated document or a companion asset). Both require write authorization.
+async fn content_put(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Query(gparams): Query<GraphParams>,
+    headers: HeaderMap,
+    cookies: Cookies,
+    body: axum::body::Bytes,
+) -> Response {
+    let parsed = parse_path(&path);
+    let ParsedPath::DatasetView { view, view_arg, .. } = &parsed else {
+        return (StatusCode::METHOD_NOT_ALLOWED, "PUT not supported for this path").into_response();
+    };
+    let qualified = parsed.qualified_dataset_name().unwrap();
+    match view.as_deref() {
+        Some("_graph") => {
+            if let Err(r) = ingest::authorize_write(&state, &headers, &cookies, &qualified) {
+                return r;
+            }
+            ingest::put_graph(&state, &qualified, gparams.graph.as_deref(), &headers, &body)
+        }
+        Some("_doc") => {
+            if let Err(r) = ingest::authorize_write(&state, &headers, &cookies, &qualified) {
+                return r;
+            }
+            ingest::put_doc(&state, &qualified, view_arg.as_deref(), &body)
+        }
+        _ => (StatusCode::METHOD_NOT_ALLOWED, "PUT not supported for this view").into_response(),
+    }
+}
+
+/// DELETE — clear a named graph (`_graph`). Requires write authorization.
+async fn content_delete(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Query(gparams): Query<GraphParams>,
+    headers: HeaderMap,
+    cookies: Cookies,
+) -> Response {
+    let parsed = parse_path(&path);
+    let ParsedPath::DatasetView { view, .. } = &parsed else {
+        return (StatusCode::METHOD_NOT_ALLOWED, "DELETE not supported for this path")
+            .into_response();
+    };
+    let qualified = parsed.qualified_dataset_name().unwrap();
+    match view.as_deref() {
+        Some("_graph") => {
+            if let Err(r) = ingest::authorize_write(&state, &headers, &cookies, &qualified) {
+                return r;
+            }
+            ingest::delete_graph(&state, &qualified, gparams.graph.as_deref())
+        }
+        _ => {
+            (StatusCode::METHOD_NOT_ALLOWED, "DELETE not supported for this view").into_response()
+        }
     }
 }
 

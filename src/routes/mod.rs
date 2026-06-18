@@ -3,6 +3,7 @@ mod datasets;
 mod entity;
 pub mod files;
 mod health;
+mod ingest;
 mod ontology;
 mod sparql;
 pub mod web;

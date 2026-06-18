@@ -148,6 +148,50 @@ pub fn is_dataset_public(store: &Store, name: &str) -> bool {
     get_public_datasets(store).iter().any(|d| d.name == name)
 }
 
+/// Verify HTTP Basic credentials from an `Authorization` header against the
+/// user store. Returns the authenticated user's IRI (e.g. `<https://…/users/x>`)
+/// on success. Used to authenticate the non-interactive ingest loader.
+pub fn authenticate_basic(store: &Store, authorization: Option<&str>) -> Option<String> {
+    use base64::Engine;
+    let value = authorization?;
+    let b64 = value.strip_prefix("Basic ").or_else(|| value.strip_prefix("basic "))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .ok()?;
+    let creds = String::from_utf8(decoded).ok()?;
+    let (username, password) = creds.split_once(':')?;
+    let (user_iri, hash) = find_user_by_username(store, username)?;
+    if verify_password(password, &hash) {
+        Some(user_iri)
+    } else {
+        None
+    }
+}
+
+/// Whether `user_iri` may write (publish/ingest/update) `dataset_name`.
+/// Minimal write-authorization (the rest of the role matrix is Epic B4):
+/// root-team admins may write any dataset; otherwise the user must be an admin
+/// (`mlipe:hasAdmin`) of the dataset's owning team. The dataset name is escaped
+/// before interpolation.
+pub fn can_write_dataset(store: &Store, user_iri: &str, dataset_name: &str) -> bool {
+    if is_root_admin(store, user_iri) {
+        return true;
+    }
+    let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
+    let name = dataset_name.replace('\\', r"\\").replace('"', r#"\""#);
+    let query = format!(
+        r#"
+        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        ASK {{
+            ?team mlipe:ownsDataset ?ds ;
+                  mlipe:hasAdmin <{iri}> .
+            ?ds mlipe:datasetName "{name}" .
+        }}
+        "#,
+    );
+    matches!(sparql_query(store, &query), Ok(QueryResults::Boolean(true)))
+}
+
 /// Check if a user is an admin of the root team.
 pub fn is_root_admin(store: &Store, user_iri: &str) -> bool {
     let iri = user_iri.trim_matches(|c| c == '<' || c == '>');

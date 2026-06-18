@@ -113,7 +113,7 @@ pub fn dump_ontology_rdf(state: &AppState, dataset_name: &str, format: &str) -> 
 /// Accept only simple, single-segment asset names — alphanumerics plus
 /// `. _ -`, no `..`, no path separators. Defends the doc store against
 /// traversal even though the router already passes a single path segment.
-fn is_safe_asset_name(name: &str) -> bool {
+pub(crate) fn is_safe_asset_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && !name.contains("..")

@@ -157,24 +157,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_entity_search_endpoint() {
-        let server = test_server();
+        use crate::store::sparql_update;
 
-        // Create dataset
-        server
-            .post("/_api/datasets")
-            .json(&serde_json::json!({"name": "root/search-test"}))
-            .await;
-
-        // Insert entities via SPARQL Update
-        let sparql = r#"
+        // Set up the dataset and insert entities directly on the store: the
+        // `_update` HTTP endpoint now requires write authorization, so seeding
+        // test data goes through the store rather than an anonymous POST.
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("root/search-test").unwrap();
+        let ds = state.store_manager.get_dataset("root/search-test").unwrap();
+        sparql_update(
+            &ds,
+            r#"
             PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
             PREFIX ex: <http://example.org/>
             INSERT DATA {
                 ex:alice a ex:Person ; rdfs:label "Alice Smith" .
                 ex:bob a ex:Person ; rdfs:label "Bob Jones" .
             }
-        "#;
-        server.post("/_ds/search-test/_update").text(sparql).await;
+        "#,
+        )
+        .unwrap();
+        let server = TestServer::new(create_router(state));
 
         // Search
         let response = server

@@ -8,7 +8,7 @@ use oxigraph::store::Store;
 use serde::Deserialize;
 
 use crate::state::AppState;
-use crate::store::{sparql_query, sparql_update};
+use crate::store::{sparql_query, sparql_query_union, sparql_update};
 
 #[derive(Deserialize)]
 pub struct SparqlQueryParams {
@@ -96,26 +96,18 @@ pub async fn sparql_query_post(
         body.to_string()
     };
 
-    // Try as a read query first; if that fails, try as an update
+    // The `_sparql` endpoint is query-only: it does NOT fall back to executing
+    // updates (that path is `_update`, which requires write auth). Queries run
+    // with union-default-graph semantics so a pattern without a `GRAPH` clause
+    // spans the dataset's named graphs (schema/vocab/kg/cq) as a single store.
     let store = state.store_manager.get_dataset(dataset_name).ok_or((
         StatusCode::NOT_FOUND,
         format!("Dataset '{}' not found", dataset_name),
     ))?;
 
-    match sparql_query(&store, &sparql) {
-        Ok(results) => format_results(results, &store),
-        Err(_query_err) => {
-            // Not a valid query — try as a SPARQL Update
-            sparql_update(&store, &sparql).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-            let mut headers = HeaderMap::new();
-            headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-            Ok((
-                headers,
-                r#"{"message":"Update executed successfully."}"#.to_string(),
-            ))
-        }
-    }
+    let results =
+        sparql_query_union(&store, &sparql).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    format_results(results, &store)
 }
 
 fn execute_query(
@@ -128,8 +120,8 @@ fn execute_query(
         format!("Dataset '{}' not found", dataset_name),
     ))?;
 
-    let results =
-        sparql_query(&store, query).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let results = sparql_query_union(&store, query)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     format_results(results, &store)
 }
