@@ -118,3 +118,18 @@ pub fn ensure_system_data(path: &str) -> Result<(), Box<dyn std::error::Error>> 
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    /// `cp concon.example.toml concon.toml` must start without edits: the
+    /// example must parse into a complete `Config` (it previously omitted the
+    /// required `store.data_dir`).
+    #[test]
+    fn example_config_parses() {
+        let contents = std::fs::read_to_string("concon.example.toml")
+            .expect("concon.example.toml present at the crate root");
+        let _: Config = toml::from_str(&contents).expect("example config parses into Config");
+    }
+}

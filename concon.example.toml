@@ -8,6 +8,10 @@ port = 3000
 # admin user (credentials from MLIPE_ADMIN_USER / MLIPE_ADMIN_PASS env vars,
 # or "admin" / "admin").
 system_data = "system.ttl"
+# Directory for the per-dataset RDF (RocksDB) stores. Required.
+data_dir    = "data"
+# Directory for uploaded file blobs. Optional; default shown.
+# files_dir = "data/files"
 
 [grobid]
 # URL of the GROBID service for PDF metadata extraction.

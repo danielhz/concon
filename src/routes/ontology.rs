@@ -43,8 +43,12 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, _url_prefix: &str) -> Res
     let Some(bytes) = state.store_manager.read_doc_file(dataset_name, DOC_INDEX_FILE) else {
         return (StatusCode::NOT_FOUND, "No document for this dataset").into_response();
     };
+    // Serve the curated XHTML+RDFa document as text/html: the HTML5 parser
+    // handles named entities (e.g. &ldquo;) and RDFa fine, whereas the strict
+    // application/xhtml+xml XML parser rejects HTML named entities and would
+    // fail to render the document in a browser.
     (
-        [(header::CONTENT_TYPE, entity::content_type_for("xhtml"))],
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         bytes,
     )
         .into_response()
@@ -195,6 +199,15 @@ mod tests {
         // HTML → the curated document, served publicly (no login).
         let resp = server.get("/_ds/onto-test/").add_header("accept", "text/html").await;
         resp.assert_status_ok();
+        // Served as text/html so the browser's HTML5 parser (not the strict XML
+        // parser) renders the XHTML+RDFa document and its named entities.
+        assert!(
+            resp.header(header::CONTENT_TYPE)
+                .to_str()
+                .unwrap()
+                .starts_with("text/html"),
+            "the document must be served as text/html"
+        );
         assert!(resp.text().contains("THE CURATED DOC"));
 
         // Turtle → the ontology graph serialization.
