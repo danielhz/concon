@@ -328,6 +328,29 @@ a.orcid-id:hover { color: var(--c-link); border-color: var(--c-link); }
 }
 #visualization .viz-actions a { font-weight: 600; }
 
+/* === concon chrome (top bar + breadcrumb, injected at serve-time) === */
+
+.ccx-chrome {
+  margin: -2rem -1.5rem 1.5rem;   /* span the body's horizontal padding */
+}
+.ccx-topbar {
+  background: var(--c-fg);
+  padding: 0.5em 1.5rem;
+}
+.ccx-topbar .ccx-brand {
+  color: var(--c-bg);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.ccx-topbar .ccx-brand:hover { color: var(--c-bg); text-decoration: underline; }
+.ccx-breadcrumb {
+  padding: 0.5em 1.5rem;
+  font-size: 0.9em;
+  color: var(--c-muted);
+  border-bottom: 1px solid var(--c-rule);
+}
+.ccx-breadcrumb a { color: var(--c-link); }
+
 /* === Print === */
 
 @media print {
@@ -336,4 +359,5 @@ a.orcid-id:hover { color: var(--c-link); border-color: var(--c-link); }
   a[href]::after { content: " <" attr(href) ">"; font-size: 0.8em; color: #555; }
   pre, code { background: #f5f5f5; }
   #visualization, .viz-actions { display: none; }
+  .ccx-chrome { display: none; }
 }

@@ -84,8 +84,8 @@
 
 <p class="formats">
   Other formats:
-  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'text/turtle'}}).then(r=>r.text()).then(t=>{document.open();document.write('<pre></pre>');document.querySelector('pre').textContent=t;}); return false;">Turtle</a> ·
-  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'application/rdf+xml'}}).then(r=>r.text()).then(t=>{document.open();document.write('<pre></pre>');document.querySelector('pre').textContent=t;}); return false;">RDF/XML</a>
+  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'text/turtle'}}).then(r=>r.text()).then(t=>{document.body.textContent='';var pre=document.createElement('pre');pre.textContent=t;document.body.appendChild(pre);}); return false;">Turtle</a> ·
+  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'application/rdf+xml'}}).then(r=>r.text()).then(t=>{document.body.textContent='';var pre=document.createElement('pre');pre.textContent=t;document.body.appendChild(pre);}); return false;">RDF/XML</a>
   (or send <code>Accept: text/turtle</code> / <code>Accept: application/rdf+xml</code> with curl).
 </p>
 {% endblock %}

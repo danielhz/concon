@@ -44,43 +44,192 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, url_prefix: &str) -> Resp
         return (StatusCode::NOT_FOUND, "No document for this dataset").into_response();
     };
     let html = augment_doc(String::from_utf8_lossy(&bytes).into_owned(), url_prefix);
-    // Serve as text/html: the HTML5 parser handles the curated document's named
-    // entities (e.g. &ldquo;) and RDFa, where the strict application/xhtml+xml
-    // XML parser would reject them and fail to render in a browser.
+    // Served as application/xhtml+xml: the curated document is authored as XHTML
+    // (XML declaration, xmlns, self-closed tags, and CDATA in the owl-xml axiom
+    // blocks). The HTML5 parser mangles CDATA, so the document must be parsed as
+    // XML — everything augment_doc injects is well-formed XML to satisfy this.
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [(header::CONTENT_TYPE, "application/xhtml+xml; charset=utf-8")],
         html,
     )
         .into_response()
 }
 
-/// Serve-time augmentation (epics B2/B3): inject the client-side enhancer that
-/// adds per-concept "explore individuals" controls and the competency-question
-/// section. The enhancer is a static asset; we only inject a `<link>` + a
-/// `<script>` (carrying the dataset's endpoint URLs as data attributes) before
-/// `</body>`. The curated document is otherwise served verbatim — no
-/// regeneration from the triples. The tags are XHTML-well-formed (self-closed
-/// `<link/>`, explicit `</script>`, `defer="defer"`).
+/// Serve-time augmentation of the curated ontology document. All injected
+/// markup is well-formed XML (the document is served as application/xhtml+xml).
+/// Injects:
+///   - in `<head>`: the canonical doc theme + the explore-enhancer stylesheet;
+///   - at the top of `<body>`: concon chrome (top bar + breadcrumb) and a
+///     generated table of contents (the source lacks a TOC);
+///   - before `</body>`: the explore-enhancer `<script>` (B2/B3 controls + CQ
+///     section; it builds its DOM via createElement, i.e. well-formed nodes).
+///
+/// The curated document body is otherwise untouched (no regeneration).
 fn augment_doc(doc: String, url_prefix: &str) -> String {
-    let inject = format!(
+    const HEAD: &str = concat!(
+        "<link rel=\"stylesheet\" href=\"/static/ontology-doc.css\"/>",
+        "<link rel=\"stylesheet\" href=\"/static/concon-explore.css\"/>"
+    );
+    let body_top = format!("{}{}", chrome_fragment(url_prefix), build_toc(&doc));
+    let body_end = format!(
         concat!(
-            "<link rel=\"stylesheet\" href=\"/static/concon-explore.css\"/>",
             "<script src=\"/static/concon-explore.js\" defer=\"defer\"",
-            " data-base=\"{p}\" data-sparql=\"{p}/_sparql\" data-query=\"{p}/_query\"></script>",
+            " data-base=\"{p}\" data-sparql=\"{p}/_sparql\" data-query=\"{p}/_query\"></script>"
         ),
         p = url_prefix
     );
-    match doc.rfind("</body>") {
+    let doc = insert_before(doc, "</head>", HEAD);
+    let doc = insert_after_body_open(doc, &body_top);
+    insert_before(doc, "</body>", &body_end)
+}
+
+/// Insert `frag` immediately before the first `marker`; append if absent.
+fn insert_before(doc: String, marker: &str, frag: &str) -> String {
+    match doc.find(marker) {
         Some(idx) => {
-            let mut out = String::with_capacity(doc.len() + inject.len());
+            let mut out = String::with_capacity(doc.len() + frag.len());
             out.push_str(&doc[..idx]);
-            out.push_str(&inject);
+            out.push_str(frag);
             out.push_str(&doc[idx..]);
             out
         }
-        // No </body> (unexpected for the curated XHTML): append, still valid.
-        None => doc + &inject,
+        None => doc + frag,
     }
+}
+
+/// Insert `frag` just after the opening `<body …>` tag; prepend if absent.
+fn insert_after_body_open(doc: String, frag: &str) -> String {
+    if let Some(start) = doc.find("<body")
+        && let Some(rel) = doc[start..].find('>')
+    {
+        let idx = start + rel + 1;
+        let mut out = String::with_capacity(doc.len() + frag.len());
+        out.push_str(&doc[..idx]);
+        out.push_str(frag);
+        out.push_str(&doc[idx..]);
+        out
+    } else {
+        format!("{frag}{doc}")
+    }
+}
+
+/// concon chrome for the top of the document body: a top bar linking home and a
+/// breadcrumb (Home / <team> / <dataset>). Well-formed XHTML, styled by
+/// `ontology-doc.css`.
+fn chrome_fragment(url_prefix: &str) -> String {
+    let (team_href, team_label, dataset_label) = breadcrumb_parts(url_prefix);
+    format!(
+        concat!(
+            "<div class=\"ccx-chrome\">",
+            "<div class=\"ccx-topbar\"><a class=\"ccx-brand\" href=\"/\">concon</a></div>",
+            "<nav class=\"ccx-breadcrumb\" aria-label=\"Breadcrumb\">",
+            "<a href=\"/\">Home</a> / <a href=\"{th}\">{tl}</a> / <span>{dl}</span>",
+            "</nav></div>"
+        ),
+        th = xml_escape(&team_href),
+        tl = xml_escape(&team_label),
+        dl = xml_escape(&dataset_label),
+    )
+}
+
+/// Parse `url_prefix` (e.g. `/mlips/_ds/mlips`) into (team href, team label,
+/// dataset label) for the breadcrumb.
+fn breadcrumb_parts(url_prefix: &str) -> (String, String, String) {
+    let (team_path, dataset) = match url_prefix.split_once("/_ds/") {
+        Some((t, d)) => (t.trim_matches('/'), d.trim_matches('/')),
+        None => ("", url_prefix.trim_matches('/')),
+    };
+    if team_path.is_empty() {
+        ("/".to_string(), "root".to_string(), dataset.to_string())
+    } else {
+        (
+            format!("/{team_path}/"),
+            team_path.to_string(),
+            dataset.to_string(),
+        )
+    }
+}
+
+/// Build a table of contents from the document's term sections
+/// (`<section id="X" class="term TYPE">`), grouped by term type. The section id
+/// is the term's local name and its in-document anchor. Empty if no terms.
+fn build_toc(doc: &str) -> String {
+    let (mut classes, mut object_props, mut datatype_props, mut individuals) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut rest = doc;
+    while let Some(pos) = rest.find("<section") {
+        rest = &rest[pos + "<section".len()..];
+        let Some(end) = rest.find('>') else { break };
+        let tag = &rest[..end];
+        rest = &rest[end..];
+        let class = attr_value(tag, "class").unwrap_or("");
+        if !class.contains("term") {
+            continue;
+        }
+        let Some(id) = attr_value(tag, "id").filter(|id| is_safe_fragment(id)) else {
+            continue;
+        };
+        if class.contains("object-property") {
+            object_props.push(id);
+        } else if class.contains("datatype-property") {
+            datatype_props.push(id);
+        } else if class.contains("individual") {
+            individuals.push(id);
+        } else if class.contains("class") {
+            classes.push(id);
+        }
+    }
+    let groups = [
+        ("Classes", classes),
+        ("Object properties", object_props),
+        ("Datatype properties", datatype_props),
+        ("Individuals", individuals),
+    ];
+    if groups.iter().all(|(_, v)| v.is_empty()) {
+        return String::new();
+    }
+    let mut s = String::from(
+        "<nav id=\"toc\" aria-label=\"Table of contents\">\
+         <h2 class=\"toc-heading\">Contents</h2><ul>",
+    );
+    for (label, ids) in &groups {
+        if ids.is_empty() {
+            continue;
+        }
+        s.push_str(&format!("<li>{label}<ul>"));
+        for id in ids {
+            s.push_str(&format!("<li><a href=\"#{id}\">{id}</a></li>"));
+        }
+        s.push_str("</ul></li>");
+    }
+    s.push_str("</ul></nav>");
+    s
+}
+
+/// Value of attribute `name` within an element's attribute string `tag`.
+fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("{name}=\"");
+    let start = tag.find(&needle)? + needle.len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// Conservative: an id safe as both a URL fragment and XML text.
+fn is_safe_fragment(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// Minimal XML text/attribute escaping.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Serve a companion asset of the document (e.g. its stylesheet) from the
@@ -191,24 +340,54 @@ mod tests {
     }
 
     #[test]
-    fn test_augment_doc_injects_before_body() {
+    fn test_augment_doc_injects_assets_chrome_toc() {
         let out = augment_doc(
-            "<html><body><h1>Doc</h1></body></html>".to_string(),
+            "<html><head></head><body>\
+             <section id=\"Foo\" class=\"term class\"><h4>Foo</h4></section>\
+             </body></html>"
+                .to_string(),
             "/mlips/_ds/mlips",
         );
-        assert!(out.contains("/static/concon-explore.js"));
+        // Stylesheets in <head>.
+        assert!(out.find("/static/ontology-doc.css").unwrap() < out.find("</head>").unwrap());
+        assert!(out.contains("/static/concon-explore.css"));
+        // Explore script before </body>.
+        assert!(out.find("/static/concon-explore.js").unwrap() < out.find("</body>").unwrap());
         assert!(out.contains("data-sparql=\"/mlips/_ds/mlips/_sparql\""));
-        assert!(out.contains("data-query=\"/mlips/_ds/mlips/_query\""));
-        // Injected before </body>, original content preserved.
-        assert!(out.find("concon-explore.js").unwrap() < out.find("</body>").unwrap());
-        assert!(out.contains("<h1>Doc</h1>"));
+        // Chrome + breadcrumb after <body>, generated TOC links the term section.
+        assert!(out.contains("ccx-breadcrumb") && out.contains(">Home</a>"));
+        assert!(out.contains("<nav id=\"toc\"") && out.contains("href=\"#Foo\""));
+        // Original content preserved.
+        assert!(out.contains("<h4>Foo</h4>"));
     }
 
     #[test]
-    fn test_augment_doc_without_body_appends() {
-        let out = augment_doc("<html>no body</html>".to_string(), "/x/_ds/y");
-        assert!(out.contains("/static/concon-explore.js"));
-        assert!(out.contains("no body"));
+    fn test_build_toc_groups_by_type_and_skips_non_terms() {
+        let doc = "<section id=\"C\" class=\"term class\"></section>\
+                   <section id=\"op\" class=\"term object-property\"></section>\
+                   <section id=\"mod\" class=\"module\"></section>";
+        let toc = build_toc(doc);
+        assert!(toc.contains("href=\"#C\"") && toc.contains("Classes"));
+        assert!(toc.contains("href=\"#op\"") && toc.contains("Object properties"));
+        assert!(!toc.contains("#mod"), "non-term sections excluded");
+        // No terms → empty.
+        assert_eq!(build_toc("<section id=\"x\" class=\"module\"></section>"), "");
+    }
+
+    #[test]
+    fn test_breadcrumb_parts() {
+        let (h, t, d) = breadcrumb_parts("/mlips/_ds/mlips");
+        assert_eq!((h.as_str(), t.as_str(), d.as_str()), ("/mlips/", "mlips", "mlips"));
+        let (h, t, _) = breadcrumb_parts("/_ds/foo");
+        assert_eq!((h.as_str(), t.as_str()), ("/", "root"));
+    }
+
+    #[test]
+    fn test_attr_value() {
+        let tag = "id=\"X\" class=\"term class\"";
+        assert_eq!(attr_value(tag, "id"), Some("X"));
+        assert_eq!(attr_value(tag, "class"), Some("term class"));
+        assert_eq!(attr_value(tag, "missing"), None);
     }
 
     #[tokio::test]
@@ -249,16 +428,20 @@ mod tests {
         // HTML → the curated document, served publicly (no login).
         let resp = server.get("/_ds/onto-test/").add_header("accept", "text/html").await;
         resp.assert_status_ok();
-        // Served as text/html so the browser's HTML5 parser (not the strict XML
-        // parser) renders the XHTML+RDFa document and its named entities.
+        // Served as application/xhtml+xml so the browser parses the document
+        // (incl. the owl-xml CDATA axiom blocks) as XML rather than HTML.
         assert!(
             resp.header(header::CONTENT_TYPE)
                 .to_str()
                 .unwrap()
-                .starts_with("text/html"),
-            "the document must be served as text/html"
+                .starts_with("application/xhtml+xml"),
+            "the document must be served as application/xhtml+xml"
         );
-        assert!(resp.text().contains("THE CURATED DOC"));
+        let body = resp.text();
+        assert!(body.contains("THE CURATED DOC"));
+        // Augmented at serve-time: theme stylesheet + concon chrome.
+        assert!(body.contains("/static/ontology-doc.css"));
+        assert!(body.contains("ccx-breadcrumb"));
 
         // Turtle → the ontology graph serialization.
         let resp = server
