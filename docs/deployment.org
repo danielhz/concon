@@ -170,7 +170,8 @@ Expected: document and entity pages render; both negotiate Turtle/RDF-XML; the S
 * Operations
 
 - *Backups:* back up =data/= before any re-load or upgrade. (=target/release/migrate= already snapshots =data/= before a schema migration; replace-by-graph reloads do not, so snapshot manually first.)
-- *Upgrades:* rebuild, =systemctl restart concon=. If =migration::CURRENT_SCHEMA_VERSION= changed, run =./target/release/migrate= first (it backs up, then migrates).
+- *Fresh installs:* the auto-seeded =system.ttl= is stamped with the current =mlipe:schemaVersion=, so a first-time deploy starts at the current version with no migration step. (The server refuses to start on a schema mismatch — a store seeded at the wrong version would panic at startup.)
+- *Upgrades:* rebuild, =systemctl restart concon=. If =migration::CURRENT_SCHEMA_VERSION= changed since the store was created, run =./target/release/migrate= *first* (it backs up =data/=, then migrates) — otherwise the server panics with a schema-version mismatch on restart. When unsure whether a migration is pending, running =migrate= is safe (it is a no-op when already current).
 - *Re-loading the dataset:* re-running the PUTs replaces each graph in place; no need to delete the dataset.
 
 * Security posture

@@ -95,9 +95,14 @@ pub fn ensure_system_data(path: &str) -> Result<(), Box<dyn std::error::Error>> 
     let admin_user = std::env::var("MLIPE_ADMIN_USER").unwrap_or_else(|_| "admin".into());
     let admin_pass = std::env::var("MLIPE_ADMIN_PASS").unwrap_or_else(|_| "admin".into());
     let password_hash = auth::hash_password(&admin_pass);
+    // Stamp the current schema version so a fresh store starts at it; a seed
+    // without this defaults to v1 and the startup version check would panic.
+    let version = crate::migration::CURRENT_SCHEMA_VERSION;
 
     let ttl = format!(
         r#"@prefix mlipe: <https://mlipe.2mia.org/ontology#> .
+
+<https://mlipe.2mia.org/system> mlipe:schemaVersion {version} .
 
 <https://mlipe.2mia.org/teams/root> a mlipe:Team ;
     mlipe:teamName "root" ;
@@ -131,5 +136,24 @@ mod tests {
         let contents = std::fs::read_to_string("concon.example.toml")
             .expect("concon.example.toml present at the crate root");
         let _: Config = toml::from_str(&contents).expect("example config parses into Config");
+    }
+
+    /// A freshly-seeded system store must report the current schema version, so
+    /// a first-time deploy starts without the version-mismatch panic.
+    #[test]
+    fn seeded_system_data_is_at_current_schema_version() {
+        let path = std::env::temp_dir().join(format!("concon-seed-{}.ttl", std::process::id()));
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+        super::ensure_system_data(p).expect("seed system data");
+        let store = oxigraph::store::Store::new().unwrap();
+        store
+            .load_from_reader(oxigraph::io::RdfFormat::Turtle, std::fs::read(p).unwrap().as_slice())
+            .expect("seed is valid turtle");
+        assert_eq!(
+            crate::migration::get_schema_version(&store),
+            crate::migration::CURRENT_SCHEMA_VERSION
+        );
+        let _ = std::fs::remove_file(p);
     }
 }
