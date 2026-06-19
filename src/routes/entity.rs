@@ -49,6 +49,8 @@ pub(crate) fn negotiate_format(headers: &HeaderMap) -> &'static str {
         match t {
             "text/turtle" => return "ttl",
             "application/rdf+xml" | "application/owl+xml" => return "owl",
+            "application/n-triples" => return "nt",
+            "application/ld+json" => return "jsonld",
             "text/html" | "application/xhtml+xml" => return "xhtml",
             _ => {}
         }
@@ -60,8 +62,24 @@ pub(crate) fn content_type_for(format: &str) -> &'static str {
     match format {
         "ttl" => "text/turtle; charset=utf-8",
         "owl" => "application/rdf+xml; charset=utf-8",
+        "nt" => "application/n-triples; charset=utf-8",
+        "jsonld" => "application/ld+json; charset=utf-8",
         "xhtml" => "application/xhtml+xml; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+/// Map a negotiated format code to the oxigraph RDF serializer format, or
+/// `None` for non-RDF codes (e.g. `"xhtml"`). JSON-LD is obtained via its media
+/// type so we don't have to name the profile-set type. Shared by entity
+/// dereferencing and the ontology dump so they negotiate the same set.
+pub(crate) fn rdf_format_for(format: &str) -> Option<RdfFormat> {
+    match format {
+        "ttl" => Some(RdfFormat::Turtle),
+        "owl" => Some(RdfFormat::RdfXml),
+        "nt" => Some(RdfFormat::NTriples),
+        "jsonld" => RdfFormat::from_media_type("application/ld+json"),
+        _ => None,
     }
 }
 
@@ -328,7 +346,9 @@ fn literal_value(term: Option<&Term>) -> Option<String> {
 }
 
 fn entity_not_found(state: &AppState, subject_iri: &str, format: &str) -> Response {
-    if format == "ttl" || format == "owl" {
+    // For any RDF representation, a plain-text 404 (no HTML body with the wrong
+    // content type).
+    if rdf_format_for(format).is_some() {
         return (
             StatusCode::NOT_FOUND,
             format!("No triples for <{subject_iri}>"),
@@ -395,8 +415,8 @@ pub async fn serve_entity(
         return entity_not_found(state, &subject_iri, format);
     }
 
-    match format {
-        "ttl" | "owl" => {
+    match rdf_format_for(format) {
+        Some(rdf_format) => {
             // Concise Bounded Description: forward triples of the subject.
             let q = format!(
                 r#"CONSTRUCT {{ <{subject_iri}> ?p ?o }} WHERE {{ <{subject_iri}> ?p ?o }}"#
@@ -404,11 +424,6 @@ pub async fn serve_entity(
             let triples = match sparql_query_union(&store, &q) {
                 Ok(QueryResults::Graph(t)) => t,
                 _ => return (StatusCode::INTERNAL_SERVER_ERROR, "Query error").into_response(),
-            };
-            let rdf_format = if format == "ttl" {
-                RdfFormat::Turtle
-            } else {
-                RdfFormat::RdfXml
             };
             let mut serializer = RdfSerializer::from_format(rdf_format).for_writer(Vec::new());
             for t in triples.flatten() {
@@ -426,7 +441,7 @@ pub async fn serve_entity(
                 Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Finish error").into_response(),
             }
         }
-        _ => {
+        None => {
             // HTML view (default). Rewrite native hrefs against this dataset.
             let mut forward = forward_rows(&store, &subject_iri);
             for r in &mut forward {
@@ -559,6 +574,16 @@ mlips:numLayers rdfs:label "number of layers" ;
         assert_eq!(negotiate_format(&h), "ttl");
         h.insert(header::ACCEPT, "application/rdf+xml".parse().unwrap());
         assert_eq!(negotiate_format(&h), "owl");
+        h.insert(header::ACCEPT, "application/n-triples".parse().unwrap());
+        assert_eq!(negotiate_format(&h), "nt");
+        h.insert(header::ACCEPT, "application/ld+json".parse().unwrap());
+        assert_eq!(negotiate_format(&h), "jsonld");
+        // q-values / parameters are stripped; first recognized type wins.
+        h.insert(
+            header::ACCEPT,
+            "application/ld+json;q=0.9, text/turtle".parse().unwrap(),
+        );
+        assert_eq!(negotiate_format(&h), "jsonld");
         h.insert(
             header::ACCEPT,
             "text/html,application/xhtml+xml".parse().unwrap(),
@@ -566,5 +591,42 @@ mlips:numLayers rdfs:label "number of layers" ;
         assert_eq!(negotiate_format(&h), "xhtml");
         // Unknown / missing → default xhtml.
         assert_eq!(negotiate_format(&HeaderMap::new()), "xhtml");
+    }
+
+    /// Every negotiated RDF format must actually serialize a triple at runtime
+    /// (not just resolve) — guards the JSON-LD/N-Triples codecs end-to-end so a
+    /// serialize failure can't surface only in production.
+    #[test]
+    fn rdf_formats_serialize_a_triple() {
+        use oxigraph::io::RdfSerializer;
+        use oxigraph::model::{LiteralRef, NamedNodeRef, TripleRef};
+        let s = NamedNodeRef::new("https://w3id.org/mlips/entity/x").unwrap();
+        let p = NamedNodeRef::new("https://w3id.org/mlips#settingValue").unwrap();
+        let o = LiteralRef::new_simple_literal("4");
+        let triple = TripleRef::new(s, p, o);
+        for code in ["ttl", "owl", "nt", "jsonld"] {
+            let fmt = rdf_format_for(code).unwrap();
+            let mut ser = RdfSerializer::from_format(fmt).for_writer(Vec::new());
+            ser.serialize_triple(triple).unwrap();
+            let buf = ser.finish().unwrap();
+            assert!(!buf.is_empty(), "{code} serialized to empty output");
+        }
+    }
+
+    #[test]
+    fn test_rdf_format_for() {
+        use oxigraph::io::RdfFormat;
+        assert_eq!(rdf_format_for("ttl"), Some(RdfFormat::Turtle));
+        assert_eq!(rdf_format_for("owl"), Some(RdfFormat::RdfXml));
+        assert_eq!(rdf_format_for("nt"), Some(RdfFormat::NTriples));
+        // JSON-LD resolves (codec present) and round-trips its media type.
+        let jsonld = rdf_format_for("jsonld").expect("jsonld supported");
+        assert_eq!(jsonld.media_type(), "application/ld+json");
+        // Non-RDF codes map to None (→ HTML/doc path).
+        assert_eq!(rdf_format_for("xhtml"), None);
+        assert_eq!(rdf_format_for("nonsense"), None);
+        // content_type_for stays consistent with the new codes.
+        assert_eq!(content_type_for("nt"), "application/n-triples; charset=utf-8");
+        assert_eq!(content_type_for("jsonld"), "application/ld+json; charset=utf-8");
     }
 }

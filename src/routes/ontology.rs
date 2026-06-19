@@ -19,7 +19,7 @@
 
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use oxigraph::io::{RdfFormat, RdfSerializer};
+use oxigraph::io::RdfSerializer;
 use oxigraph::sparql::QueryResults;
 
 use super::entity;
@@ -66,9 +66,22 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, url_prefix: &str) -> Resp
 ///
 /// The curated document body is otherwise untouched (no regeneration).
 fn augment_doc(doc: String, url_prefix: &str) -> String {
-    const HEAD: &str = concat!(
-        "<link rel=\"stylesheet\" href=\"/static/ontology-doc.css\"/>",
-        "<link rel=\"stylesheet\" href=\"/static/concon-explore.css\"/>"
+    // Stylesheets plus `rel="alternate"` pointers so a tool that lands on the
+    // document (no RDF `Accept` header) can discover the machine-readable RDF.
+    // The alternates share the document's own (negotiated) base URL — the
+    // `Accept` header selects the concrete serialization (see the base-URL
+    // content negotiation in `content.rs` → `dump_ontology_rdf`).
+    let base = xml_escape(url_prefix);
+    let head = format!(
+        concat!(
+            "<link rel=\"stylesheet\" href=\"/static/ontology-doc.css\"/>",
+            "<link rel=\"stylesheet\" href=\"/static/concon-explore.css\"/>",
+            "<link rel=\"alternate\" type=\"text/turtle\" href=\"{base}\"/>",
+            "<link rel=\"alternate\" type=\"application/rdf+xml\" href=\"{base}\"/>",
+            "<link rel=\"alternate\" type=\"application/n-triples\" href=\"{base}\"/>",
+            "<link rel=\"alternate\" type=\"application/ld+json\" href=\"{base}\"/>"
+        ),
+        base = base
     );
     let body_top = format!("{}{}", chrome_fragment(url_prefix), build_toc(&doc));
     let body_end = format!(
@@ -78,7 +91,7 @@ fn augment_doc(doc: String, url_prefix: &str) -> String {
         ),
         p = url_prefix
     );
-    let doc = insert_before(doc, "</head>", HEAD);
+    let doc = insert_before(doc, "</head>", &head);
     let doc = insert_after_body_open(doc, &body_top);
     insert_before(doc, "</body>", &body_end)
 }
@@ -249,8 +262,9 @@ pub fn serve_doc_asset(state: &AppState, dataset_name: &str, filename: &str) -> 
     }
 }
 
-/// Serialize the ontology (schema + vocabulary graphs) of `dataset_name` as
-/// Turtle (`format = "ttl"`) or RDF/XML (`format = "owl"`).
+/// Serialize the ontology (schema + vocabulary graphs) of `dataset_name` in the
+/// negotiated RDF `format` (`"ttl"`, `"owl"`, `"nt"`, or `"jsonld"`; see
+/// `entity::rdf_format_for`).
 pub fn dump_ontology_rdf(state: &AppState, dataset_name: &str, format: &str) -> Response {
     let Some(store) = state.store_manager.get_dataset(dataset_name) else {
         return (
@@ -271,10 +285,8 @@ pub fn dump_ontology_rdf(state: &AppState, dataset_name: &str, format: &str) -> 
         Ok(QueryResults::Graph(t)) => t,
         _ => return (StatusCode::INTERNAL_SERVER_ERROR, "Query error").into_response(),
     };
-    let rdf_format = if format == "ttl" {
-        RdfFormat::Turtle
-    } else {
-        RdfFormat::RdfXml
+    let Some(rdf_format) = entity::rdf_format_for(format) else {
+        return (StatusCode::NOT_ACCEPTABLE, "Unsupported RDF format").into_response();
     };
     let mut serializer = RdfSerializer::from_format(rdf_format).for_writer(Vec::new());
     for t in triples.flatten() {
@@ -357,6 +369,22 @@ mod tests {
         // Chrome + breadcrumb after <body>, generated TOC links the term section.
         assert!(out.contains("ccx-breadcrumb") && out.contains(">Home</a>"));
         assert!(out.contains("<nav id=\"toc\"") && out.contains("href=\"#Foo\""));
+        // RDF alternates advertised in <head> (discovery for tools/agents),
+        // each pointing at the negotiated base URL, all before </head>.
+        let head_end = out.find("</head>").unwrap();
+        for media in [
+            "text/turtle",
+            "application/rdf+xml",
+            "application/n-triples",
+            "application/ld+json",
+        ] {
+            let link =
+                format!("<link rel=\"alternate\" type=\"{media}\" href=\"/mlips/_ds/mlips\"/>");
+            // The asserted form is self-closed (`/>`), so this also pins that
+            // the augmented <head> stays well-formed XML (served xhtml+xml).
+            assert!(out.contains(&link), "missing alternate link for {media}");
+            assert!(out.find(&link).unwrap() < head_end, "{media} link not in <head>");
+        }
         // Original content preserved.
         assert!(out.contains("<h4>Foo</h4>"));
     }

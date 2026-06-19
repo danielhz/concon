@@ -23,24 +23,26 @@ pub async fn sparql_query_get(
     state: &AppState,
     dataset_name: &str,
     params: &SparqlQueryParams,
+    headers: &HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let query = params
         .query
         .as_ref()
         .ok_or((StatusCode::BAD_REQUEST, "Missing 'query' parameter".into()))?;
-    execute_query(state, dataset_name, query)
+    execute_query(state, dataset_name, query, graph_format_from_accept(headers))
 }
 
 /// Execute a SPARQL query directly on a given store (used for file catalogs).
 pub async fn sparql_query_get_on_store(
     store: &Store,
     params: &SparqlQueryParams,
+    headers: &HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let query = params
         .query
         .as_ref()
         .ok_or((StatusCode::BAD_REQUEST, "Missing 'query' parameter".into()))?;
-    execute_query_on_store(store, query)
+    execute_query_on_store(store, query, graph_format_from_accept(headers))
 }
 
 /// Execute a SPARQL query (POST) directly on a given store (used for file catalogs).
@@ -68,7 +70,7 @@ pub async fn sparql_query_post_on_store(
         body.to_string()
     };
 
-    execute_query_on_store(store, &sparql)
+    execute_query_on_store(store, &sparql, graph_format_from_accept(headers))
 }
 
 pub async fn sparql_query_post(
@@ -111,13 +113,14 @@ pub async fn sparql_query_post(
 
     let results = sparql_query_union_timeout(&store, &sparql, QUERY_TIMEOUT)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    format_results(results)
+    format_results(results, graph_format_from_accept(headers))
 }
 
 fn execute_query(
     state: &AppState,
     dataset_name: &str,
     query: &str,
+    graph_format: RdfFormat,
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {
     let store = state.store_manager.get_dataset(dataset_name).ok_or((
         StatusCode::NOT_FOUND,
@@ -127,34 +130,51 @@ fn execute_query(
     let results = sparql_query_union_timeout(&store, query, QUERY_TIMEOUT)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    format_results(results)
+    format_results(results, graph_format)
 }
 
 fn execute_query_on_store(
     store: &Store,
     query: &str,
+    graph_format: RdfFormat,
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {
     let results =
         sparql_query(store, query).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    format_results(results)
+    format_results(results, graph_format)
 }
 
 fn ise<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+/// RDF serialization for CONSTRUCT/DESCRIBE results, negotiated from `Accept`
+/// (Turtle / RDF-XML / N-Triples / JSON-LD); Turtle when nothing RDF matches.
+/// SELECT/ASK results are unaffected (always SPARQL-results JSON).
+fn graph_format_from_accept(headers: &HeaderMap) -> RdfFormat {
+    super::entity::rdf_format_for(super::entity::negotiate_format(headers))
+        .unwrap_or(RdfFormat::Turtle)
+}
+
 /// Serialize query results, capping output at `MAX_RESULT_ROWS`. CONSTRUCT/
 /// DESCRIBE results are serialized directly from the result iterator — they are
 /// NOT inserted back into the store (the previous code did, which let an
 /// anonymous CONSTRUCT mutate the dataset and dump the whole default graph).
-fn format_results(results: QueryResults) -> Result<(HeaderMap, String), (StatusCode, String)> {
+fn format_results(
+    results: QueryResults,
+    graph_format: RdfFormat,
+) -> Result<(HeaderMap, String), (StatusCode, String)> {
     let mut headers = HeaderMap::new();
     let mut truncated = false;
 
     let body = match results {
         QueryResults::Graph(triples) => {
-            headers.insert(header::CONTENT_TYPE, "text/turtle".parse().unwrap());
-            let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle).for_writer(Vec::new());
+            // CONSTRUCT/DESCRIBE results honor the `Accept` header
+            // (Turtle / RDF-XML / N-Triples / JSON-LD; Turtle by default).
+            headers.insert(
+                header::CONTENT_TYPE,
+                graph_format.media_type().parse().unwrap(),
+            );
+            let mut serializer = RdfSerializer::from_format(graph_format).for_writer(Vec::new());
             for (n, triple) in triples.enumerate() {
                 if n >= MAX_RESULT_ROWS {
                     truncated = true;

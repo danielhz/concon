@@ -295,7 +295,7 @@ async fn content_get(
             let qualified = parsed.qualified_dataset_name().unwrap();
             match view.as_deref() {
                 Some("_sparql") => {
-                    match sparql::sparql_query_get(&state, &qualified, &params).await {
+                    match sparql::sparql_query_get(&state, &qualified, &params, &headers).await {
                         Ok(resp) => resp.into_response(),
                         Err(e) => e.into_response(),
                     }
@@ -337,7 +337,7 @@ async fn content_get(
                         None => {
                             // Content negotiation at the base URL.
                             let fmt = entity::negotiate_format(&headers);
-                            if fmt == "ttl" || fmt == "owl" {
+                            if entity::rdf_format_for(fmt).is_some() {
                                 ontology::dump_ontology_rdf(&state, &qualified, fmt)
                             } else if state.store_manager.has_doc(&qualified) {
                                 ontology::serve_doc(&state, &qualified, &url_prefix)
@@ -371,7 +371,7 @@ async fn content_get(
                     let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
                     match shacl_store {
                         Ok(store) => {
-                            match sparql::sparql_query_get_on_store(&store, &params).await {
+                            match sparql::sparql_query_get_on_store(&store, &params, &headers).await {
                                 Ok(resp) => resp.into_response(),
                                 Err(e) => e.into_response(),
                             }
@@ -403,7 +403,7 @@ async fn content_get(
                     let catalog = state.store_manager.get_file_catalog(&team_path);
                     match catalog {
                         Some(store) => {
-                            match sparql::sparql_query_get_on_store(&store, &params).await {
+                            match sparql::sparql_query_get_on_store(&store, &params, &headers).await {
                                 Ok(resp) => resp.into_response(),
                                 Err(e) => e.into_response(),
                             }
