@@ -340,7 +340,10 @@ fn entity_not_found(state: &AppState, subject_iri: &str, format: &str) -> Respon
         });
     (
         StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, content_type_for("xhtml"))],
+        // Entity pages are generated HTML (the base.html chrome, no CDATA), so
+        // text/html — the HTML5 parser handles base.html's void elements, which
+        // are not XML-well-formed. (Only the curated doc is served xhtml+xml.)
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         body,
     )
         .into_response()
@@ -463,7 +466,10 @@ pub async fn serve_entity(
             };
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, content_type_for("xhtml"))],
+                // Entity pages are generated HTML (the base.html chrome, no CDATA), so
+        // text/html — the HTML5 parser handles base.html's void elements, which
+        // are not XML-well-formed. (Only the curated doc is served xhtml+xml.)
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
                 html,
             )
                 .into_response()
