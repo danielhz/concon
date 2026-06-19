@@ -1,5 +1,5 @@
-use axum::extract::{FromRequest, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use tower_cookies::Cookies;

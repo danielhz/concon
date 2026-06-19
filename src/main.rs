@@ -1,13 +1,9 @@
-mod auth;
-mod config;
-mod grobid;
-mod migration;
-mod routes;
-mod shacl;
-mod state;
-mod store;
-
 use std::net::SocketAddr;
+
+// The binary uses the library crate rather than re-declaring the modules with
+// `mod` — re-declaring compiled a second copy into the binary and made every
+// lib function the binary didn't call look like dead code.
+use concon::{config, migration, routes, state};
 
 #[tokio::main]
 async fn main() {

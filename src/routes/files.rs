@@ -795,39 +795,6 @@ fn scan_subdirs(
     }
 }
 
-fn find_catalog_dirs(
-    base: &std::path::Path,
-    prefix: &str,
-    state: &AppState,
-    files: &mut Vec<minijinja::Value>,
-) {
-    let target = base.join(prefix.trim_end_matches('/'));
-    if !target.exists() {
-        return;
-    }
-    if let Ok(entries) = std::fs::read_dir(&target) {
-        for entry in entries.flatten() {
-            if entry.file_type().map_or(false, |t| t.is_dir()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                // Skip Oxigraph internal files
-                if name == "." || name == ".." || name.ends_with(".log") || name.ends_with(".sst") {
-                    continue;
-                }
-                let sub_path = format!("{}{}", prefix, name);
-                // Check if this looks like a catalog (has CURRENT file = Oxigraph store)
-                if entry.path().join("CURRENT").exists() {
-                    // This is a catalog store, not a subdirectory of catalogs
-                    continue;
-                }
-                // It's a subdirectory — check for catalog and recurse
-                let catalog_path = format!("{}/{}", prefix.trim_end_matches('/'), name);
-                files.extend(list_files_from_catalog(state, &catalog_path));
-                find_catalog_dirs(base, &format!("{}/", catalog_path), state, files);
-            }
-        }
-    }
-}
-
 pub fn list_files_from_catalog(state: &AppState, team_path: &str) -> Vec<minijinja::Value> {
     let catalog = match state.store_manager.get_file_catalog(team_path) {
         Some(c) => c,
