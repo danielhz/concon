@@ -218,9 +218,16 @@ async fn content_get(
         ParsedPath::TeamPage { .. } => true,
         ParsedPath::DatasetView { view, .. } => {
             // Public read endpoints: the SPARQL endpoint, entity dereferencing,
-            // and the ontology-document base view (`None`). The base view's
-            // editor fallback re-checks login inside the handler.
-            !matches!(view.as_deref(), Some("_sparql") | Some("_entity") | None)
+            // the YASGUI editor (`_query` — read-only for anonymous; the write
+            // controls are gated on `username` in the template and `_update` is
+            // server-side authorized), and the ontology-document base view
+            // (`None`). The Public-read gate below still 404s a non-Public
+            // dataset for anonymous; the base view's editor fallback re-checks
+            // login inside the handler.
+            !matches!(
+                view.as_deref(),
+                Some("_sparql") | Some("_query") | Some("_entity") | None
+            )
         }
         ParsedPath::FileCatalog { view, .. } => view.as_deref() != Some("_query"),
         ParsedPath::FileItem { .. } => true,
@@ -1050,6 +1057,14 @@ mod tests {
         // Entity dereferencing on a non-public dataset → 404 to anonymous.
         let r = server.get("/_ds/secret/_entity/foo").await;
         r.assert_status(StatusCode::NOT_FOUND);
+
+        // "open in editor": anonymous _query is allowed on a Public dataset and
+        // 404 on a non-Public one (same gate, no existence leak).
+        server.get("/_ds/pub/_query").await.assert_status_ok();
+        server
+            .get("/_ds/secret/_query")
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
