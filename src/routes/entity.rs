@@ -143,12 +143,17 @@ struct PropertyRow {
 /// Forward triples `<subject> ?p ?o`, with predicate and object labels pulled
 /// in the same query (no N+1 lookups).
 fn forward_rows(store: &Store, subject_iri: &str) -> Vec<PropertyRow> {
+    // GROUP BY the triple and SAMPLE the labels: a predicate or object may
+    // carry several `rdfs:label`s (e.g. a plain and an `@en`-tagged copy, or
+    // genuinely multilingual labels), and a plain OPTIONAL join would emit one
+    // duplicate row per extra label. Grouping yields exactly one row per
+    // (predicate, object) pair.
     let q = format!(
-        r#"SELECT ?p ?o ?pl ?ol WHERE {{
+        r#"SELECT ?p ?o (SAMPLE(?pl) AS ?plab) (SAMPLE(?ol) AS ?olab) WHERE {{
             <{subject_iri}> ?p ?o .
             OPTIONAL {{ ?p <{RDFS_LABEL}> ?pl }}
             OPTIONAL {{ ?o <{RDFS_LABEL}> ?ol }}
-        }} ORDER BY ?p ?o"#
+        }} GROUP BY ?p ?o ORDER BY ?p ?o"#
     );
     let mut rows = Vec::new();
     if let Ok(QueryResults::Solutions(sols)) = sparql_query_union(store, &q) {
@@ -157,9 +162,9 @@ fn forward_rows(store: &Store, subject_iri: &str) -> Vec<PropertyRow> {
                 continue;
             };
             let p_iri = p.as_str().to_string();
-            let predicate_label = literal_value(sol.get("pl"));
+            let predicate_label = literal_value(sol.get("plab"));
             let predicate_short = short_form(&p_iri);
-            let target_label = literal_value(sol.get("ol"));
+            let target_label = literal_value(sol.get("olab"));
             match sol.get("o") {
                 Some(Term::NamedNode(o)) => {
                     let iri = o.as_str().to_string();
@@ -223,12 +228,14 @@ struct ReverseRow {
 
 /// Reverse triples `?s ?p <object>`, with labels in the same query.
 fn reverse_rows(store: &Store, object_iri: &str) -> Vec<ReverseRow> {
+    // GROUP BY + SAMPLE so multi-labelled subjects/predicates don't multiply
+    // rows (see `forward_rows`).
     let q = format!(
-        r#"SELECT ?s ?p ?sl ?pl WHERE {{
+        r#"SELECT ?s ?p (SAMPLE(?sl) AS ?slab) (SAMPLE(?pl) AS ?plab) WHERE {{
             ?s ?p <{object_iri}> .
             OPTIONAL {{ ?s <{RDFS_LABEL}> ?sl }}
             OPTIONAL {{ ?p <{RDFS_LABEL}> ?pl }}
-        }} ORDER BY ?p ?s"#
+        }} GROUP BY ?s ?p ORDER BY ?p ?s"#
     );
     let mut rows = Vec::new();
     if let Ok(QueryResults::Solutions(sols)) = sparql_query_union(store, &q) {
@@ -238,8 +245,8 @@ fn reverse_rows(store: &Store, object_iri: &str) -> Vec<ReverseRow> {
             };
             let p_iri = p.as_str().to_string();
             let predicate_short = short_form(&p_iri);
-            let predicate_label = literal_value(sol.get("pl"));
-            let source_label = literal_value(sol.get("sl"));
+            let predicate_label = literal_value(sol.get("plab"));
+            let source_label = literal_value(sol.get("slab"));
             match sol.get("s") {
                 Some(Term::NamedNode(s)) => {
                     let iri = s.as_str().to_string();
@@ -281,11 +288,12 @@ struct TypeRef {
 }
 
 fn types_of(store: &Store, subject_iri: &str) -> Vec<TypeRef> {
+    // GROUP BY + SAMPLE so a multi-labelled class isn't listed once per label.
     let q = format!(
-        r#"SELECT ?t ?tl WHERE {{
+        r#"SELECT ?t (SAMPLE(?tl) AS ?tlab) WHERE {{
             <{subject_iri}> a ?t .
             OPTIONAL {{ ?t <{RDFS_LABEL}> ?tl }}
-        }} ORDER BY ?t"#
+        }} GROUP BY ?t ORDER BY ?t"#
     );
     let mut out = Vec::new();
     if let Ok(QueryResults::Solutions(sols)) = sparql_query_union(store, &q) {
@@ -294,7 +302,7 @@ fn types_of(store: &Store, subject_iri: &str) -> Vec<TypeRef> {
                 let iri = t.as_str().to_string();
                 out.push(TypeRef {
                     short: short_form(&iri),
-                    label: literal_value(sol.get("tl")),
+                    label: literal_value(sol.get("tlab")),
                     iri,
                 });
             }
@@ -518,6 +526,30 @@ mod tests {
             literal_annotation(None, "http://www.w3.org/2001/XMLSchema#integer"),
             "^^xsd:integer"
         );
+    }
+
+    /// A term with several `rdfs:label`s (here a plain copy and an `@en` copy
+    /// of the same text, as seen on `mlips:numLayers`) must not duplicate the
+    /// property row in the entity view. Regression for the doubled
+    /// "for hyperparameter / number of layers" row.
+    #[test]
+    fn forward_rows_dedups_multi_labelled_object() {
+        let store = Store::new().unwrap();
+        let ttl = r#"@prefix mlips: <https://w3id.org/mlips#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+<https://w3id.org/mlips/entity/s> mlips:forHyperparameter mlips:numLayers .
+mlips:numLayers rdfs:label "number of layers" ;
+                rdfs:label "number of layers"@en ."#;
+        store
+            .load_from_reader(RdfFormat::Turtle, ttl.as_bytes())
+            .unwrap();
+        let rows = forward_rows(&store, "https://w3id.org/mlips/entity/s");
+        let hp: Vec<_> = rows
+            .iter()
+            .filter(|r| r.predicate_iri == "https://w3id.org/mlips#forHyperparameter")
+            .collect();
+        assert_eq!(hp.len(), 1, "multi-labelled object duplicated the property row");
+        assert_eq!(hp[0].target_label.as_deref(), Some("number of layers"));
     }
 
     #[test]
