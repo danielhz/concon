@@ -10,20 +10,26 @@
 <h2>Public datasets</h2>
 <table>
     <thead>
-        <tr><th>Dataset</th><th>Publisher</th></tr>
+        <tr><th>Dataset</th><th>Publisher</th><th>Query</th></tr>
     </thead>
     <tbody>
         {% for ds in datasets %}
         <tr>
-            <td>{{ ds.name }}</td>
+            <td><a href="{{ ds.url }}">{{ ds.name }}</a></td>
             <td>{{ ds.team }}</td>
+            <td>
+                <a href="{{ ds.query_url }}">YASGUI</a> &middot;
+                <a href="{{ ds.example_ontology_url }}">ontology</a> &middot;
+                <a href="{{ ds.example_data_url }}">data</a>
+            </td>
         </tr>
         {% endfor %}
     </tbody>
 </table>
+<p class="secondary-color" style="font-size: 0.9rem;">A dataset name opens its documentation; the Query links open the SPARQL editor (with example queries pre-filled over the ontology and the data).</p>
 {% else %}
 <p>No public datasets available.</p>
 {% endif %}
 
-<p><a href="/_login" class="button">Log in</a> to access datasets and features.</p>
+<p><a href="/_login" class="button">Log in</a> to manage datasets and teams.</p>
 {% endblock %}

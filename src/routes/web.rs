@@ -11,6 +11,40 @@ use crate::store::sparql_update;
 
 const SESSION_COOKIE: &str = "mlipe_session";
 
+/// Example pre-filled query over the schema (classes & properties) — the
+/// "query the ontology" entry point. Generic enough for any ontology dataset.
+const EXAMPLE_ONTOLOGY_QUERY: &str = "PREFIX owl: <http://www.w3.org/2002/07/owl#>\n\
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+# Classes and properties defined in the ontology\n\
+SELECT ?term ?type ?label WHERE {\n  \
+?term a ?type .\n  \
+FILTER(?type IN (owl:Class, owl:ObjectProperty, owl:DatatypeProperty))\n  \
+OPTIONAL { ?term rdfs:label ?label }\n\
+} ORDER BY ?type ?term LIMIT 200";
+
+/// Example pre-filled query over the instance data — the "query the knowledge
+/// graph" entry point.
+const EXAMPLE_DATA_QUERY: &str = "# A sample of the instance data (triples)\n\
+SELECT ?subject ?predicate ?object WHERE {\n  \
+?subject ?predicate ?object .\n\
+} LIMIT 100";
+
+/// concon-native serving base for a dataset, from its qualified name
+/// (e.g. "mlips/mlips" → "/mlips/_ds/mlips"; "root/foo" → "/_ds/foo").
+pub fn dataset_base_url(qualified: &str) -> String {
+    match qualified.rsplit_once('/') {
+        Some(("root", name)) => format!("/_ds/{name}"),
+        Some((team, name)) => format!("/{team}/_ds/{name}"),
+        None => format!("/_ds/{qualified}"),
+    }
+}
+
+/// Build a `_query` deep link that pre-fills the YASGUI editor with `query`.
+fn query_deep_link(base: &str, query: &str) -> String {
+    let qs = serde_urlencoded::to_string([("query", query)]).unwrap_or_default();
+    format!("{base}/_query?{qs}")
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
@@ -79,9 +113,14 @@ async fn index(
                     }
                     None => ("Root".to_string(), d.name.clone()),
                 };
+                let base = dataset_base_url(&d.name);
                 minijinja::context! {
                     name => short_name,
                     team => team_name,
+                    url => format!("{base}/"),
+                    query_url => format!("{base}/_query"),
+                    example_ontology_url => query_deep_link(&base, EXAMPLE_ONTOLOGY_QUERY),
+                    example_data_url => query_deep_link(&base, EXAMPLE_DATA_QUERY),
                 }
             }).collect::<Vec<_>>(),
         })
@@ -392,19 +431,18 @@ pub async fn team_page(
     let team_path = team_segments.join("/");
     let team_name = team_segments.last().map(|s| s.as_str()).unwrap_or("Root");
 
-    // Check team visibility (root team is always visible to logged-in users)
+    // Check team visibility. Logged-in users must be able to see the team;
+    // anonymous visitors are allowed here only when the caller established the
+    // team has a Public dataset (content::team_has_public_dataset), and they see
+    // a public-only view (datasets/files filtered, no admin controls) below.
     if !team_segments.is_empty() {
         let team_iri_check = auth::resolve_team_path(&state.store_manager.system, team_segments);
-        if let Some(ref iri) = team_iri_check {
-            if let Some(ref s) = session {
-                if !auth::can_see_team(&state.store_manager.system, &s.user_iri, iri) {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        "You do not have access to this team".into(),
-                    ));
-                }
-            } else {
-                return Err((StatusCode::UNAUTHORIZED, "Login required".into()));
+        if let (Some(iri), Some(s)) = (team_iri_check.as_ref(), session.as_ref()) {
+            if !auth::can_see_team(&state.store_manager.system, &s.user_iri, iri) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "You do not have access to this team".into(),
+                ));
             }
         }
     }
@@ -439,7 +477,12 @@ pub async fn team_page(
     } else {
         Vec::new()
     };
-    let datasets = auth::get_team_datasets_by_path(&state.store_manager.system, team_segments);
+    let mut datasets = auth::get_team_datasets_by_path(&state.store_manager.system, team_segments);
+    if session.is_none() {
+        // Anonymous public view: only Public datasets.
+        let public = auth::get_public_datasets(&state.store_manager.system);
+        datasets.retain(|d| public.iter().any(|p| p.name == d.name));
+    }
 
     // Get team members (recursive) if admin
     let members = if is_team_admin {
@@ -456,7 +499,13 @@ pub async fn team_page(
     } else {
         team_path.clone()
     };
-    let all_files = super::files::list_files_recursive(state, &team_path_for_files);
+    // Files are shown to authenticated viewers only; anonymous gets the
+    // public-only view (datasets, not the team's papers).
+    let all_files = if session.is_some() {
+        super::files::list_files_recursive(state, &team_path_for_files)
+    } else {
+        Vec::new()
+    };
     let files_per_page: usize = 10;
     let total_files = all_files.len();
     let total_pages = ((total_files + files_per_page - 1) / files_per_page).max(1);
@@ -503,23 +552,19 @@ pub async fn team_page(
                 name => t.name,
             }).collect::<Vec<_>>(),
             datasets => datasets.iter().map(|d| {
-                // Build display name and URL from qualified name
-                let (team_prefix, short_name) = match d.name.rsplit_once('/') {
-                    Some((team, name)) => {
-                        let prefix = if team == "root" { String::new() } else { format!("/{}", team) };
-                        (prefix, name.to_string())
-                    }
-                    None => (String::new(), d.name.clone()),
-                };
-                // Show relative path from current team for display
+                // Relative display name from the current team.
                 let display = if team_path.is_empty() {
                     d.name.strip_prefix("root/").unwrap_or(&d.name).to_string()
                 } else {
                     d.name.strip_prefix(&format!("{}/", team_path)).unwrap_or(&d.name).to_string()
                 };
+                let base = dataset_base_url(&d.name);
                 minijinja::context! {
                     name => display,
-                    url => format!("{}/_ds/{}/_query", team_prefix, short_name),
+                    url => format!("{base}/"),                 // documentation
+                    query_url => format!("{base}/_query"),     // YASGUI editor
+                    example_ontology_url => query_deep_link(&base, EXAMPLE_ONTOLOGY_QUERY),
+                    example_data_url => query_deep_link(&base, EXAMPLE_DATA_QUERY),
                 }
             }).collect::<Vec<_>>(),
             members => members.iter().map(|u| minijinja::context! {

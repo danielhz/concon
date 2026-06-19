@@ -45,7 +45,14 @@
         <h3>Datasets</h3>
         <ul class="no-bullet">
             {% for ds in datasets %}
-                <li><a href="{{ ds.url }}">{{ ds.name }}</a></li>
+                <li>
+                    <a href="{{ ds.url }}">{{ ds.name }}</a>
+                    <span class="secondary-color" style="font-size: 0.9rem;">
+                        — <a href="{{ ds.query_url }}">Query (YASGUI)</a> &middot;
+                        <a href="{{ ds.example_ontology_url }}">ontology</a> &middot;
+                        <a href="{{ ds.example_data_url }}">data</a>
+                    </span>
+                </li>
             {% endfor %}
         </ul>
         {% else %}

@@ -229,7 +229,14 @@ async fn content_get(
 
     let session = web::get_username(&cookies, &state);
 
-    if needs_login && session.is_none() {
+    // A non-root team that owns at least one Public dataset is a public landing
+    // page: let anonymous visitors view it (team_page renders only public
+    // content for them — no private datasets, sub-teams, members, or files).
+    let anon_public_team = session.is_none()
+        && matches!(&parsed, ParsedPath::TeamPage { team_segments } if !team_segments.is_empty())
+        && team_has_public_dataset(&state, &parsed.team_path());
+
+    if needs_login && session.is_none() && !anon_public_team {
         return axum::response::Redirect::to("/_login").into_response();
     }
 
@@ -712,6 +719,18 @@ async fn content_delete(
     }
 }
 
+/// Whether the team at `team_path` (e.g. "mlips") owns at least one Public
+/// dataset — i.e. its page is a public landing anonymous visitors may view.
+fn team_has_public_dataset(state: &AppState, team_path: &str) -> bool {
+    if team_path.is_empty() {
+        return false;
+    }
+    let prefix = format!("{team_path}/");
+    crate::auth::get_public_datasets(&state.store_manager.system)
+        .iter()
+        .any(|d| d.name.starts_with(&prefix))
+}
+
 /// Build team path string: "root" for empty segments, otherwise joined.
 fn team_path_str(segments: &[String]) -> String {
     if segments.is_empty() {
@@ -1015,6 +1034,67 @@ mod tests {
         // Entity dereferencing on a non-public dataset → 404 to anonymous.
         let r = server.get("/_ds/secret/_entity/foo").await;
         r.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_anonymous_public_team_landing() {
+        use crate::routes::create_router;
+        use crate::state::AppState;
+        use crate::store::sparql_update;
+        use axum_test::TestServer;
+
+        let state = AppState::new().unwrap();
+        let sys = &state.store_manager.system;
+        sparql_update(
+            sys,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+               INSERT DATA {
+                 <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+                 <https://mlipe.2mia.org/teams/mlips> a mlipe:Team ; mlipe:teamName "mlips" ;
+                   mlipe:hasParentTeam <https://mlipe.2mia.org/teams/root> .
+                 <https://mlipe.2mia.org/teams/secret> a mlipe:Team ; mlipe:teamName "secret" ;
+                   mlipe:hasParentTeam <https://mlipe.2mia.org/teams/root> .
+               }"#,
+        )
+        .unwrap();
+        // A Public dataset in team "mlips"; a non-public one in team "secret".
+        state.store_manager.create_dataset("mlips/mlips").unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata_full(
+                "mlips/mlips",
+                "PublicVisibility",
+                "https://mlipe.2mia.org/teams/mlips",
+            )
+            .unwrap();
+        state.store_manager.create_dataset("secret/priv").unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata_with_visibility("secret/priv", "LoggedUsersVisibility")
+            .unwrap();
+
+        let server = TestServer::new(create_router(state));
+
+        // Anonymous can view the public team landing; it lists the dataset with
+        // documentation + query links. (URL slashes are HTML-escaped to `&#x2f;`
+        // by the template — harmless in hrefs — so assert on escaping-robust
+        // tokens.)
+        let r = server.get("/mlips/").await;
+        r.assert_status_ok();
+        let body = r.text();
+        assert!(body.contains(">mlips</a>"), "dataset listed");
+        assert!(body.contains("Query (YASGUI)"), "query link present");
+        assert!(body.contains("_query?query="), "example query deep links present");
+
+        // The home page surfaces the public dataset with the same links.
+        let home = server.get("/").await;
+        home.assert_status_ok();
+        let home = home.text();
+        assert!(home.contains("Public datasets") && home.contains("_query?query="));
+
+        // A team with no Public dataset is not anonymously viewable → login.
+        let r = server.get("/secret/").await;
+        r.assert_status(StatusCode::SEE_OTHER);
     }
 
     #[test]
