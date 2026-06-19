@@ -173,17 +173,20 @@
           var local = iri.slice(MLIPS_NS.length);
           var anchor = document.getElementById(local);
           if (!anchor) return;
+          // GROUP BY + SAMPLE the label so an individual carrying more than one
+          // rdfs:label (e.g. a plain and an @en copy of the same text) yields a
+          // single row, and LIMIT bounds *distinct* individuals.
           var query =
             PREFIXES +
             "\n# Individuals of " +
             shortForm(iri) +
             " (subclass-aware)\n" +
-            "SELECT ?individual ?label WHERE {\n" +
+            "SELECT ?individual (SAMPLE(?label) AS ?label) WHERE {\n" +
             "  ?individual rdf:type/rdfs:subClassOf* <" +
             iri +
             "> .\n" +
             "  OPTIONAL { ?individual rdfs:label ?label }\n" +
-            "} ORDER BY ?individual LIMIT 200";
+            "} GROUP BY ?individual ORDER BY ?individual LIMIT 200";
           var widget = buildRunner(query, "Explore individuals");
           widget.classList.add("ccx-class");
           anchor.parentNode.insertBefore(widget, anchor.nextSibling);
@@ -198,11 +201,15 @@
   function competencyQuestions() {
     var q =
       PREFIXES +
-      "\nSELECT ?id ?label ?question ?query WHERE {\n" +
+      // GROUP BY the CQ + SAMPLE the rest so a competency question with more
+      // than one rdfs:label (same multi-label class as the individuals widget)
+      // is listed once.
+      "\nSELECT ?cq (SAMPLE(?id) AS ?id) (SAMPLE(?label) AS ?label)" +
+      " (SAMPLE(?question) AS ?question) (SAMPLE(?query) AS ?query) WHERE {\n" +
       "  ?cq a cq:CompetencyQuestion ; dcterms:identifier ?id ;\n" +
       "      cq:questionText ?question ; cq:sparqlQuery ?query .\n" +
       "  OPTIONAL { ?cq rdfs:label ?label }\n" +
-      "} ORDER BY ?id";
+      "} GROUP BY ?cq ORDER BY ?id";
     runSelect(q)
       .then(function (json) {
         var rows = json.results.bindings;
