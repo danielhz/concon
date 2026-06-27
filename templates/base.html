@@ -11,34 +11,22 @@
 <body>
     <div class="top-bar">
         <div class="top-bar-left">
-            <ul class="dropdown menu" data-dropdown-menu>
+            <ul class="menu">
                 <li class="menu-text"><a href="/">Concon</a></li>
-                <li class="has-submenu">
-                    <a href="#">Explore</a>
-                    <ul class="submenu menu vertical" data-submenu>
-                        <li><a href="/_teams">Teams</a></li>
-                        <li><a href="/_users">Users</a></li>
-                    </ul>
-                </li>
-                {% if username %}
-                {% endif %}
+                <li><a href="/_teams">Teams</a></li>
+                <li><a href="/_users">Users</a></li>
             </ul>
         </div>
         <div class="top-bar-right">
-            <ul class="dropdown menu" data-dropdown-menu>
+            <ul class="menu">
                 {% if username %}
-                <li class="has-submenu">
-                    <a href="#">{{ username }}</a>
-                    <ul class="submenu menu vertical" data-submenu>
-                        <li><a href="/_change-password">Change password</a></li>
-                        {% if is_admin %}<li><a href="/_admin">Site administration</a></li>{% endif %}
-                        <li><hr></li>
-                        <li>
-                            <form method="post" action="/_logout">
-                                <button type="submit" class="clear button expanded small">Logout</button>
-                            </form>
-                        </li>
-                    </ul>
+                <li class="menu-text">{{ username }}</li>
+                <li><a href="/_change-password">Change password</a></li>
+                {% if is_admin %}<li><a href="/_admin">Admin</a></li>{% endif %}
+                <li>
+                    <form method="post" action="/_logout" class="inline-form">
+                        <button type="submit" class="clear button top-bar-logout">Logout</button>
+                    </form>
                 </li>
                 {% else %}
                 <li><a href="/_login">Login</a></li>
