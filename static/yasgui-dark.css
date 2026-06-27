@@ -1,0 +1,83 @@
+/* Dark theme for the embedded YASGUI SPARQL editor + results.
+ *
+ * YASGUI (CodeMirror editor + DataTables results) ships no dark mode, and its
+ * stylesheet is loaded *after* style.css, so it would override any dark rules
+ * placed there. This file is therefore loaded *after* yasgui.min.css (see
+ * dataset.html / team.html) and only takes effect under prefers-color-scheme:
+ * dark. The palette matches the rest of the site (style.css / ontology-doc.css);
+ * the --c-* custom properties are defined in style.css's dark block. */
+@media (prefers-color-scheme: dark) {
+  /* === Editor (Yasqe / CodeMirror) === */
+  .yasgui .yasqe .CodeMirror {
+    background: var(--c-code-bg);
+    color: var(--c-fg);
+  }
+  .yasgui .CodeMirror-gutters {
+    background: var(--c-bg);
+    border-right: 1px solid var(--c-rule);
+  }
+  .yasgui .CodeMirror-linenumber { color: var(--c-muted); }
+  .yasgui .CodeMirror-cursor { border-left-color: var(--c-fg); }
+  .yasgui .CodeMirror-activeline-background { background: rgba(255, 255, 255, 0.04); }
+  .yasgui .CodeMirror-selected,
+  .yasgui .CodeMirror-focused .CodeMirror-selected { background: rgba(108, 183, 240, 0.25); }
+  .yasgui .CodeMirror-matchingbracket {
+    color: #6cb7f0 !important;
+    outline: 1px solid rgba(108, 183, 240, 0.4);
+  }
+
+  /* SPARQL syntax tokens (readable on dark) */
+  .yasgui .cm-keyword     { color: #c792ea; }   /* SELECT, WHERE, FILTER, … */
+  .yasgui .cm-atom,
+  .yasgui .cm-variable,
+  .yasgui .cm-variable-2,
+  .yasgui .cm-def         { color: #82aaff; }    /* ?variables */
+  .yasgui .cm-string      { color: #c3e88d; }
+  .yasgui .cm-number      { color: #f78c6c; }
+  .yasgui .cm-comment     { color: #5a6470; font-style: italic; }
+  .yasgui .cm-operator,
+  .yasgui .cm-punctuation { color: #89ddff; }
+  .yasgui .cm-meta,
+  .yasgui .cm-builtin     { color: #ffcb6b; }    /* prefixes, `a`, … */
+  .yasgui .cm-error       { color: #ff5370; }
+
+  /* Autocomplete dropdown (appended to <body>, outside .yasgui) */
+  .CodeMirror-hints {
+    background: var(--c-code-bg);
+    border: 1px solid var(--c-rule);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+  }
+  .CodeMirror-hint { color: var(--c-fg); }
+  .CodeMirror-hint-active { background: #1779ba; color: #fff; }
+
+  /* === Tabs / chrome === */
+  .yasgui .tabsList { background: var(--c-bg); border-bottom: 1px solid var(--c-rule); }
+  .yasgui .tabPanel { background: var(--c-bg); }
+  .yasgui .tab,
+  .yasgui .tabsList .tab { color: var(--c-fg); }
+
+  /* === Results (Yasr) === */
+  .yasr,
+  .yasr .dataTables_wrapper { color: var(--c-fg); }
+  .yasr .dataTable { color: var(--c-fg); border-color: var(--c-rule); }
+  .yasr .dataTable thead th,
+  .yasr .dataTable thead td {
+    background: var(--c-code-bg);
+    color: var(--c-fg);
+    border-color: var(--c-rule);
+  }
+  .yasr .dataTable tbody td,
+  .yasr .dataTable tbody th { border-color: var(--c-rule); }
+  .yasr table.dataTable tbody tr { background: var(--c-bg); }
+  .yasr table.dataTable.stripe tbody tr.odd,
+  .yasr table.dataTable tbody tr:nth-child(odd) { background: var(--c-code-bg); }
+  .yasr .dataTables_wrapper .dataTable tbody tr:hover { background: rgba(108, 183, 240, 0.10); }
+  .yasr a { color: var(--c-link); }
+  .yasr .yasr_response_chip { background: var(--c-code-bg); color: var(--c-fg); }
+  .yasr .yasr_help_variable { background: #142537; color: #6cb7f0; }
+  .yasr .yasr_fallback_info:not(:empty) {
+    background: var(--c-code-bg);
+    border-color: var(--c-rule);
+    color: var(--c-fg);
+  }
+}
