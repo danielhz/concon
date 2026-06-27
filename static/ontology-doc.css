@@ -60,7 +60,7 @@
   }
 }
 
-html { background: var(--c-bg); color: var(--c-fg); }
+html { background: var(--c-bg); color: var(--c-fg); overflow-x: hidden; }
 
 body {
   font-family: var(--font-body);
@@ -191,38 +191,88 @@ section.term pre.owl-xml {
   section.term pre.owl-xml { background: rgba(0,0,0,0.35); }
 }
 
-/* === Table of contents === */
+/* === Table of contents (chip layout) ===
+ * Leaf terms render as compact, colour-coded clickable chips (grouped by term
+ * type) rather than a tall nested list — ~145 terms fit in roughly one screen,
+ * and each chip's tint matches its term section below. */
 
 nav#toc {
   margin: 1.5em 0 2em;
-  padding: 1em 1.4em 1em 1.4em;
+  padding: 1em 1.3em 1.2em;
   border: 1px solid var(--c-rule);
   border-radius: 6px;
   background: var(--c-code-bg);
-  font-size: 0.95em;
 }
 nav#toc h2.toc-heading {
-  font-size: 1.05rem;
-  margin: 0 0 0.5em 0;
+  font-size: 0.78rem;
+  margin: 0 0 0.9em 0;
   padding: 0;
   border: 0;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   color: var(--c-muted);
 }
-nav#toc ul {
+nav#toc .toc-group { margin: 0 0 0.9em; }
+nav#toc .toc-group:last-child { margin-bottom: 0; }
+nav#toc .toc-group > h3 {
+  font-size: 0.82rem;
+  font-weight: 700;
+  margin: 0 0 0.45em;
+  color: var(--c-fg);
+  text-transform: none;
+  letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+nav#toc .toc-group > h3 .count {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--c-muted);
+  font-variant-numeric: tabular-nums;
+}
+nav#toc .toc-group > h3 .dot {
+  width: 0.6em;
+  height: 0.6em;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+nav#toc ul.toc-chips {
   list-style: none;
-  padding-left: 0;
   margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em 0.45em;
 }
-nav#toc ul ul {
-  padding-left: 1.2em;
-  border-left: 1px dashed var(--c-rule);
-  margin: 0.15em 0 0.4em;
+nav#toc ul.toc-chips li { margin: 0; }
+nav#toc ul.toc-chips a {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  padding: 0.18em 0.55em;
+  border: 1px solid var(--c-rule);
+  border-radius: 4px;
+  background: var(--c-bg);
+  color: var(--c-fg);
+  text-decoration: none;
+  transition: border-color 0.12s, background 0.12s;
 }
-nav#toc li { margin: 0.15em 0; }
-nav#toc a { color: var(--c-fg); }
-nav#toc a:hover { color: var(--c-link); }
+nav#toc ul.toc-chips a:hover,
+nav#toc ul.toc-chips a:focus { text-decoration: none; }
+
+/* Colour-code each group to match its term-section palette. */
+nav#toc .toc-group.class    a { border-color: var(--c-class-rule);      background: var(--c-class-bg); }
+nav#toc .toc-group.class    h3 .dot { background: var(--c-class-rule); }
+nav#toc .toc-group.objprop  a { border-color: var(--c-objprop-rule);    background: var(--c-objprop-bg); }
+nav#toc .toc-group.objprop  h3 .dot { background: var(--c-objprop-rule); }
+nav#toc .toc-group.datprop  a { border-color: var(--c-datprop-rule);    background: var(--c-datprop-bg); }
+nav#toc .toc-group.datprop  h3 .dot { background: var(--c-datprop-rule); }
+nav#toc .toc-group.indiv    a { border-color: var(--c-individual-rule); background: var(--c-individual-bg); }
+nav#toc .toc-group.indiv    h3 .dot { background: var(--c-individual-rule); }
+nav#toc ul.toc-chips a:hover,
+nav#toc ul.toc-chips a:focus { border-color: var(--c-link); }
 
 /* === Per-term outgoing/incoming property lists === */
 
@@ -331,20 +381,29 @@ a.orcid-id:hover { color: var(--c-link); border-color: var(--c-link); }
 /* === concon chrome (top bar + breadcrumb, injected at serve-time) === */
 
 .ccx-chrome {
-  margin: -2rem -1.5rem 1.5rem;   /* span the body's horizontal padding */
+  width: 100vw;                    /* full window width across the centered body */
+  margin-left: calc(50% - 50vw);
+  margin-top: -2rem;               /* sit flush at the very top (cancels body padding) */
+  margin-bottom: 1.5rem;
 }
 .ccx-topbar {
-  background: var(--c-fg);
-  padding: 0.5em 1.5rem;
+  background: #1779ba;             /* fixed concon blue — matches the site top bar in light & dark */
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 1.5rem;
 }
-.ccx-topbar .ccx-brand {
-  color: var(--c-bg);
-  font-weight: 700;
-  letter-spacing: 0.02em;
+.ccx-topbar .ccx-nav { display: flex; align-items: center; }
+.ccx-topbar a {
+  color: #fff;
+  padding: 0 0.7em;
+  line-height: 2.9rem;
+  display: inline-block;
 }
-.ccx-topbar .ccx-brand:hover { color: var(--c-bg); text-decoration: underline; }
+.ccx-topbar a:hover { color: #fff; background: rgba(255, 255, 255, 0.14); text-decoration: none; }
+.ccx-topbar .ccx-brand { font-weight: 700; letter-spacing: 0.02em; padding-left: 0; }
 .ccx-breadcrumb {
-  padding: 0.5em 1.5rem;
+  padding: 0.55em 1.5rem;
   font-size: 0.9em;
   color: var(--c-muted);
   border-bottom: 1px solid var(--c-rule);

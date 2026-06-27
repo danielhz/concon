@@ -134,7 +134,13 @@ fn chrome_fragment(url_prefix: &str) -> String {
     format!(
         concat!(
             "<div class=\"ccx-chrome\">",
-            "<div class=\"ccx-topbar\"><a class=\"ccx-brand\" href=\"/\">concon</a></div>",
+            "<div class=\"ccx-topbar\">",
+            "<nav class=\"ccx-nav\">",
+            "<a class=\"ccx-brand\" href=\"/\">Concon</a>",
+            "<a href=\"/_teams\">Teams</a><a href=\"/_users\">Users</a>",
+            "</nav>",
+            "<nav class=\"ccx-nav\"><a href=\"/_login\">Login</a></nav>",
+            "</div>",
             "<nav class=\"ccx-breadcrumb\" aria-label=\"Breadcrumb\">",
             "<a href=\"/\">Home</a> / <a href=\"{th}\">{tl}</a> / <span>{dl}</span>",
             "</nav></div>"
@@ -192,30 +198,37 @@ fn build_toc(doc: &str) -> String {
             classes.push(id);
         }
     }
+    // (label, css-slug, ids) — the slug colour-codes the group's chips to match
+    // the corresponding term-section palette in ontology-doc.css.
     let groups = [
-        ("Classes", classes),
-        ("Object properties", object_props),
-        ("Datatype properties", datatype_props),
-        ("Individuals", individuals),
+        ("Classes", "class", classes),
+        ("Object properties", "objprop", object_props),
+        ("Datatype properties", "datprop", datatype_props),
+        ("Individuals", "indiv", individuals),
     ];
-    if groups.iter().all(|(_, v)| v.is_empty()) {
+    if groups.iter().all(|(_, _, v)| v.is_empty()) {
         return String::new();
     }
     let mut s = String::from(
         "<nav id=\"toc\" aria-label=\"Table of contents\">\
-         <h2 class=\"toc-heading\">Contents</h2><ul>",
+         <h2 class=\"toc-heading\">Contents</h2>",
     );
-    for (label, ids) in &groups {
+    for (label, slug, ids) in &groups {
         if ids.is_empty() {
             continue;
         }
-        s.push_str(&format!("<li>{label}<ul>"));
+        s.push_str(&format!(
+            "<div class=\"toc-group {slug}\">\
+             <h3><span class=\"dot\"></span>{label} <span class=\"count\">{n}</span></h3>\
+             <ul class=\"toc-chips\">",
+            n = ids.len(),
+        ));
         for id in ids {
             s.push_str(&format!("<li><a href=\"#{id}\">{id}</a></li>"));
         }
-        s.push_str("</ul></li>");
+        s.push_str("</ul></div>");
     }
-    s.push_str("</ul></nav>");
+    s.push_str("</nav>");
     s
 }
 

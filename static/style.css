@@ -1,5 +1,44 @@
 /* MLIPE custom styles — Foundation 6 defaults used for everything else */
 
+/* ===========================================================================
+ * Site theme ("Style A"): a blue full-width top bar, shared with the published
+ * ontology document (see ontology-doc.css, which mirrors these tokens) so the
+ * platform and its published resources read as one site. Foundation handles
+ * layout/components; this only re-skins the chrome and accents.
+ * ======================================================================== */
+:root {
+  --c-primary:       #1779ba;   /* Foundation primary */
+  --c-primary-hover: #126195;
+  --c-rule:          #d8dde2;
+  --c-code-bg:       #f5f7fa;
+}
+
+/* Top bar: blue, full window width (the .top-bar element already spans 100%). */
+.top-bar,
+.top-bar ul {
+  background-color: var(--c-primary);
+}
+.top-bar a { color: #fff; }
+.top-bar a:hover { color: #fff; background: rgba(255, 255, 255, 0.14); }
+.top-bar .menu-text,
+.top-bar .menu-text a {
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.top-bar .menu-text a:hover { background: transparent; text-decoration: underline; }
+
+/* Dropdown panels stay light so their links remain legible. */
+.top-bar .is-dropdown-submenu { background: #fff; border: 1px solid var(--c-rule); }
+.top-bar .is-dropdown-submenu a { color: var(--c-primary); }
+.top-bar .is-dropdown-submenu a:hover { background: var(--c-code-bg); color: var(--c-primary-hover); }
+/* Submenu caret: white on the blue bar, blue again inside the light panel. */
+.top-bar .is-dropdown-submenu-parent > a::after { border-top-color: #fff; }
+.top-bar .is-dropdown-submenu .is-dropdown-submenu-parent > a::after { border-top-color: var(--c-primary); }
+
+/* The logout button sits inside a light dropdown panel — keep it readable. */
+.top-bar .is-dropdown-submenu .button { margin-bottom: 0; }
+
 /* SPARQL update editor */
 .update-editor { display: flex; flex-direction: column; gap: 0.5rem; }
 .update-editor textarea {
