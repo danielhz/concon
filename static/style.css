@@ -95,3 +95,82 @@ a.admin-card:hover { border-color: #1779ba; text-decoration: none; }
 .paper-actions {
     margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem;
 }
+
+/* ===========================================================================
+ * Dark mode — follows the OS setting (prefers-color-scheme), matching the
+ * published ontology document (ontology-doc.css) so the whole platform flips
+ * together. Foundation 6 is light-only, so this re-skins its surfaces; the
+ * palette mirrors ontology-doc.css. The blue top bar is intentionally kept in
+ * both modes.
+ * ======================================================================== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-bg:            #161a1f;
+    --c-fg:            #e6ebf0;
+    --c-muted:         #98a2ad;
+    --c-rule:          #2a3038;
+    --c-link:          #6cb7f0;
+    --c-link-hover:    #9ed1f7;
+    --c-code-bg:       #1d242c;
+    --c-code-fg:       #d6dde4;
+  }
+
+  html, body { background-color: var(--c-bg); color: var(--c-fg); }
+  h1, h2, h3, h4, h5, h6 { color: var(--c-fg); }
+  p, li, dt, dd, label, .lead { color: var(--c-fg); }
+  a { color: var(--c-link); }
+  a:hover { color: var(--c-link-hover); }
+  hr { border-bottom-color: var(--c-rule); }
+  .secondary-color, [class*="secondary-color"] { color: var(--c-muted) !important; }
+
+  /* Tables */
+  table thead, table tbody, table tfoot {
+    border-color: var(--c-rule);
+    background-color: var(--c-bg);
+    color: var(--c-fg);
+  }
+  table thead { background-color: var(--c-code-bg); color: var(--c-fg); }
+  table tbody tr:nth-child(even) { background-color: var(--c-code-bg); }
+  thead tr:hover, tbody tr:hover { background-color: var(--c-code-bg); }
+  th, td { color: var(--c-fg); }
+
+  /* Code */
+  code {
+    background-color: var(--c-code-bg);
+    border-color: var(--c-rule);
+    color: var(--c-code-fg);
+  }
+
+  /* Form controls */
+  [type="text"], [type="password"], [type="email"], [type="search"],
+  [type="url"], [type="number"], textarea, select {
+    background-color: var(--c-code-bg);
+    border-color: var(--c-rule);
+    color: var(--c-fg);
+    box-shadow: none;
+  }
+  ::placeholder { color: var(--c-muted); }
+
+  /* Callouts */
+  .callout {
+    background-color: var(--c-code-bg);
+    border-color: var(--c-rule);
+    color: var(--c-fg);
+  }
+  .callout.primary { background-color: #142537; border-color: #2c4a6b; }
+  .callout.success { background-color: #14271a; border-color: #2c5230; }
+  .callout.warning { background-color: #2c2114; border-color: #5a4520; }
+  .callout.alert   { background-color: #2c1717; border-color: #5a2c2c; }
+
+  /* Cards & custom surfaces */
+  .card { background: var(--c-code-bg); border-color: var(--c-rule); color: var(--c-fg); }
+  .admin-card { background: var(--c-code-bg); border-color: var(--c-rule); color: var(--c-fg); }
+  .dataset-list li { border-bottom-color: var(--c-rule); }
+  .paper-card { border-bottom-color: var(--c-rule); }
+  .paper-card h2 a { color: var(--c-link); }
+  .update-editor textarea { border-color: var(--c-rule); }
+
+  /* Semantic result banners keep their meaning but darken to fit. */
+  .update-result.success { color: #7ee2a8; background: #14271a; }
+  .update-result.error   { color: #f4a6a6; background: #2c1717; }
+}
