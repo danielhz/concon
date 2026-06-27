@@ -60,9 +60,12 @@
   .yasr,
   .yasr .dataTables_wrapper { color: var(--c-fg); }
   .yasr .dataTable { color: var(--c-fg); border-color: var(--c-rule); }
+  /* background-color (not the `background` shorthand): the shorthand would reset
+   * background-repeat/position and make DataTables' sort-arrow PNG tile across
+   * the whole header. */
   .yasr .dataTable thead th,
   .yasr .dataTable thead td {
-    background: var(--c-code-bg);
+    background-color: var(--c-code-bg);
     color: var(--c-fg);
     border-color: var(--c-rule);
   }
