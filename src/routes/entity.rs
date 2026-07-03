@@ -34,8 +34,13 @@ use crate::store::sparql_query_union;
 const ENTITY_BASE: &str = "https://w3id.org/mlips/entity/";
 
 const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
+const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const RDF_LANGSTRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+
+/// Display cap for a resource view's instance / usage list (Epic B4 spirit —
+/// bound the per-view work; the list flags truncation when the cap is hit).
+const RESOURCE_LIST_LIMIT: usize = 200;
 
 /// Pick the response serialization from the `Accept` header. Mirrors the
 /// onto-server: Turtle, RDF/XML (a.k.a. OWL/XML), or XHTML (default).
@@ -369,6 +374,78 @@ fn lookup_label(store: &Store, subject_iri: &str) -> Option<String> {
     literal_value(sols.next()?.ok()?.get("l"))
 }
 
+/// A resource's broad kind, which selects the extra per-kind content of its
+/// view (Epic G2): a class lists its instances, a property lists its usage.
+fn resource_kind(types: &[TypeRef]) -> &'static str {
+    let is = |iri: &str| types.iter().any(|t| t.iri == iri);
+    if is("http://www.w3.org/2002/07/owl#Class") || is("http://www.w3.org/2000/01/rdf-schema#Class")
+    {
+        "class"
+    } else if is("http://www.w3.org/2002/07/owl#ObjectProperty")
+        || is("http://www.w3.org/2002/07/owl#DatatypeProperty")
+        || is("http://www.w3.org/1999/02/22-rdf-syntax-ns#Property")
+    {
+        "property"
+    } else {
+        "individual"
+    }
+}
+
+/// A link to another resource (instance-list / usage-list rows), with its
+/// native (view→view) href resolved.
+#[derive(Serialize)]
+struct LinkRow {
+    iri: String,
+    href: String,
+    display: String,
+    label: Option<String>,
+}
+
+/// Run a `SELECT ?<var> (SAMPLE(?l) AS ?lab)` list query and map each row to a
+/// `LinkRow` (native href + short display + optional label). Shared by the
+/// class-instance and property-usage lists.
+fn link_rows(store: &Store, query: &str, var: &str, url_prefix: &str) -> Vec<LinkRow> {
+    let mut rows = Vec::new();
+    if let Ok(QueryResults::Solutions(sols)) = sparql_query_union(store, query) {
+        for sol in sols.flatten() {
+            if let Some(Term::NamedNode(n)) = sol.get(var) {
+                let iri = n.as_str().to_string();
+                rows.push(LinkRow {
+                    href: native_href(&iri, url_prefix),
+                    display: short_form(&iri),
+                    label: literal_value(sol.get("lab")),
+                    iri,
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// Subclass-aware instance list for a class view (the B2 Explore query, with
+/// the merged `GROUP BY`+`SAMPLE` label dedup), capped at `RESOURCE_LIST_LIMIT`.
+fn class_instances(store: &Store, class_iri: &str, url_prefix: &str) -> Vec<LinkRow> {
+    let q = format!(
+        r#"SELECT ?i (SAMPLE(?l) AS ?lab) WHERE {{
+            ?i a/<{RDFS_SUBCLASS_OF}>* <{class_iri}> .
+            OPTIONAL {{ ?i <{RDFS_LABEL}> ?l }}
+        }} GROUP BY ?i ORDER BY ?i LIMIT {RESOURCE_LIST_LIMIT}"#
+    );
+    link_rows(store, &q, "i", url_prefix)
+}
+
+/// Distinct subjects that use a property (its usage list for a property view),
+/// capped at `RESOURCE_LIST_LIMIT`.
+fn property_usages(store: &Store, property_iri: &str, url_prefix: &str) -> Vec<LinkRow> {
+    let q = format!(
+        r#"SELECT ?s (SAMPLE(?l) AS ?lab) WHERE {{
+            ?s <{property_iri}> ?o .
+            OPTIONAL {{ ?s <{RDFS_LABEL}> ?l }}
+        }} GROUP BY ?s ORDER BY ?s LIMIT {RESOURCE_LIST_LIMIT}"#
+    );
+    link_rows(store, &q, "s", url_prefix)
+}
+
 /// Extract the lexical value of a literal term, if the term is a literal.
 fn literal_value(term: Option<&Term>) -> Option<String> {
     match term {
@@ -526,6 +603,20 @@ pub async fn serve_resource(
             let types = types_of(&store, &subject_iri);
             let label = lookup_label(&store, &subject_iri);
 
+            // Per-kind content (G2): a class lists its (subclass-aware)
+            // instances; a property lists the subjects that use it.
+            let kind = resource_kind(&types);
+            let instances = if kind == "class" {
+                class_instances(&store, &subject_iri, url_prefix)
+            } else {
+                Vec::new()
+            };
+            let usages = if kind == "property" {
+                property_usages(&store, &subject_iri, url_prefix)
+            } else {
+                Vec::new()
+            };
+
             let tmpl = match state.templates.get_template("entity.html") {
                 Ok(t) => t,
                 Err(_) => {
@@ -545,11 +636,18 @@ pub async fn serve_resource(
                 // schema.org, …); for an entity, to itself.
                 defined_at => &subject_iri,
                 label => label,
+                kind => kind,
                 types => &types,
                 forward => &forward,
                 reverse => &reverse,
                 forward_count => forward.len(),
                 reverse_count => reverse.len(),
+                instances => &instances,
+                instance_count => instances.len(),
+                instances_truncated => instances.len() >= RESOURCE_LIST_LIMIT,
+                usages => &usages,
+                usage_count => usages.len(),
+                usages_truncated => usages.len() >= RESOURCE_LIST_LIMIT,
                 username => username,
                 is_admin => is_admin,
             }) {
@@ -669,6 +767,54 @@ mlips:numLayers rdfs:label "number of layers" ;
             .collect();
         assert_eq!(hp.len(), 1, "multi-labelled object duplicated the property row");
         assert_eq!(hp[0].target_label.as_deref(), Some("number of layers"));
+    }
+
+    /// G2 per-kind content: a class view lists its subclass-aware instances
+    /// (deduped, native hrefs), a property view lists its usage subjects, and
+    /// resource_kind classifies from the rdf:type set.
+    #[test]
+    fn class_instances_and_property_usages() {
+        let store = Store::new().unwrap();
+        let ttl = r#"@prefix mlips: <https://w3id.org/mlips#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+mlips:Method a owl:Class .
+mlips:MLMethod a owl:Class ; rdfs:subClassOf mlips:Method .
+mlips:usesFramework a owl:ObjectProperty .
+<https://w3id.org/mlips/entity/a> a mlips:Method ; mlips:usesFramework <https://w3id.org/mlips/entity/tf> .
+<https://w3id.org/mlips/entity/b> a mlips:MLMethod ; rdfs:label "B" ; rdfs:label "B"@en .
+<https://w3id.org/mlips/entity/c> a mlips:Method ; mlips:usesFramework <https://w3id.org/mlips/entity/tf> ."#;
+        store
+            .load_from_reader(RdfFormat::Turtle, ttl.as_bytes())
+            .unwrap();
+        let prefix = "/mlips/_ds/mlips";
+
+        // Subclass-aware: a, b (via MLMethod ⊑ Method), c — three distinct, and
+        // the multi-labelled b appears once (dedup), with a native _entity href.
+        let instances = class_instances(&store, "https://w3id.org/mlips#Method", prefix);
+        assert_eq!(instances.len(), 3, "expected 3 distinct instances (b not doubled)");
+        let b = instances
+            .iter()
+            .find(|r| r.iri.ends_with("/b"))
+            .expect("instance b present");
+        assert_eq!(b.label.as_deref(), Some("B"));
+        assert_eq!(b.href, "/mlips/_ds/mlips/_entity/b");
+
+        // Property usage: a and c use usesFramework → two distinct subjects.
+        let usages = property_usages(&store, "https://w3id.org/mlips#usesFramework", prefix);
+        assert_eq!(usages.len(), 2);
+
+        // Kind classification.
+        assert_eq!(resource_kind(&types_of(&store, "https://w3id.org/mlips#Method")), "class");
+        assert_eq!(
+            resource_kind(&types_of(&store, "https://w3id.org/mlips#usesFramework")),
+            "property"
+        );
+        assert_eq!(
+            resource_kind(&types_of(&store, "https://w3id.org/mlips/entity/a")),
+            "individual"
+        );
     }
 
     #[test]

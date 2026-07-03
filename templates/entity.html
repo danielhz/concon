@@ -20,6 +20,8 @@
   .annot { color: #888; font-size: 0.85em; margin-left: 0.4em; }
   .nolabel { font-family: monospace; font-style: italic; color: #888; }
   .empty { color: #888; font-style: italic; }
+  ul.resource-list { columns: 2; column-gap: 2rem; margin: 0.5em 0 1.5em; padding-left: 1.2em; }
+  ul.resource-list li { break-inside: avoid; margin: 0.15em 0; }
   .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
   .formats code { background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 0.2em; }
 </style>
@@ -35,6 +37,30 @@
 <p class="entity-types"><strong>Type:</strong>
   {% for t in types %}<span class="tag"><a href="{{ t.iri }}" title="{{ t.iri }}">{% if t.label %}{{ t.label }}{% else %}{{ t.short }}{% endif %}</a></span>{% endfor %}
 </p>
+{% endif %}
+
+{% if kind == "class" %}
+<h2>Instances ({{ instance_count }}{% if instances_truncated %}+{% endif %})</h2>
+{% if instances %}
+<ul class="resource-list">
+  {% for r in instances %}
+  <li><a href="{{ r.href }}" title="{{ r.iri }}">{% if r.label %}{{ r.label }}{% else %}<span class="nolabel">{{ r.display }}</span>{% endif %}</a></li>
+  {% endfor %}
+</ul>
+{% if instances_truncated %}<p class="empty">Showing the first {{ instance_count }} instances.</p>{% endif %}
+{% else %}<p class="empty">No instances in this dataset.</p>{% endif %}
+{% endif %}
+
+{% if kind == "property" %}
+<h2>Used by ({{ usage_count }}{% if usages_truncated %}+{% endif %})</h2>
+{% if usages %}
+<ul class="resource-list">
+  {% for r in usages %}
+  <li><a href="{{ r.href }}" title="{{ r.iri }}">{% if r.label %}{{ r.label }}{% else %}<span class="nolabel">{{ r.display }}</span>{% endif %}</a></li>
+  {% endfor %}
+</ul>
+{% if usages_truncated %}<p class="empty">Showing the first {{ usage_count }} subjects.</p>{% endif %}
+{% else %}<p class="empty">Not used by any subject in this dataset.</p>{% endif %}
 {% endif %}
 
 <h2>Properties ({{ forward_count }})</h2>
