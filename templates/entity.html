@@ -30,7 +30,7 @@
 {% block content %}
 <h1 style="word-break: break-all;">{{ subject_short }}</h1>
 <p class="entity-iri">&lt;{{ subject_iri }}&gt;
-  <a class="defined-at" href="{{ defined_at }}" title="Canonical IRI — resolves to where this resource is defined">↗ defined at</a>
+  <a class="defined-at" href="{{ defined_at }}" title="{{ defined_at }} — the canonical IRI, resolved by its defining authority">↗ defined at {{ defined_at_authority }}</a>
 </p>
 {% if label %}<p class="entity-label">{{ label }}</p>{% endif %}
 {% if types %}
