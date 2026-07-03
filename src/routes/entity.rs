@@ -17,7 +17,7 @@
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use oxigraph::io::{RdfFormat, RdfSerializer};
-use oxigraph::model::Term;
+use oxigraph::model::{NamedNode, Term};
 use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 use serde::Serialize;
@@ -116,14 +116,46 @@ fn local_name(iri: &str) -> String {
         .unwrap_or_else(|| iri.to_string())
 }
 
-/// Map a target IRI to a URL the browser can follow. Entity IRIs under this
-/// resource are rewritten to their concon-native dereferencing URL so the
-/// published graph is self-navigable even before the edge redirect exists;
-/// every other IRI keeps its canonical form (resolved by its own authority).
+/// Namespaces whose terms earn a local resource view (Epic G3 policy): our own
+/// vocabulary plus the external *domain* vocabularies actually modelled in the
+/// dataset. Structural built-ins (`rdf`/`rdfs`/`owl`/`xsd`) and generic
+/// annotation vocabularies are deliberately excluded — a local view of
+/// `xsd:string` or `dcterms:title` would be noise — so their links resolve
+/// straight to the defining authority instead.
+const VIEWABLE_NAMESPACES: &[&str] = &[
+    "https://w3id.org/mlips#",
+    "https://schema.org/",
+    "http://www.w3.org/ns/prov#",
+    "http://qudt.org/schema/qudt/",
+    "http://qudt.org/vocab/unit/",
+    "http://www.w3.org/ns/mls#",
+    "https://purls.helmholtz-metadaten.de/cmso/",
+    "https://w3id.org/mdo/core/",
+    "https://w3id.org/mdo/calculation/",
+];
+
+/// Whether `iri` is a domain-vocabulary term that earns its own local view
+/// (see `VIEWABLE_NAMESPACES`). Entity IRIs are handled separately (they use
+/// the short `_entity/{id}` form).
+fn earns_local_view(iri: &str) -> bool {
+    VIEWABLE_NAMESPACES.iter().any(|ns| iri.starts_with(ns))
+}
+
+/// Map a target IRI to a URL the browser can follow, keeping navigation inside
+/// concon (view→view) wherever the resource earns a local view:
+///   - an entity IRI under this resource → its short `_entity/{id}` URL;
+///   - any other domain-vocab IRI that earns a local view (Epic G3) → the
+///     generic `_view?iri=<encoded>` resource view;
+///   - everything else (built-ins, annotation vocabs, foreign authorities) →
+///     the canonical IRI itself, resolved by its own authority.
 fn native_href(iri: &str, url_prefix: &str) -> String {
-    match iri.strip_prefix(ENTITY_BASE) {
-        Some(id) => format!("{url_prefix}/_entity/{id}"),
-        None => iri.to_string(),
+    if let Some(id) = iri.strip_prefix(ENTITY_BASE) {
+        format!("{url_prefix}/_entity/{id}")
+    } else if earns_local_view(iri) {
+        let qs = serde_urlencoded::to_string([("iri", iri)]).unwrap_or_default();
+        format!("{url_prefix}/_view?{qs}")
+    } else {
+        iri.to_string()
     }
 }
 
@@ -377,9 +409,9 @@ fn entity_not_found(state: &AppState, subject_iri: &str, format: &str) -> Respon
         .into_response()
 }
 
-/// Dereference `<ENTITY_BASE>{id}` against `dataset_name`, negotiating the
-/// representation from `Accept`. `url_prefix` is the dataset base used to build
-/// native links (e.g. `/mlips/_ds/mlips`).
+/// Dereference the entity `<ENTITY_BASE>{id}` (the short `_entity/{id}` route).
+/// A thin wrapper over the generic [`serve_resource`]; the entity route is kept
+/// as the canonical, ergonomic form for our own `entity/` namespace.
 pub async fn serve_entity(
     state: &AppState,
     dataset_name: &str,
@@ -389,6 +421,43 @@ pub async fn serve_entity(
     username: Option<String>,
     is_admin: bool,
 ) -> Response {
+    let subject_iri = format!("{ENTITY_BASE}{id}");
+    serve_resource(
+        state,
+        dataset_name,
+        url_prefix,
+        &subject_iri,
+        headers,
+        username,
+        is_admin,
+    )
+    .await
+}
+
+/// Serve a local view of an arbitrary resource `subject_iri` (the generic
+/// `_view?iri=<encoded>` route — Epic G). Negotiates the representation from
+/// `Accept` exactly like the entity route; the HTML view is the generalised
+/// per-resource page. `url_prefix` is the dataset base used to build native
+/// (view→view) links, e.g. `/mlips/_ds/mlips`.
+pub async fn serve_resource(
+    state: &AppState,
+    dataset_name: &str,
+    url_prefix: &str,
+    subject_iri: &str,
+    headers: &HeaderMap,
+    username: Option<String>,
+    is_admin: bool,
+) -> Response {
+    let format = negotiate_format(headers);
+
+    // Validate the IRI with oxigraph before it is interpolated into any SPARQL
+    // (`<{subject_iri}>`): a valid IRI cannot contain the `<`/`>`/whitespace
+    // that would let arbitrary `?iri=` input break out of the term. Reject
+    // rather than 404 so a malformed request is not mistaken for a missing one.
+    if NamedNode::new(subject_iri).is_err() {
+        return (StatusCode::BAD_REQUEST, "Malformed resource IRI").into_response();
+    }
+
     let store = match state.store_manager.get_dataset(dataset_name) {
         Some(s) => s,
         None => {
@@ -400,8 +469,7 @@ pub async fn serve_entity(
         }
     };
 
-    let subject_iri = format!("{ENTITY_BASE}{id}");
-    let format = negotiate_format(headers);
+    let subject_iri = subject_iri.to_string();
 
     // Existence: at least one forward or reverse triple.
     let exists = matches!(
@@ -468,7 +536,14 @@ pub async fn serve_entity(
                 subject_iri => &subject_iri,
                 subject_short => short_form(&subject_iri),
                 subject_local => local_name(&subject_iri),
-                entity_url => format!("{url_prefix}/_entity/{id}"),
+                // Self permalink (the concon-native view URL: `_entity/{id}` for
+                // an entity, `_view?iri=…` for any other resource); also the
+                // base for the "Other formats" content-negotiated fetches.
+                self_href => native_href(&subject_iri, url_prefix),
+                // "↗ defined at": the subject's own canonical IRI (Epic G3). For
+                // a term this resolves to its defining authority (our doc, or
+                // schema.org, …); for an entity, to itself.
+                defined_at => &subject_iri,
                 label => label,
                 types => &types,
                 forward => &forward,
@@ -522,15 +597,44 @@ mod tests {
 
     #[test]
     fn test_native_href() {
+        // Entities keep the short `_entity/{id}` dereference URL.
         assert_eq!(
             native_href("https://w3id.org/mlips/entity/kumar2025", "/mlips/_ds/mlips"),
             "/mlips/_ds/mlips/_entity/kumar2025"
         );
-        // Non-entity IRIs keep their canonical form.
+        // A local domain term now routes to its generic resource view (Epic G),
+        // keeping navigation inside concon (view→view).
         assert_eq!(
             native_href("https://w3id.org/mlips#MLIPMethod", "/mlips/_ds/mlips"),
-            "https://w3id.org/mlips#MLIPMethod"
+            "/mlips/_ds/mlips/_view?iri=https%3A%2F%2Fw3id.org%2Fmlips%23MLIPMethod"
         );
+        // An external *domain* vocab term also earns a local view.
+        assert_eq!(
+            native_href("https://schema.org/ScholarlyArticle", "/mlips/_ds/mlips"),
+            "/mlips/_ds/mlips/_view?iri=https%3A%2F%2Fschema.org%2FScholarlyArticle"
+        );
+        // Structural built-ins do NOT — they resolve to their own spec.
+        assert_eq!(
+            native_href("http://www.w3.org/2002/07/owl#Class", "/mlips/_ds/mlips"),
+            "http://www.w3.org/2002/07/owl#Class"
+        );
+        assert_eq!(
+            native_href("http://www.w3.org/2001/XMLSchema#string", "/mlips/_ds/mlips"),
+            "http://www.w3.org/2001/XMLSchema#string"
+        );
+    }
+
+    #[test]
+    fn test_earns_local_view() {
+        assert!(earns_local_view("https://w3id.org/mlips#MLIPMethod"));
+        assert!(earns_local_view("https://schema.org/ScholarlyArticle"));
+        assert!(earns_local_view("http://www.w3.org/ns/prov#Entity"));
+        assert!(earns_local_view("https://purls.helmholtz-metadaten.de/cmso/Sample"));
+        // Built-ins and annotation vocabs are excluded.
+        assert!(!earns_local_view("http://www.w3.org/2002/07/owl#Class"));
+        assert!(!earns_local_view("http://www.w3.org/2000/01/rdf-schema#label"));
+        assert!(!earns_local_view("http://www.w3.org/2001/XMLSchema#string"));
+        assert!(!earns_local_view("http://purl.org/dc/terms/title"));
     }
 
     #[test]

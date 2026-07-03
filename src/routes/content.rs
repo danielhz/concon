@@ -16,6 +16,14 @@ use super::web;
 pub struct GraphParams {
     pub graph: Option<String>,
 }
+
+/// Query parameters for `GET` dataset views: `?query=` (the `_sparql`/`_query`
+/// deep link) and `?iri=` (the generic `_view` resource route, Epic G).
+#[derive(serde::Deserialize)]
+struct GetParams {
+    query: Option<String>,
+    iri: Option<String>,
+}
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -195,7 +203,7 @@ pub fn parse_path(path: &str) -> ParsedPath {
 async fn content_get(
     State(state): State<AppState>,
     Path(path): Path<String>,
-    Query(params): Query<sparql::SparqlQueryParams>,
+    Query(params): Query<GetParams>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     headers: HeaderMap,
     cookies: Cookies,
@@ -226,7 +234,7 @@ async fn content_get(
             // login inside the handler.
             !matches!(
                 view.as_deref(),
-                Some("_sparql") | Some("_query") | Some("_entity") | None
+                Some("_sparql") | Some("_query") | Some("_entity") | Some("_view") | None
             )
         }
         ParsedPath::FileCatalog { view, .. } => view.as_deref() != Some("_query"),
@@ -295,11 +303,33 @@ async fn content_get(
             let qualified = parsed.qualified_dataset_name().unwrap();
             match view.as_deref() {
                 Some("_sparql") => {
-                    match sparql::sparql_query_get(&state, &qualified, &params, &headers).await {
+                    let sp = sparql::SparqlQueryParams {
+                        query: params.query.clone(),
+                    };
+                    match sparql::sparql_query_get(&state, &qualified, &sp, &headers).await {
                         Ok(resp) => resp.into_response(),
                         Err(e) => e.into_response(),
                     }
                 }
+                // Generic resource view for an arbitrary IRI (Epic G). Entities
+                // keep the short `_entity/{id}` form above; this handles local
+                // terms and external domain-vocab terms addressed by full IRI.
+                Some("_view") => match params.iri.as_deref() {
+                    Some(iri) if !iri.is_empty() => {
+                        let url_prefix = build_dataset_url_prefix(&parsed);
+                        let session = web::get_username(&cookies, &state);
+                        let is_admin = web::is_root_admin(&session, &state);
+                        let username = session.map(|s| s.username);
+                        entity::serve_resource(
+                            &state, &qualified, &url_prefix, iri, &headers, username, is_admin,
+                        )
+                        .await
+                    }
+                    _ => {
+                        (StatusCode::BAD_REQUEST, "Missing ?iri= parameter".to_string())
+                            .into_response()
+                    }
+                },
                 Some("_entity") => match view_arg.as_deref() {
                     Some(id) => {
                         let url_prefix = build_dataset_url_prefix(&parsed);
@@ -371,7 +401,10 @@ async fn content_get(
                     let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
                     match shacl_store {
                         Ok(store) => {
-                            match sparql::sparql_query_get_on_store(&store, &params, &headers).await {
+                            let sp = sparql::SparqlQueryParams {
+                                query: params.query.clone(),
+                            };
+                            match sparql::sparql_query_get_on_store(&store, &sp, &headers).await {
                                 Ok(resp) => resp.into_response(),
                                 Err(e) => e.into_response(),
                             }
@@ -403,7 +436,10 @@ async fn content_get(
                     let catalog = state.store_manager.get_file_catalog(&team_path);
                     match catalog {
                         Some(store) => {
-                            match sparql::sparql_query_get_on_store(&store, &params, &headers).await {
+                            let sp = sparql::SparqlQueryParams {
+                                query: params.query.clone(),
+                            };
+                            match sparql::sparql_query_get_on_store(&store, &sp, &headers).await {
                                 Ok(resp) => resp.into_response(),
                                 Err(e) => e.into_response(),
                             }

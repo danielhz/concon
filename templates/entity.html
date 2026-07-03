@@ -5,6 +5,7 @@
 {% block head %}
 <style>
   .entity-iri { font-family: monospace; word-break: break-all; color: #555; }
+  .defined-at { font-family: sans-serif; font-size: 0.85em; margin-left: 0.5em; white-space: nowrap; }
   .entity-label { font-style: italic; color: #555; margin: 0.4em 0 0.8em; }
   .entity-types { margin: 0.6em 0; }
   .entity-types .tag { display: inline-block; margin: 0 0.4em 0.2em 0; padding: 0.15em 0.5em;
@@ -26,7 +27,9 @@
 
 {% block content %}
 <h1 style="word-break: break-all;">{{ subject_short }}</h1>
-<p class="entity-iri">&lt;{{ subject_iri }}&gt;</p>
+<p class="entity-iri">&lt;{{ subject_iri }}&gt;
+  <a class="defined-at" href="{{ defined_at }}" title="Canonical IRI — resolves to where this resource is defined">↗ defined at</a>
+</p>
 {% if label %}<p class="entity-label">{{ label }}</p>{% endif %}
 {% if types %}
 <p class="entity-types"><strong>Type:</strong>
@@ -84,8 +87,8 @@
 
 <p class="formats">
   Other formats:
-  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'text/turtle'}}).then(r=>r.text()).then(t=>{document.body.textContent='';var pre=document.createElement('pre');pre.textContent=t;document.body.appendChild(pre);}); return false;">Turtle</a> ·
-  <a href="{{ entity_url }}" onclick="event.preventDefault(); fetch('{{ entity_url }}', {headers: {Accept: 'application/rdf+xml'}}).then(r=>r.text()).then(t=>{document.body.textContent='';var pre=document.createElement('pre');pre.textContent=t;document.body.appendChild(pre);}); return false;">RDF/XML</a>
+  <a href="{{ self_href }}" onclick="event.preventDefault(); fetch('{{ self_href }}', {headers: {Accept: 'text/turtle'}}).then(r=>r.text()).then(t=>{document.body.textContent='';var pre=document.createElement('pre');pre.textContent=t;document.body.appendChild(pre);}); return false;">Turtle</a> ·
+  <a href="{{ self_href }}" onclick="event.preventDefault(); fetch('{{ self_href }}', {headers: {Accept: 'application/rdf+xml'}}).then(r=>r.text()).then(t=>{document.body.textContent='';var pre=document.createElement('pre');pre.textContent=t;document.body.appendChild(pre);}); return false;">RDF/XML</a>
   (or send <code>Accept: text/turtle</code> / <code>Accept: application/rdf+xml</code> with curl).
 </p>
 {% endblock %}
