@@ -141,6 +141,20 @@ section.term {
 section.term > h4 {
   margin-top: 0;
 }
+/* Epic G4: the serve-time "▷ view" link to each term's database view, sitting
+ * beside the term name (in addition to the in-document anchor). */
+a.ccx-view-link {
+  font-size: 0.6em;
+  font-weight: 600;
+  vertical-align: middle;
+  margin-left: 0.6em;
+  padding: 0.1em 0.5em;
+  border: 1px solid var(--c-rule);
+  border-radius: 1000px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+a.ccx-view-link:hover { border-color: var(--c-link); }
 section.term > h4::before {
   display: inline-block;
   margin-right: 0.5em;

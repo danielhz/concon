@@ -91,9 +91,64 @@ fn augment_doc(doc: String, url_prefix: &str) -> String {
         ),
         p = url_prefix
     );
+    let doc = inject_view_links(doc, url_prefix);
     let doc = insert_before(doc, "</head>", &head);
     let doc = insert_after_body_open(doc, &body_top);
     insert_before(doc, "</body>", &body_end)
+}
+
+/// The `mlips#` term namespace: a term section's `id` is the term's local name,
+/// so its IRI is `MLIPS_TERM_NS + id`. Hardcoded to the MLIPs resource, like
+/// `ONTOLOGY_GRAPHS` and the entity base.
+const MLIPS_TERM_NS: &str = "https://w3id.org/mlips#";
+
+/// Epic G4: next to each term name in the served document, add a "▷ view" link
+/// to that term's database (resource) view — *in addition to* the existing
+/// in-document `#anchor`, never replacing the canonical dereference. Keyed off
+/// the term section's `id` (its local name), which maps to the term IRI
+/// `MLIPS_TERM_NS + id`; the link is the term's native `_view?iri=…` URL,
+/// inserted just after each section's `</h4>` so it sits beside the term name.
+/// Well-formed XML (the doc is served xhtml+xml): a single self-contained `<a>`
+/// with an XML-escaped href.
+fn inject_view_links(doc: String, url_prefix: &str) -> String {
+    let mut inserts: Vec<(usize, String)> = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = doc[from..].find("<section") {
+        let sec_start = from + rel;
+        let Some(gt_rel) = doc[sec_start..].find('>') else { break };
+        let tag_end = sec_start + gt_rel; // index of the '>' of the opening tag
+        let tag = &doc[sec_start..tag_end];
+        from = tag_end + 1;
+        if !attr_value(tag, "class").unwrap_or("").contains("term") {
+            continue;
+        }
+        let Some(id) = attr_value(tag, "id").filter(|id| is_safe_fragment(id)) else {
+            continue;
+        };
+        // Insert right after this section's first </h4> (the term name).
+        let Some(h4_rel) = doc[tag_end..].find("</h4>") else {
+            continue;
+        };
+        let pos = tag_end + h4_rel + "</h4>".len();
+        let iri = format!("{MLIPS_TERM_NS}{id}");
+        let href = entity::native_href(&iri, url_prefix);
+        inserts.push((
+            pos,
+            format!(
+                " <a class=\"ccx-view-link\" href=\"{}\" title=\"Open this term's database view\">▷ view</a>",
+                xml_escape(&href)
+            ),
+        ));
+    }
+    if inserts.is_empty() {
+        return doc;
+    }
+    // Splice right-to-left so earlier byte offsets stay valid.
+    let mut out = doc;
+    for (pos, frag) in inserts.into_iter().rev() {
+        out.insert_str(pos, &frag);
+    }
+    out
 }
 
 /// Insert `frag` immediately before the first `marker`; append if absent.
@@ -400,6 +455,29 @@ mod tests {
         }
         // Original content preserved.
         assert!(out.contains("<h4>Foo</h4>"));
+    }
+
+    #[test]
+    fn inject_view_links_adds_per_term_view_link() {
+        let doc = "<html><body>\
+             <section id=\"Hyperparameter\" class=\"term class\" about=\"mlips:Hyperparameter\">\
+               <h4><span property=\"rdfs:label\">Hyperparameter</span></h4><p>d</p>\
+             </section>\
+             <section id=\"mod\" class=\"module\"><h4>x</h4></section>\
+             </body></html>"
+            .to_string();
+        let out = inject_view_links(doc, "/mlips/_ds/mlips");
+        // The term section gets a view link to its native _view URL (keyed off
+        // id → mlips# IRI), placed after the term name's </h4>.
+        assert!(out.contains("class=\"ccx-view-link\""));
+        assert!(out.contains(
+            "/mlips/_ds/mlips/_view?iri=https%3A%2F%2Fw3id.org%2Fmlips%23Hyperparameter"
+        ));
+        assert!(out.find("ccx-view-link").unwrap() > out.find("</h4>").unwrap());
+        // The in-document anchor is untouched (id preserved, canonical deref
+        // unchanged) and the non-term section gets no link.
+        assert!(out.contains("id=\"Hyperparameter\""));
+        assert_eq!(out.matches("ccx-view-link").count(), 1);
     }
 
     #[test]

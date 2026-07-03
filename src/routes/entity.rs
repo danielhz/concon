@@ -165,7 +165,7 @@ fn iri_authority(iri: &str) -> String {
 ///     generic `_view?iri=<encoded>` resource view;
 ///   - everything else (built-ins, annotation vocabs, foreign authorities) →
 ///     the canonical IRI itself, resolved by its own authority.
-fn native_href(iri: &str, url_prefix: &str) -> String {
+pub(crate) fn native_href(iri: &str, url_prefix: &str) -> String {
     if let Some(id) = iri.strip_prefix(ENTITY_BASE) {
         format!("{url_prefix}/_entity/{id}")
     } else if earns_local_view(iri) {
