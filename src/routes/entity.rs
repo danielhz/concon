@@ -15,7 +15,7 @@
 //! graphs (schema / instances / CQ) exactly as in a single store.
 
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use oxigraph::io::{RdfFormat, RdfSerializer};
 use oxigraph::model::{NamedNode, Term};
 use oxigraph::sparql::QueryResults;
@@ -23,7 +23,17 @@ use oxigraph::store::Store;
 use serde::Serialize;
 
 use crate::state::AppState;
-use crate::store::sparql_query_union;
+use crate::store::{sparql_query_union, sparql_update};
+
+// Epic H — annotations. An `oa:Annotation` per note, targeting the resource
+// IRI, kept in its own named graph (out of the ontology/KG graphs).
+const ANNOTATIONS_GRAPH: &str = "https://w3id.org/mlips/graph/annotations";
+const OA_ANNOTATION: &str = "http://www.w3.org/ns/oa#Annotation";
+const OA_HAS_TARGET: &str = "http://www.w3.org/ns/oa#hasTarget";
+const OA_HAS_BODY: &str = "http://www.w3.org/ns/oa#hasBody";
+const DCTERMS_CREATOR: &str = "http://purl.org/dc/terms/creator";
+const DCTERMS_CREATED: &str = "http://purl.org/dc/terms/created";
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
 /// Canonical namespace for per-paper instance data. This is the published
 /// (citable) identity of the individuals; concon serves them but never mints
@@ -386,6 +396,116 @@ fn lookup_label(store: &Store, subject_iri: &str) -> Option<String> {
     literal_value(sols.next()?.ok()?.get("l"))
 }
 
+/// Escape a string for use inside a SPARQL double-quoted string literal, so
+/// user-supplied note text (and the creator name) cannot break out of the
+/// literal in an INSERT. (No parameter binding exists in SPARQL Update, so the
+/// value must be escaped before interpolation.)
+fn escape_sparql_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Build the SPARQL Update that INSERTs one annotation. `subject_iri` must be
+/// pre-validated (a real IRI); `note`/`username` are escaped as string literals
+/// here. A fresh annotation IRI (STRUUID) and the timestamp (NOW) are minted
+/// server-side, so no client value reaches an IRI position.
+fn build_annotation_insert(subject_iri: &str, note: &str, username: &str) -> String {
+    let body = escape_sparql_literal(note);
+    let creator = escape_sparql_literal(username);
+    format!(
+        r#"INSERT {{ GRAPH <{ANNOTATIONS_GRAPH}> {{
+            ?ann <{RDF_TYPE}> <{OA_ANNOTATION}> ;
+                 <{OA_HAS_TARGET}> <{subject_iri}> ;
+                 <{OA_HAS_BODY}> "{body}" ;
+                 <{DCTERMS_CREATOR}> "{creator}" ;
+                 <{DCTERMS_CREATED}> ?now .
+        }} }} WHERE {{
+            BIND(NOW() AS ?now)
+            BIND(IRI(CONCAT("https://w3id.org/mlips/annotation/", STRUUID())) AS ?ann)
+        }}"#
+    )
+}
+
+/// One annotation note on a resource (Epic H): author, timestamp, text.
+#[derive(Serialize)]
+struct AnnotationRow {
+    creator: String,
+    created: String,
+    body: String,
+}
+
+/// Notes targeting `subject_iri`, oldest first (Epic H). Read from the
+/// dedicated annotations graph only.
+fn annotations_of(store: &Store, subject_iri: &str) -> Vec<AnnotationRow> {
+    let q = format!(
+        r#"SELECT ?body ?creator ?created WHERE {{
+            GRAPH <{ANNOTATIONS_GRAPH}> {{
+                ?a <{OA_HAS_TARGET}> <{subject_iri}> ; <{OA_HAS_BODY}> ?body .
+                OPTIONAL {{ ?a <{DCTERMS_CREATOR}> ?creator }}
+                OPTIONAL {{ ?a <{DCTERMS_CREATED}> ?created }}
+            }}
+        }} ORDER BY ?created"#
+    );
+    let mut rows = Vec::new();
+    if let Ok(QueryResults::Solutions(sols)) = sparql_query_union(store, &q) {
+        for sol in sols.flatten() {
+            let Some(body) = literal_value(sol.get("body")) else {
+                continue;
+            };
+            rows.push(AnnotationRow {
+                creator: literal_value(sol.get("creator")).unwrap_or_else(|| "anonymous".into()),
+                created: literal_value(sol.get("created")).unwrap_or_default(),
+                body,
+            });
+        }
+    }
+    rows
+}
+
+/// Add a note to entity `<ENTITY_BASE>{id}` (Epic H). Caller MUST have enforced
+/// a logged-in session (the POST route does — `_entity` is not in the write
+/// exempt list, so anonymous is redirected to login); `username` is that user.
+/// INSERTs an `oa:Annotation` into the annotations graph with the text/creator
+/// escaped and the timestamp taken server-side via SPARQL `NOW()`. Redirects
+/// (PRG) back to the entity view.
+pub async fn add_annotation(
+    state: &AppState,
+    dataset_name: &str,
+    url_prefix: &str,
+    id: &str,
+    username: &str,
+    note: &str,
+) -> Response {
+    let subject_iri = format!("{ENTITY_BASE}{id}");
+    if NamedNode::new(&subject_iri).is_err() {
+        return (StatusCode::BAD_REQUEST, "Malformed entity IRI").into_response();
+    }
+    let note = note.trim();
+    let redirect_to = format!("{url_prefix}/_entity/{id}");
+    if note.is_empty() {
+        // Nothing to add — just bounce back to the view.
+        return Redirect::to(&redirect_to).into_response();
+    }
+    let Some(store) = state.store_manager.get_dataset(dataset_name) else {
+        return (StatusCode::NOT_FOUND, "Dataset not found").into_response();
+    };
+    let update = build_annotation_insert(&subject_iri, note, username);
+    match sparql_update(&store, &update) {
+        Ok(()) => Redirect::to(&redirect_to).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Insert error: {e}")).into_response(),
+    }
+}
+
 /// A resource's broad kind, which selects the extra per-kind content of its
 /// view (Epic G2): a class lists its instances, a property lists its usage.
 fn resource_kind(types: &[TypeRef]) -> &'static str {
@@ -629,6 +749,13 @@ pub async fn serve_resource(
                 Vec::new()
             };
 
+            // Epic H — annotations. Notes are readable by anyone who can read
+            // the view; the add-note form is shown only to a logged-in user and
+            // only for entities (the demo's annotatable resources; the POST
+            // route handles `_entity/{id}`).
+            let annotations = annotations_of(&store, &subject_iri);
+            let can_annotate = username.is_some() && subject_iri.starts_with(ENTITY_BASE);
+
             let tmpl = match state.templates.get_template("entity.html") {
                 Ok(t) => t,
                 Err(_) => {
@@ -661,6 +788,9 @@ pub async fn serve_resource(
                 usages => &usages,
                 usage_count => usages.len(),
                 usages_truncated => usages.len() >= RESOURCE_LIST_LIMIT,
+                annotations => &annotations,
+                annotation_count => annotations.len(),
+                can_annotate => can_annotate,
                 username => username,
                 is_admin => is_admin,
             }) {
@@ -837,6 +967,34 @@ mlips:usesFramework a owl:ObjectProperty .
             resource_kind(&types_of(&store, "https://w3id.org/mlips/entity/a")),
             "individual"
         );
+    }
+
+    /// Epic H: the annotation INSERT actually writes to the annotations graph
+    /// and reads back via annotations_of — validates NOW()/STRUUID()/GRAPH
+    /// against oxigraph, and that a note with quotes/newlines is stored intact
+    /// (escaping did not corrupt or break out of the literal).
+    #[test]
+    fn annotation_insert_and_read_roundtrip() {
+        let store = Store::new().unwrap();
+        let entity = "https://w3id.org/mlips/entity/kumar2025";
+        let note = "great work!\nsays \"me\" — needs \\escaping";
+        let upd = build_annotation_insert(entity, note, "alice");
+        sparql_update(&store, &upd).expect("annotation insert");
+
+        let rows = annotations_of(&store, entity);
+        assert_eq!(rows.len(), 1, "one note should be stored and read back");
+        assert_eq!(rows[0].body, note, "note text preserved through escape/store");
+        assert_eq!(rows[0].creator, "alice");
+        assert!(!rows[0].created.is_empty(), "NOW() stamped a created time");
+
+        // Targets are isolated: a different entity has no notes.
+        assert!(annotations_of(&store, "https://w3id.org/mlips/entity/other").is_empty());
+    }
+
+    #[test]
+    fn escape_sparql_literal_neutralizes_quotes() {
+        assert_eq!(escape_sparql_literal(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(escape_sparql_literal("line1\nline2"), "line1\\nline2");
     }
 
     #[test]

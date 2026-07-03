@@ -22,6 +22,12 @@
   .empty { color: #888; font-style: italic; }
   ul.resource-list { columns: 2; column-gap: 2rem; margin: 0.5em 0 1.5em; padding-left: 1.2em; }
   ul.resource-list li { break-inside: avoid; margin: 0.15em 0; }
+  ul.annotations { list-style: none; padding-left: 0; margin: 0.5em 0 1em; }
+  li.annotation { border: 1px solid #e6e6e6; border-radius: 0.4em; padding: 0.5em 0.8em; margin: 0.5em 0; }
+  .annotation-meta { font-size: 0.85em; color: #767676; margin-bottom: 0.3em; }
+  .annotation-author { font-weight: 600; }
+  .annotation-body { white-space: pre-wrap; }
+  .annotate-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 0.4em; }
   .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
   .formats code { background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 0.2em; }
 </style>
@@ -110,6 +116,26 @@
   </tbody>
 </table>
 {% else %}<p class="empty">No reverse triples.</p>{% endif %}
+
+<h2>Discussion ({{ annotation_count }})</h2>
+{% if annotations %}
+<ul class="annotations">
+  {% for a in annotations %}
+  <li class="annotation">
+    <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}</div>
+    <div class="annotation-body">{{ a.body }}</div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}<p class="empty">No notes yet.</p>{% endif %}
+{% if can_annotate %}
+<form class="annotate-form" method="post" action="{{ self_href }}">
+  <textarea name="note" rows="3" placeholder="Add a note…" required=""></textarea>
+  <div><button type="submit">Add note</button></div>
+</form>
+{% elif not username %}
+<p class="empty"><a href="/_login">Log in</a> to add a note.</p>
+{% endif %}
 
 <p class="formats">
   Other formats:

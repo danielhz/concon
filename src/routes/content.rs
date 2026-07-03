@@ -565,10 +565,35 @@ async fn content_post(
     }
 
     match &parsed {
-        ParsedPath::DatasetView { view, .. } => {
+        ParsedPath::DatasetView { view, view_arg, .. } => {
             let qualified = parsed.qualified_dataset_name().unwrap();
             let body_str = String::from_utf8_lossy(&body).to_string();
             match view.as_deref() {
+                // Epic H: add a note to an entity. `_entity` is not in the POST
+                // write-exempt list, so `needs_login` above already redirected
+                // anonymous users to login — reaching here means a valid
+                // session, whose username is the note's author.
+                Some("_entity") => {
+                    let Some(id) = view_arg.as_deref() else {
+                        return (StatusCode::NOT_FOUND, "Missing entity id".to_string())
+                            .into_response();
+                    };
+                    let Some(sess) = session else {
+                        return axum::response::Redirect::to("/_login").into_response();
+                    };
+                    #[derive(serde::Deserialize)]
+                    struct NoteForm {
+                        note: Option<String>,
+                    }
+                    let form: NoteForm = serde_urlencoded::from_str(&body_str)
+                        .unwrap_or(NoteForm { note: None });
+                    let note = form.note.unwrap_or_default();
+                    let url_prefix = build_dataset_url_prefix(&parsed);
+                    entity::add_annotation(
+                        &state, &qualified, &url_prefix, id, &sess.username, &note,
+                    )
+                    .await
+                }
                 Some("_sparql") | Some("_query") => {
                     match sparql::sparql_query_post(&state, &qualified, &headers, &body_str).await {
                         Ok(resp) => resp.into_response(),
