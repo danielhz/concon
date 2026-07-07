@@ -472,12 +472,9 @@ fn annotations_of(store: &Store, subject_iri: &str) -> Vec<AnnotationRow> {
     rows
 }
 
-/// Add a note to entity `<ENTITY_BASE>{id}` (Epic H). Caller MUST have enforced
-/// a logged-in session (the POST route does — `_entity` is not in the write
-/// exempt list, so anonymous is redirected to login); `username` is that user.
-/// INSERTs an `oa:Annotation` into the annotations graph with the text/creator
-/// escaped and the timestamp taken server-side via SPARQL `NOW()`. Redirects
-/// (PRG) back to the entity view.
+/// Add a note to the entity `<ENTITY_BASE>{id}` (the `_entity/{id}` POST). A
+/// thin wrapper over [`add_annotation_iri`] that expands the id to the entity
+/// IRI.
 pub async fn add_annotation(
     state: &AppState,
     dataset_name: &str,
@@ -487,11 +484,29 @@ pub async fn add_annotation(
     note: &str,
 ) -> Response {
     let subject_iri = format!("{ENTITY_BASE}{id}");
-    if NamedNode::new(&subject_iri).is_err() {
-        return (StatusCode::BAD_REQUEST, "Malformed entity IRI").into_response();
+    add_annotation_iri(state, dataset_name, url_prefix, &subject_iri, username, note).await
+}
+
+/// Add a note to an arbitrary resource `subject_iri` (Epic H, generalised to
+/// all resource/term views — the `_view?iri=` POST). Caller MUST have enforced
+/// a logged-in session (both POST routes do — neither `_entity` nor `_view` is
+/// in the write-exempt list, so anonymous is redirected to login); `username`
+/// is that user. INSERTs an `oa:Annotation` into the annotations graph with the
+/// text/creator escaped and the timestamp taken server-side via SPARQL `NOW()`.
+/// Redirects (PRG) back to the resource's native view.
+pub async fn add_annotation_iri(
+    state: &AppState,
+    dataset_name: &str,
+    url_prefix: &str,
+    subject_iri: &str,
+    username: &str,
+    note: &str,
+) -> Response {
+    if NamedNode::new(subject_iri).is_err() {
+        return (StatusCode::BAD_REQUEST, "Malformed resource IRI").into_response();
     }
     let note = note.trim();
-    let redirect_to = format!("{url_prefix}/_entity/{id}");
+    let redirect_to = native_href(subject_iri, url_prefix);
     if note.is_empty() {
         // Nothing to add — just bounce back to the view.
         return Redirect::to(&redirect_to).into_response();
@@ -499,7 +514,7 @@ pub async fn add_annotation(
     let Some(store) = state.store_manager.get_dataset(dataset_name) else {
         return (StatusCode::NOT_FOUND, "Dataset not found").into_response();
     };
-    let update = build_annotation_insert(&subject_iri, note, username);
+    let update = build_annotation_insert(subject_iri, note, username);
     match sparql_update(&store, &update) {
         Ok(()) => Redirect::to(&redirect_to).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Insert error: {e}")).into_response(),
@@ -750,11 +765,11 @@ pub async fn serve_resource(
             };
 
             // Epic H — annotations. Notes are readable by anyone who can read
-            // the view; the add-note form is shown only to a logged-in user and
-            // only for entities (the demo's annotatable resources; the POST
-            // route handles `_entity/{id}`).
+            // the view; the add-note form is shown to any logged-in user, on
+            // every resource/term view (the POST routes handle both
+            // `_entity/{id}` and `_view?iri=`). The form posts to `self_href`.
             let annotations = annotations_of(&store, &subject_iri);
-            let can_annotate = username.is_some() && subject_iri.starts_with(ENTITY_BASE);
+            let can_annotate = username.is_some();
 
             let tmpl = match state.templates.get_template("entity.html") {
                 Ok(t) => t,
@@ -989,6 +1004,21 @@ mlips:usesFramework a owl:ObjectProperty .
 
         // Targets are isolated: a different entity has no notes.
         assert!(annotations_of(&store, "https://w3id.org/mlips/entity/other").is_empty());
+    }
+
+    /// Epic H-ext: annotations round-trip for a non-entity (term/class) IRI
+    /// too — the same INSERT/read path works for any resource view, not only
+    /// `entity/` subjects.
+    #[test]
+    fn annotation_roundtrip_on_a_term_iri() {
+        let store = Store::new().unwrap();
+        let term = "https://w3id.org/mlips#Hyperparameter";
+        sparql_update(&store, &build_annotation_insert(term, "a note on a class", "bob"))
+            .expect("insert on term");
+        let rows = annotations_of(&store, term);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "a note on a class");
+        assert_eq!(rows[0].creator, "bob");
     }
 
     #[test]

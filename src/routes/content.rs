@@ -11,10 +11,19 @@ use super::ontology;
 use super::sparql;
 use super::web;
 
-/// Query parameters for the Graph Store Protocol-style `_graph` endpoint.
+/// Query parameters for POST dataset views: `graph` (Graph Store Protocol-style
+/// `_graph`) and `iri` (the `_view` resource-annotation target, Epic H).
 #[derive(serde::Deserialize)]
 pub struct GraphParams {
     pub graph: Option<String>,
+    pub iri: Option<String>,
+}
+
+/// The add-note form body (`note=…`) shared by the `_entity` and `_view`
+/// annotation POST routes (Epic H).
+#[derive(serde::Deserialize)]
+struct NoteForm {
+    note: Option<String>,
 }
 
 /// Query parameters for `GET` dataset views: `?query=` (the `_sparql`/`_query`
@@ -581,16 +590,33 @@ async fn content_post(
                     let Some(sess) = session else {
                         return axum::response::Redirect::to("/_login").into_response();
                     };
-                    #[derive(serde::Deserialize)]
-                    struct NoteForm {
-                        note: Option<String>,
-                    }
                     let form: NoteForm = serde_urlencoded::from_str(&body_str)
                         .unwrap_or(NoteForm { note: None });
                     let note = form.note.unwrap_or_default();
                     let url_prefix = build_dataset_url_prefix(&parsed);
                     entity::add_annotation(
                         &state, &qualified, &url_prefix, id, &sess.username, &note,
+                    )
+                    .await
+                }
+                // Epic H (generalised): add a note to an arbitrary resource
+                // addressed by full IRI. Like `_entity`, `_view` is not in the
+                // POST write-exempt list, so anonymous POSTers were already
+                // redirected to login; author = the session user.
+                Some("_view") => {
+                    let Some(sess) = session else {
+                        return axum::response::Redirect::to("/_login").into_response();
+                    };
+                    let Some(iri) = gparams.iri.as_deref().filter(|s| !s.is_empty()) else {
+                        return (StatusCode::BAD_REQUEST, "Missing ?iri= parameter".to_string())
+                            .into_response();
+                    };
+                    let form: NoteForm = serde_urlencoded::from_str(&body_str)
+                        .unwrap_or(NoteForm { note: None });
+                    let note = form.note.unwrap_or_default();
+                    let url_prefix = build_dataset_url_prefix(&parsed);
+                    entity::add_annotation_iri(
+                        &state, &qualified, &url_prefix, iri, &sess.username, &note,
                     )
                     .await
                 }
