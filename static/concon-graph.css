@@ -1,0 +1,51 @@
+/* concon entity/resource graph explorer (Epic J) — layout for the node-link
+ * canvas + the literal-attributes side panel. Sits under the Style-A theme. */
+
+.cy-explorer {
+  display: flex;
+  gap: 1rem;
+  margin: 0.5em 0 1.5em;
+  border: 1px solid #e6e6e6;
+  border-radius: 0.4em;
+  overflow: hidden;
+}
+#cy {
+  flex: 1 1 auto;
+  height: 32rem;
+  min-width: 0;
+  background: #fbfcfd;
+}
+#cy.cy-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #767676;
+  font-style: italic;
+}
+.cy-attrs {
+  flex: 0 0 16rem;
+  border-left: 1px solid #e6e6e6;
+  padding: 0.6em 0.8em;
+  overflow-y: auto;
+  font-size: 0.9em;
+}
+.cy-attrs-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5em; }
+.cy-attrs-head strong { word-break: break-word; }
+.cy-open { font-size: 0.85em; white-space: nowrap; }
+.cy-attrs-iri { font-family: monospace; font-size: 0.75em; color: #767676; word-break: break-all; margin: 0.3em 0 0.6em; }
+.cy-attrs-loading, .cy-attrs-none { color: #767676; font-style: italic; }
+table.cy-attrs-table { width: 100%; border-collapse: collapse; }
+table.cy-attrs-table th { text-align: left; vertical-align: top; font-weight: 600; color: #5a6470; padding: 0.2em 0.4em 0.2em 0; white-space: nowrap; }
+table.cy-attrs-table td { vertical-align: top; padding: 0.2em 0; word-break: break-word; }
+
+@media (prefers-color-scheme: dark) {
+  .cy-explorer, .cy-attrs { border-color: #2a3038; }
+  #cy { background: #12161b; }
+  .cy-attrs-iri, .cy-attrs-loading, .cy-attrs-none { color: #98a2ad; }
+  table.cy-attrs-table th { color: #98a2ad; }
+}
+
+@media (max-width: 40rem) {
+  .cy-explorer { flex-direction: column; }
+  .cy-attrs { flex-basis: auto; border-left: 0; border-top: 1px solid #e6e6e6; }
+}

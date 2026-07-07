@@ -806,6 +806,9 @@ pub async fn serve_resource(
                 annotations => &annotations,
                 annotation_count => annotations.len(),
                 can_annotate => can_annotate,
+                // Dataset base for the client-side graph explorer (Epic J):
+                // it derives `_sparql` from this and centres on `subject_iri`.
+                dataset_base => url_prefix,
                 username => username,
                 is_admin => is_admin,
             }) {
