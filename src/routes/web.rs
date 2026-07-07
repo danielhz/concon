@@ -1,11 +1,14 @@
+use std::collections::HashSet;
+
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Router, routing::get};
 use serde::Deserialize;
 use tower_cookies::Cookies;
 
 use crate::auth;
+use crate::migrate_io;
 use crate::state::AppState;
 use crate::store::sparql_update;
 
@@ -64,6 +67,12 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/_admin/users/delete",
             axum::routing::post(admin_delete_user),
+        )
+        // Epic I — versioned user export/import (cross-instance migration).
+        .route("/_admin/users/export", get(admin_export_users))
+        .route(
+            "/_admin/users/import",
+            axum::routing::post(admin_import_users),
         )
         .route("/_users", get(users_list))
         .route("/_users/{username}", get(user_profile))
@@ -698,33 +707,10 @@ async fn admin_dashboard(State(state): State<AppState>, cookies: Cookies) -> Res
 
 async fn admin_users(State(state): State<AppState>, cookies: Cookies) -> Response {
     let session = get_username(&cookies, &state);
-    let admin = is_root_admin(&session, &state);
-    if !admin {
+    if !is_root_admin(&session, &state) {
         return Redirect::to("/").into_response();
     }
-
-    let all_users = auth::list_all_users(&state.store_manager.system);
-
-    let tmpl = match state.templates.get_template("admin/users.html") {
-        Ok(t) => t,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-
-    let html = match tmpl.render(minijinja::context! {
-        username => session.map(|s| s.username),
-        is_admin => true,
-        users => all_users.iter().map(|u| minijinja::context! {
-            username => u.username,
-            teams => u.teams.iter().map(|t| &t.name).cloned().collect::<Vec<_>>().join(", "),
-        }).collect::<Vec<_>>(),
-        error => "",
-        success => "",
-    }) {
-        Ok(h) => h,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-
-    Html(html).into_response()
+    render_admin_users(&state, session.map(|s| s.username), None, None)
 }
 
 #[derive(Deserialize)]
@@ -830,6 +816,135 @@ async fn admin_delete_user(
     }
 
     Redirect::to("/_admin/users").into_response()
+}
+
+/// Epic I — download a version-annotated bundle of all users (admin only).
+async fn admin_export_users(State(state): State<AppState>, cookies: Cookies) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        return Redirect::to("/").into_response();
+    }
+    let bundle = migrate_io::export_users(&state.store_manager.system);
+    let json = match serde_json::to_string_pretty(&bundle) {
+        Ok(j) => j,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"concon-users-export.json\"",
+            ),
+        ],
+        json,
+    )
+        .into_response()
+}
+
+/// Epic I — import a users bundle (admin only). Multipart form: `bundle` (the
+/// uploaded JSON) and optional `dry_run` (present = preview only). Merge-not-
+/// replace; renders the users page with an import report.
+async fn admin_import_users(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        return Redirect::to("/").into_response();
+    }
+
+    let mut data: Option<Vec<u8>> = None;
+    let mut dry_run = false;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().map(|s| s.to_string());
+        match name.as_deref() {
+            Some("bundle") => data = field.bytes().await.ok().map(|b| b.to_vec()),
+            Some("dry_run") => {
+                dry_run = true;
+                let _ = field.text().await;
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let sys = &state.store_manager.system;
+    let username = session.map(|s| s.username);
+
+    let mut error: Option<String> = None;
+    let mut report_ctx: Option<minijinja::Value> = None;
+
+    match data {
+        None => error = Some("No bundle file was uploaded.".to_string()),
+        Some(bytes) => match serde_json::from_slice::<migrate_io::UsersBundle>(&bytes) {
+            Err(e) => error = Some(format!("Could not parse bundle JSON: {e}")),
+            Ok(bundle) if bundle.kind != "users" => {
+                error = Some(format!("Not a users bundle (kind = '{}').", bundle.kind))
+            }
+            Ok(bundle) => {
+                let existing: HashSet<String> = auth::list_all_users(sys)
+                    .into_iter()
+                    .map(|u| u.username)
+                    .collect();
+                let target_v = crate::migration::get_schema_version(sys);
+                let report = if dry_run {
+                    migrate_io::plan_users_import(&bundle, &existing, target_v)
+                } else {
+                    migrate_io::apply_users_import(sys, &bundle, &existing, target_v)
+                };
+                report_ctx = Some(minijinja::context! {
+                    applied => report.applied,
+                    dry_run => !report.applied,
+                    version_mismatch => report.version_mismatch,
+                    bundle_schema_version => report.bundle_schema_version,
+                    target_schema_version => report.target_schema_version,
+                    concon_version => bundle.concon_version,
+                    to_add => report.to_add,
+                    skipped_existing => report.skipped_existing,
+                    rejected => report.rejected,
+                    add_count => report.to_add.len(),
+                    skip_count => report.skipped_existing.len(),
+                    reject_count => report.rejected.len(),
+                });
+            }
+        },
+    }
+
+    render_admin_users(&state, username, error, report_ctx)
+}
+
+/// Render the user-management page, optionally with an import report. Shared by
+/// the users GET and the import POST.
+fn render_admin_users(
+    state: &AppState,
+    username: Option<String>,
+    error: Option<String>,
+    import_report: Option<minijinja::Value>,
+) -> Response {
+    let all_users = auth::list_all_users(&state.store_manager.system);
+    let tmpl = match state.templates.get_template("admin/users.html") {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let html = match tmpl.render(minijinja::context! {
+        username => username,
+        is_admin => true,
+        users => all_users.iter().map(|u| minijinja::context! {
+            username => u.username,
+            teams => u.teams.iter().map(|t| &t.name).cloned().collect::<Vec<_>>().join(", "),
+        }).collect::<Vec<_>>(),
+        error => error.unwrap_or_default(),
+        success => "",
+        import_report => import_report,
+    }) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    Html(html).into_response()
 }
 
 #[derive(Deserialize)]

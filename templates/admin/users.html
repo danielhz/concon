@@ -46,4 +46,29 @@
 {% else %}
 <p>No users found.</p>
 {% endif %}
+
+<h2>Migrate users</h2>
+<p>Export all users (with their password hashes, version-annotated) as a bundle, or import a bundle from another concon instance. Import is <strong>merge-not-replace</strong>: existing usernames are never overwritten.</p>
+<p><a class="button" href="/_admin/users/export">Export users (JSON)</a></p>
+
+<form method="post" action="/_admin/users/import" enctype="multipart/form-data">
+  <label>Import bundle
+    <input type="file" name="bundle" accept="application/json,.json" required>
+  </label>
+  <label><input type="checkbox" name="dry_run" checked> Dry run (preview only — don't write)</label>
+  <button type="submit" class="button">Import users</button>
+</form>
+
+{% if import_report %}
+<div class="callout {% if import_report.applied %}success{% else %}primary{% endif %}">
+  <h3>{% if import_report.applied %}Imported{% else %}Preview (dry run){% endif %}</h3>
+  {% if import_report.version_mismatch %}
+  <p class="callout warning">Version mismatch: bundle schema v{{ import_report.bundle_schema_version }} vs this instance v{{ import_report.target_schema_version }} (concon {{ import_report.concon_version }}). Users still import safely (username + hash are version-stable); review before importing teams/datasets.</p>
+  {% endif %}
+  <p>{% if import_report.applied %}Added{% else %}Would add{% endif %} <strong>{{ import_report.add_count }}</strong>, skipped (already present) <strong>{{ import_report.skip_count }}</strong>, rejected <strong>{{ import_report.reject_count }}</strong>.</p>
+  {% if import_report.to_add %}<p><strong>{% if import_report.applied %}Added{% else %}To add{% endif %}:</strong> {{ import_report.to_add | join(", ") }}</p>{% endif %}
+  {% if import_report.skipped_existing %}<p><strong>Skipped:</strong> {{ import_report.skipped_existing | join(", ") }}</p>{% endif %}
+  {% if import_report.rejected %}<p><strong>Rejected (invalid username / empty hash):</strong> {{ import_report.rejected | join(", ") }}</p>{% endif %}
+</div>
+{% endif %}
 {% endblock %}
