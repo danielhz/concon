@@ -48,15 +48,18 @@
   {% if import_report.missing_users %}
   <p class="callout warning">Referenced users absent on this instance (their memberships/roles were skipped — import them first): {{ import_report.missing_users | join(", ") }}</p>
   {% endif %}
+  {% if import_report.rejected_root %}
+  <p class="callout alert">Refused (would resolve to the root team — never modified via import): {{ import_report.rejected_root | join(", ") }}</p>
+  {% endif %}
   <table class="hover">
-    <thead><tr><th>Team path</th><th>Status</th><th>Members linked</th><th>Admins linked</th></tr></thead>
+    <thead><tr><th>Team path</th><th>Status</th><th>Members linked</th><th>Admins granted</th></tr></thead>
     <tbody>
       {% for r in import_report.rows %}
       <tr>
         <td><code>{{ r.target_path }}</code></td>
-        <td>{% if r.skipped_existing %}skipped (exists){% elif import_report.applied %}created{% else %}to create{% endif %}</td>
+        <td>{% if r.rejected_root %}refused (root){% elif r.skipped_existing %}skipped (exists — untouched){% elif import_report.applied %}created{% else %}to create{% endif %}</td>
         <td>{{ r.members }}</td>
-        <td>{{ r.admins }}</td>
+        <td>{% if r.admins %}<strong>{{ r.admins }}</strong>{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>

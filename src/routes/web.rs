@@ -1135,9 +1135,11 @@ async fn admin_import_teams(
                     created_count => report.created_count,
                     skipped_count => report.skipped_count,
                     missing_users => report.missing_users,
+                    rejected_root => report.rejected_root,
                     rows => report.rows.iter().map(|r| minijinja::context! {
                         target_path => r.target_path,
                         skipped_existing => r.skipped_existing,
+                        rejected_root => r.rejected_root,
                         members => r.linked_members.join(", "),
                         admins => r.linked_admins.join(", "),
                     }).collect::<Vec<_>>(),

@@ -273,9 +273,16 @@ impl TeamsBundle {
 pub struct TeamPlanRow {
     /// Resolved path on the target (e.g. "org/materials/atomistic").
     pub target_path: String,
-    /// True when a team already existed at that path (creation skipped).
+    /// True when a team already existed at that path — creation is skipped AND
+    /// the existing team (including its memberships/roles) is left completely
+    /// untouched (merge-not-replace).
     pub skipped_existing: bool,
-    /// Members/admins linked (users present on the target).
+    /// True when the entry resolves to the special root team (`teams/root`) —
+    /// refused outright (never created, re-parented, or linked). Guards against
+    /// a crafted bundle escalating a user to root admin via import.
+    pub rejected_root: bool,
+    /// Members/admins linked — populated ONLY for teams this import creates
+    /// (present users only); empty for skipped/refused rows.
     pub linked_members: Vec<String>,
     pub linked_admins: Vec<String>,
 }
@@ -288,9 +295,11 @@ pub struct TeamsImportReport {
     pub version_mismatch: bool,
     pub target_parent_path: String,
     pub rows: Vec<TeamPlanRow>,
-    /// Usernames referenced by the bundle but absent on the target (their
-    /// membership/role links are skipped — import users first to include them).
+    /// Usernames referenced by *created* teams but absent on the target (their
+    /// links are skipped — import users first to include them).
     pub missing_users: Vec<String>,
+    /// Target paths refused because they resolve to the root team.
+    pub rejected_root: Vec<String>,
     pub created_count: usize,
     pub skipped_count: usize,
     pub applied: bool,
@@ -392,6 +401,7 @@ pub fn plan_teams_import(
 ) -> TeamsImportReport {
     let mut rows = Vec::new();
     let mut missing = HashSet::new();
+    let mut rejected_root = Vec::new();
     let mut created = 0usize;
     let mut skipped = 0usize;
 
@@ -401,29 +411,42 @@ pub fn plan_teams_import(
     for team in &ordered {
         let segs = target_segments_for(target_parent_segments, &team.rel_path);
         let target_path = segs.join("/");
+        // Root guard: refuse anything resolving to the root team — a crafted
+        // bundle must never create/re-parent/link on `teams/root` (that would
+        // escalate a user to root admin during import).
+        let is_root = segs.is_empty() || team_iri_for(&segs) == ROOT_TEAM_IRI;
         let exists = existing_team_paths.contains(&target_path);
-        if exists {
-            skipped += 1;
-        } else {
-            created += 1;
-        }
-        let mut link = |names: &[String], out: &mut Vec<String>| {
-            for u in names {
-                if existing_usernames.contains(u) {
-                    out.push(u.clone());
-                } else {
-                    missing.insert(u.clone());
-                }
-            }
-        };
+        let will_create = !is_root && !exists;
+
+        // Members/admins are linked ONLY for teams we actually create; skipped
+        // (pre-existing) and refused (root) teams are left untouched — that is
+        // what merge-not-replace means, and it closes the confused-deputy path
+        // where an import could grant roles on any pre-existing team.
         let mut linked_members = Vec::new();
         let mut linked_admins = Vec::new();
-        link(&team.members, &mut linked_members);
-        link(&team.admins, &mut linked_admins);
-        drop(link);
+        if will_create {
+            created += 1;
+            let mut link = |names: &[String], out: &mut Vec<String>| {
+                for u in names {
+                    if existing_usernames.contains(u) {
+                        out.push(u.clone());
+                    } else {
+                        missing.insert(u.clone());
+                    }
+                }
+            };
+            link(&team.members, &mut linked_members);
+            link(&team.admins, &mut linked_admins);
+        } else if is_root {
+            rejected_root.push(target_path.clone());
+        } else {
+            skipped += 1;
+        }
+
         rows.push(TeamPlanRow {
             target_path,
-            skipped_existing: exists,
+            skipped_existing: exists && !is_root,
+            rejected_root: is_root,
             linked_members,
             linked_admins,
         });
@@ -438,6 +461,7 @@ pub fn plan_teams_import(
         target_parent_path: target_parent_segments.join("/"),
         rows,
         missing_users,
+        rejected_root,
         created_count: created,
         skipped_count: skipped,
         applied: false,
@@ -467,22 +491,29 @@ pub fn apply_teams_import(
     ordered.sort_by_key(|t| (t.rel_path.matches('/').count(), t.rel_path.clone()));
 
     for (team, row) in ordered.iter().zip(&report.rows) {
+        // Only teams this import creates are written. Pre-existing (skipped) and
+        // root-refused rows are left completely untouched — including their
+        // memberships/roles — so an import can neither clobber an existing team
+        // nor grant roles on it (esp. root). This is the fix for the
+        // import privilege-escalation.
+        if row.skipped_existing || row.rejected_root {
+            continue;
+        }
         let segs = target_segments_for(target_parent_segments, &team.rel_path);
         let team_iri = team_iri_for(&segs);
-        if !row.skipped_existing {
-            let parent_iri = team_iri_for(&segs[..segs.len() - 1]);
-            let name = escape_literal(&team.name);
-            let insert = format!(
-                r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-                INSERT DATA {{
-                    <{team_iri}> a mlipe:Team ;
-                        mlipe:teamName "{name}" ;
-                        mlipe:hasParentTeam <{parent_iri}> .
-                }}"#
-            );
-            let _ = sparql_update(store, &insert);
-        }
-        // Link members/admins (present users only), idempotently.
+        let parent_iri = team_iri_for(&segs[..segs.len() - 1]);
+        let name = escape_literal(&team.name);
+        let insert = format!(
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {{
+                <{team_iri}> a mlipe:Team ;
+                    mlipe:teamName "{name}" ;
+                    mlipe:hasParentTeam <{parent_iri}> .
+            }}"#
+        );
+        let _ = sparql_update(store, &insert);
+
+        // Link members/admins (present users only) — created teams only.
         for (pred, names) in [("hasMember", &row.linked_members), ("hasAdmin", &row.linked_admins)] {
             for u in names {
                 let user_iri = format!("{USER_IRI_PREFIX}{u}");
@@ -685,5 +716,105 @@ mod tests {
         assert_eq!(r.missing_users, vec!["ghost"]);
         assert_eq!(r.rows[0].target_path, "org/materials"); // re-parented
         assert!(r.rows[0].linked_members.is_empty()); // ghost not linked
+    }
+
+    fn team_has_role(store: &Store, team: &str, pred: &str, user: &str) -> bool {
+        matches!(
+            sparql_query(
+                store,
+                &format!(
+                    "PREFIX mlipe: <https://mlipe.2mia.org/ontology#> ASK {{ <{team}> mlipe:{pred} <{user}> }}"
+                )
+            ),
+            Ok(QueryResults::Boolean(true))
+        )
+    }
+
+    /// Security regression: a crafted bundle with a team resolving to the root
+    /// team must be refused — no team write and, crucially, no `hasAdmin`
+    /// granted on `teams/root` (would be root-admin escalation via import).
+    #[test]
+    fn teams_import_refuses_root_escalation() {
+        let bundle = TeamsBundle::new(
+            2,
+            "root".into(),
+            vec![TeamRecord {
+                rel_path: "root".into(),
+                name: "root".into(),
+                members: vec![],
+                admins: vec!["alice".into()],
+            }],
+        );
+        let existing_users: HashSet<String> = ["alice".to_string()].into_iter().collect();
+
+        let plan = plan_teams_import(&bundle, &[], &HashSet::new(), &existing_users, 2);
+        assert_eq!(plan.created_count, 0);
+        assert!(plan.rejected_root.contains(&"root".to_string()));
+        assert!(plan.rows[0].rejected_root);
+        assert!(plan.rows[0].linked_admins.is_empty());
+
+        let store = Store::new().unwrap();
+        sparql_update(
+            &store,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+              <https://mlipe.2mia.org/users/alice> a mlipe:User ; mlipe:username "alice" .
+            }"#,
+        )
+        .unwrap();
+        apply_teams_import(&store, &bundle, &[], &HashSet::new(), &existing_users, 2);
+        assert!(
+            !team_has_role(
+                &store,
+                "https://mlipe.2mia.org/teams/root",
+                "hasAdmin",
+                "https://mlipe.2mia.org/users/alice"
+            ),
+            "import must never grant root admin"
+        );
+    }
+
+    /// Security regression: importing a bundle whose team path matches an
+    /// existing team must NOT touch that team — no membership/role clobbering
+    /// (merge-not-replace / confused-deputy fix).
+    #[test]
+    fn teams_import_leaves_existing_team_untouched() {
+        let bundle = TeamsBundle::new(
+            2,
+            "materials".into(),
+            vec![TeamRecord {
+                rel_path: "materials".into(),
+                name: "materials".into(),
+                members: vec![],
+                admins: vec!["alice".into()],
+            }],
+        );
+        let store = Store::new().unwrap();
+        sparql_update(
+            &store,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+              <https://mlipe.2mia.org/teams/materials> a mlipe:Team ; mlipe:teamName "materials" ;
+                  mlipe:hasParentTeam <https://mlipe.2mia.org/teams/root> .
+              <https://mlipe.2mia.org/users/alice> a mlipe:User ; mlipe:username "alice" .
+            }"#,
+        )
+        .unwrap();
+        let existing_teams: HashSet<String> = ["materials".to_string()].into_iter().collect();
+        let existing_users: HashSet<String> = ["alice".to_string()].into_iter().collect();
+        let r = apply_teams_import(&store, &bundle, &[], &existing_teams, &existing_users, 2);
+        assert_eq!(r.created_count, 0);
+        assert_eq!(r.skipped_count, 1);
+        assert!(
+            !team_has_role(
+                &store,
+                "https://mlipe.2mia.org/teams/materials",
+                "hasAdmin",
+                "https://mlipe.2mia.org/users/alice"
+            ),
+            "import must not grant admin on a pre-existing team"
+        );
     }
 }
