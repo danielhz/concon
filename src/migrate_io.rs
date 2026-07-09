@@ -224,6 +224,280 @@ pub fn apply_users_import(
     report
 }
 
+// ---------------------------------------------------------------------------
+// Teams slice: export/import a team subtree (organisational structure —
+// sub-teams + membership + roles). Datasets' RDF payloads and files are a
+// documented follow-up slice; this slice recreates the team hierarchy and its
+// memberships/roles, which is the structural core migration reuses.
+// ---------------------------------------------------------------------------
+
+const TEAM_PREFIX: &str = "https://mlipe.2mia.org/teams/";
+
+/// One team in a subtree bundle. `rel_path` is the team's path **relative to
+/// (and including) the exported subtree root** — e.g. root "materials" has
+/// `rel_path = "materials"`, its child "atomistic" has `"materials/atomistic"`.
+/// This makes re-parenting on import a pure prefix operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TeamRecord {
+    pub rel_path: String,
+    pub name: String,
+    pub members: Vec<String>,
+    pub admins: Vec<String>,
+}
+
+/// A portable bundle of a team subtree, version-annotated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsBundle {
+    pub kind: String,
+    pub schema_version: u32,
+    pub concon_version: String,
+    /// `rel_path` of the subtree root (informational).
+    pub subtree_root: String,
+    pub teams: Vec<TeamRecord>,
+}
+
+impl TeamsBundle {
+    pub fn new(schema_version: u32, subtree_root: String, teams: Vec<TeamRecord>) -> Self {
+        Self {
+            kind: "teams".to_string(),
+            schema_version,
+            concon_version: CONCON_VERSION.to_string(),
+            subtree_root,
+            teams,
+        }
+    }
+}
+
+/// Per-team import outcome for the report.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TeamPlanRow {
+    /// Resolved path on the target (e.g. "org/materials/atomistic").
+    pub target_path: String,
+    /// True when a team already existed at that path (creation skipped).
+    pub skipped_existing: bool,
+    /// Members/admins linked (users present on the target).
+    pub linked_members: Vec<String>,
+    pub linked_admins: Vec<String>,
+}
+
+/// The plan/outcome of a teams import.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TeamsImportReport {
+    pub bundle_schema_version: u32,
+    pub target_schema_version: u32,
+    pub version_mismatch: bool,
+    pub target_parent_path: String,
+    pub rows: Vec<TeamPlanRow>,
+    /// Usernames referenced by the bundle but absent on the target (their
+    /// membership/role links are skipped — import users first to include them).
+    pub missing_users: Vec<String>,
+    pub created_count: usize,
+    pub skipped_count: usize,
+    pub applied: bool,
+}
+
+/// The path part of a team IRI (`…/teams/<path>`), or `None` if not a team IRI.
+fn team_path_from_iri(iri: &str) -> Option<String> {
+    iri.trim_matches(|c| c == '<' || c == '>')
+        .strip_prefix(TEAM_PREFIX)
+        .map(|s| s.to_string())
+}
+
+/// The IRI for a team addressed by path segments (root = the special
+/// `teams/root`; anything else is `teams/<segments-joined>`).
+fn team_iri_for(segments: &[String]) -> String {
+    if segments.is_empty() {
+        ROOT_TEAM_IRI.to_string()
+    } else {
+        format!("{TEAM_PREFIX}{}", segments.join("/"))
+    }
+}
+
+fn usernames_with_role(store: &Store, team_iri: &str, role_pred: &str) -> Vec<String> {
+    let q = format!(
+        r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?n WHERE {{ <{team_iri}> mlipe:{role_pred} ?u . ?u mlipe:username ?n }} ORDER BY ?n"#
+    );
+    let mut out = Vec::new();
+    if let Ok(QueryResults::Solutions(sols)) = sparql_query(store, &q) {
+        for sol in sols.flatten() {
+            if let Some(n) = sol.get("n") {
+                out.push(lit(&n.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Export the team subtree rooted at `root_iri` (resolved by the caller) as a
+/// bundle: the root and all descendants, each with its members and admins.
+pub fn export_teams(store: &Store, root_iri: &str) -> TeamsBundle {
+    let root_clean = root_iri.trim_matches(|c| c == '<' || c == '>');
+    let root_path = team_path_from_iri(root_clean).unwrap_or_default();
+    // The prefix to strip so rel_path keeps the subtree root's own name.
+    let parent_prefix = match root_path.rfind('/') {
+        Some(i) => root_path[..=i].to_string(), // includes trailing '/'
+        None => String::new(),
+    };
+
+    let q = format!(
+        r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?t ?name WHERE {{
+            {{ BIND(<{root_clean}> AS ?t) ?t mlipe:teamName ?name }}
+            UNION
+            {{ ?t mlipe:hasParentTeam+ <{root_clean}> ; mlipe:teamName ?name }}
+        }}"#
+    );
+    let mut teams = Vec::new();
+    if let Ok(QueryResults::Solutions(sols)) = sparql_query(store, &q) {
+        for sol in sols.flatten() {
+            let (Some(t), Some(name)) = (sol.get("t"), sol.get("name")) else {
+                continue;
+            };
+            let iri = t.to_string();
+            let Some(path) = team_path_from_iri(&iri) else { continue };
+            let rel_path = path.strip_prefix(&parent_prefix).unwrap_or(&path).to_string();
+            let clean = iri.trim_matches(|c| c == '<' || c == '>').to_string();
+            teams.push(TeamRecord {
+                rel_path,
+                name: lit(&name.to_string()),
+                members: usernames_with_role(store, &clean, "hasMember"),
+                admins: usernames_with_role(store, &clean, "hasAdmin"),
+            });
+        }
+    }
+    // Parents before children: shallower rel_path first.
+    teams.sort_by_key(|t| (t.rel_path.matches('/').count(), t.rel_path.clone()));
+    TeamsBundle::new(migration::get_schema_version(store), root_path, teams)
+}
+
+/// Resolve a bundle team's target segments = `target_parent_segments ++
+/// rel_path segments`. Pure (used by plan and apply).
+fn target_segments_for(target_parent_segments: &[String], rel_path: &str) -> Vec<String> {
+    let mut segs = target_parent_segments.to_vec();
+    segs.extend(rel_path.split('/').filter(|s| !s.is_empty()).map(String::from));
+    segs
+}
+
+/// Plan a teams import under `target_parent_segments` (empty = root): resolve
+/// each team's target path, decide create-vs-skip (merge-not-replace), and note
+/// which referenced users are missing on the target. Pure — shared by dry-run
+/// and apply.
+pub fn plan_teams_import(
+    bundle: &TeamsBundle,
+    target_parent_segments: &[String],
+    existing_team_paths: &HashSet<String>,
+    existing_usernames: &HashSet<String>,
+    target_schema_version: u32,
+) -> TeamsImportReport {
+    let mut rows = Vec::new();
+    let mut missing = HashSet::new();
+    let mut created = 0usize;
+    let mut skipped = 0usize;
+
+    let mut ordered = bundle.teams.clone();
+    ordered.sort_by_key(|t| (t.rel_path.matches('/').count(), t.rel_path.clone()));
+
+    for team in &ordered {
+        let segs = target_segments_for(target_parent_segments, &team.rel_path);
+        let target_path = segs.join("/");
+        let exists = existing_team_paths.contains(&target_path);
+        if exists {
+            skipped += 1;
+        } else {
+            created += 1;
+        }
+        let mut link = |names: &[String], out: &mut Vec<String>| {
+            for u in names {
+                if existing_usernames.contains(u) {
+                    out.push(u.clone());
+                } else {
+                    missing.insert(u.clone());
+                }
+            }
+        };
+        let mut linked_members = Vec::new();
+        let mut linked_admins = Vec::new();
+        link(&team.members, &mut linked_members);
+        link(&team.admins, &mut linked_admins);
+        drop(link);
+        rows.push(TeamPlanRow {
+            target_path,
+            skipped_existing: exists,
+            linked_members,
+            linked_admins,
+        });
+    }
+
+    let mut missing_users: Vec<String> = missing.into_iter().collect();
+    missing_users.sort();
+    TeamsImportReport {
+        bundle_schema_version: bundle.schema_version,
+        target_schema_version,
+        version_mismatch: bundle.schema_version != target_schema_version,
+        target_parent_path: target_parent_segments.join("/"),
+        rows,
+        missing_users,
+        created_count: created,
+        skipped_count: skipped,
+        applied: false,
+    }
+}
+
+/// Apply a teams import: create each not-yet-existing team under its resolved
+/// parent (merge-not-replace) and link the members/admins whose users exist on
+/// the target. Never modifies an existing team's own triples.
+pub fn apply_teams_import(
+    store: &Store,
+    bundle: &TeamsBundle,
+    target_parent_segments: &[String],
+    existing_team_paths: &HashSet<String>,
+    existing_usernames: &HashSet<String>,
+    target_schema_version: u32,
+) -> TeamsImportReport {
+    let mut report = plan_teams_import(
+        bundle,
+        target_parent_segments,
+        existing_team_paths,
+        existing_usernames,
+        target_schema_version,
+    );
+    // Recompute the ordered list identically to the plan.
+    let mut ordered = bundle.teams.clone();
+    ordered.sort_by_key(|t| (t.rel_path.matches('/').count(), t.rel_path.clone()));
+
+    for (team, row) in ordered.iter().zip(&report.rows) {
+        let segs = target_segments_for(target_parent_segments, &team.rel_path);
+        let team_iri = team_iri_for(&segs);
+        if !row.skipped_existing {
+            let parent_iri = team_iri_for(&segs[..segs.len() - 1]);
+            let name = escape_literal(&team.name);
+            let insert = format!(
+                r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+                INSERT DATA {{
+                    <{team_iri}> a mlipe:Team ;
+                        mlipe:teamName "{name}" ;
+                        mlipe:hasParentTeam <{parent_iri}> .
+                }}"#
+            );
+            let _ = sparql_update(store, &insert);
+        }
+        // Link members/admins (present users only), idempotently.
+        for (pred, names) in [("hasMember", &row.linked_members), ("hasAdmin", &row.linked_admins)] {
+            for u in names {
+                let user_iri = format!("{USER_IRI_PREFIX}{u}");
+                let insert = format!(
+                    r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+                    INSERT DATA {{ <{team_iri}> mlipe:{pred} <{user_iri}> }}"#
+                );
+                let _ = sparql_update(store, &insert);
+            }
+        }
+    }
+    report.applied = true;
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +593,97 @@ mod tests {
         let r2 = apply_users_import(&target, &b, &existing2, b.schema_version);
         assert!(r2.to_add.is_empty());
         assert_eq!(export_users(&target).users.len(), 2);
+    }
+
+    #[test]
+    fn teams_export_import_roundtrip() {
+        let src = Store::new().unwrap();
+        sparql_update(
+            &src,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+              <https://mlipe.2mia.org/teams/materials> a mlipe:Team ; mlipe:teamName "materials" ;
+                  mlipe:hasParentTeam <https://mlipe.2mia.org/teams/root> .
+              <https://mlipe.2mia.org/teams/materials/atomistic> a mlipe:Team ;
+                  mlipe:teamName "atomistic" ;
+                  mlipe:hasParentTeam <https://mlipe.2mia.org/teams/materials> .
+              <https://mlipe.2mia.org/users/alice> a mlipe:User ; mlipe:username "alice" .
+              <https://mlipe.2mia.org/teams/materials> mlipe:hasAdmin <https://mlipe.2mia.org/users/alice> .
+              <https://mlipe.2mia.org/teams/materials/atomistic> mlipe:hasMember <https://mlipe.2mia.org/users/alice> .
+            }"#,
+        )
+        .unwrap();
+
+        let bundle = export_teams(&src, "https://mlipe.2mia.org/teams/materials");
+        assert_eq!(bundle.teams.len(), 2, "subtree = materials + atomistic");
+        let mat = bundle.teams.iter().find(|t| t.rel_path == "materials").unwrap();
+        assert_eq!(mat.name, "materials");
+        assert_eq!(mat.admins, vec!["alice"]);
+        let atom = bundle.teams.iter().find(|t| t.rel_path == "materials/atomistic").unwrap();
+        assert_eq!(atom.members, vec!["alice"]);
+
+        // Import into a fresh target that has root + alice.
+        let tgt = Store::new().unwrap();
+        sparql_update(
+            &tgt,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+              <https://mlipe.2mia.org/users/alice> a mlipe:User ; mlipe:username "alice" .
+            }"#,
+        )
+        .unwrap();
+        let existing_users: HashSet<String> = ["alice".to_string()].into_iter().collect();
+        let r = apply_teams_import(
+            &tgt,
+            &bundle,
+            &[],
+            &HashSet::new(),
+            &existing_users,
+            bundle.schema_version,
+        );
+        assert!(r.applied);
+        assert_eq!(r.created_count, 2);
+        assert!(r.missing_users.is_empty());
+
+        // The subtree (and its membership) is recreated on the target.
+        let after = export_teams(&tgt, "https://mlipe.2mia.org/teams/materials");
+        assert_eq!(after.teams.len(), 2);
+        let atom2 = after.teams.iter().find(|t| t.rel_path == "materials/atomistic").unwrap();
+        assert_eq!(atom2.members, vec!["alice"]);
+
+        // Re-import is idempotent (all paths now exist → skipped).
+        let existing_teams: HashSet<String> =
+            ["materials".to_string(), "materials/atomistic".to_string()].into_iter().collect();
+        let r2 = plan_teams_import(&bundle, &[], &existing_teams, &existing_users, bundle.schema_version);
+        assert_eq!(r2.created_count, 0);
+        assert_eq!(r2.skipped_count, 2);
+    }
+
+    #[test]
+    fn teams_import_flags_missing_users_and_version_and_reparents() {
+        let bundle = TeamsBundle::new(
+            1,
+            "materials".into(),
+            vec![TeamRecord {
+                rel_path: "materials".into(),
+                name: "materials".into(),
+                members: vec!["ghost".into()],
+                admins: vec![],
+            }],
+        );
+        // Re-parent under "org": target path becomes org/materials.
+        let r = plan_teams_import(
+            &bundle,
+            &["org".to_string()],
+            &HashSet::new(),
+            &HashSet::new(), // ghost absent
+            2,
+        );
+        assert!(r.version_mismatch); // bundle v1 vs target v2
+        assert_eq!(r.missing_users, vec!["ghost"]);
+        assert_eq!(r.rows[0].target_path, "org/materials"); // re-parented
+        assert!(r.rows[0].linked_members.is_empty()); // ghost not linked
     }
 }

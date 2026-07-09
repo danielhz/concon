@@ -74,6 +74,13 @@ pub fn routes() -> Router<AppState> {
             "/_admin/users/import",
             axum::routing::post(admin_import_users),
         )
+        // Epic I — versioned team-subtree export/import.
+        .route("/_admin/teams", get(admin_teams))
+        .route("/_admin/teams/export", get(admin_export_teams))
+        .route(
+            "/_admin/teams/import",
+            axum::routing::post(admin_import_teams),
+        )
         .route("/_users", get(users_list))
         .route("/_users/{username}", get(user_profile))
 }
@@ -939,6 +946,226 @@ fn render_admin_users(
         }).collect::<Vec<_>>(),
         error => error.unwrap_or_default(),
         success => "",
+        import_report => import_report,
+    }) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    Html(html).into_response()
+}
+
+/// All team paths in the system store (IRI `…/teams/<path>` minus the special
+/// root), for the admin teams page's export picker.
+fn all_team_paths(state: &AppState) -> Vec<String> {
+    let q = r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+        SELECT ?t WHERE { ?t a mlipe:Team } ORDER BY ?t"#;
+    let mut paths = Vec::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) =
+        crate::store::sparql_query(&state.store_manager.system, q)
+    {
+        for sol in sols.flatten() {
+            if let Some(t) = sol.get("t") {
+                let iri = t.to_string();
+                if let Some(p) = iri
+                    .trim_matches(|c| c == '<' || c == '>')
+                    .strip_prefix("https://mlipe.2mia.org/teams/")
+                {
+                    if p != "root" {
+                        paths.push(p.to_string());
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+async fn admin_teams(State(state): State<AppState>, cookies: Cookies) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        return Redirect::to("/").into_response();
+    }
+    render_admin_teams(&state, session.map(|s| s.username), None, None)
+}
+
+#[derive(Deserialize)]
+struct ExportTeamsQuery {
+    team: Option<String>,
+}
+
+/// Epic I — download a version-annotated bundle of a team subtree (admin only).
+async fn admin_export_teams(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    axum::extract::Query(q): axum::extract::Query<ExportTeamsQuery>,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        return Redirect::to("/").into_response();
+    }
+    let team = q.team.unwrap_or_default();
+    let segments: Vec<String> = team
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if segments.is_empty() {
+        return render_admin_teams(
+            &state,
+            session.map(|s| s.username),
+            Some("Choose a team subtree to export.".to_string()),
+            None,
+        );
+    }
+    let Some(root_iri) = auth::resolve_team_path(&state.store_manager.system, &segments) else {
+        return render_admin_teams(
+            &state,
+            session.map(|s| s.username),
+            Some(format!("No such team: '{team}'.")),
+            None,
+        );
+    };
+    let bundle = migrate_io::export_teams(&state.store_manager.system, &root_iri);
+    let json = match serde_json::to_string_pretty(&bundle) {
+        Ok(j) => j,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let fname = format!("concon-team-{}.json", segments.join("-"));
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{fname}\""),
+            ),
+        ],
+        json,
+    )
+        .into_response()
+}
+
+/// Epic I — import a team-subtree bundle (admin only). Multipart: `bundle` (the
+/// JSON), `parent` (target parent team path, empty = root), optional `dry_run`.
+async fn admin_import_teams(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let session = get_username(&cookies, &state);
+    if !is_root_admin(&session, &state) {
+        return Redirect::to("/").into_response();
+    }
+
+    let mut data: Option<Vec<u8>> = None;
+    let mut dry_run = false;
+    let mut parent = String::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().map(|s| s.to_string());
+        match name.as_deref() {
+            Some("bundle") => data = field.bytes().await.ok().map(|b| b.to_vec()),
+            Some("parent") => parent = field.text().await.unwrap_or_default(),
+            Some("dry_run") => {
+                dry_run = true;
+                let _ = field.text().await;
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let sys = &state.store_manager.system;
+    let username = session.map(|s| s.username);
+    let parent_segments: Vec<String> = parent
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
+    let mut error: Option<String> = None;
+    let mut report_ctx: Option<minijinja::Value> = None;
+
+    match data {
+        None => error = Some("No bundle file was uploaded.".to_string()),
+        Some(bytes) => match serde_json::from_slice::<migrate_io::TeamsBundle>(&bytes) {
+            Err(e) => error = Some(format!("Could not parse bundle JSON: {e}")),
+            Ok(bundle) if bundle.kind != "teams" => {
+                error = Some(format!("Not a teams bundle (kind = '{}').", bundle.kind))
+            }
+            Ok(_) if auth::resolve_team_path(sys, &parent_segments).is_none() => {
+                error = Some(format!("No such target parent team: '{parent}'."))
+            }
+            Ok(bundle) => {
+                let existing_team_paths: HashSet<String> =
+                    all_team_paths(&state).into_iter().collect();
+                let existing_usernames: HashSet<String> = auth::list_all_users(sys)
+                    .into_iter()
+                    .map(|u| u.username)
+                    .collect();
+                let target_v = crate::migration::get_schema_version(sys);
+                let report = if dry_run {
+                    migrate_io::plan_teams_import(
+                        &bundle,
+                        &parent_segments,
+                        &existing_team_paths,
+                        &existing_usernames,
+                        target_v,
+                    )
+                } else {
+                    migrate_io::apply_teams_import(
+                        sys,
+                        &bundle,
+                        &parent_segments,
+                        &existing_team_paths,
+                        &existing_usernames,
+                        target_v,
+                    )
+                };
+                report_ctx = Some(minijinja::context! {
+                    applied => report.applied,
+                    dry_run => !report.applied,
+                    version_mismatch => report.version_mismatch,
+                    bundle_schema_version => report.bundle_schema_version,
+                    target_schema_version => report.target_schema_version,
+                    concon_version => bundle.concon_version,
+                    target_parent_path => report.target_parent_path,
+                    created_count => report.created_count,
+                    skipped_count => report.skipped_count,
+                    missing_users => report.missing_users,
+                    rows => report.rows.iter().map(|r| minijinja::context! {
+                        target_path => r.target_path,
+                        skipped_existing => r.skipped_existing,
+                        members => r.linked_members.join(", "),
+                        admins => r.linked_admins.join(", "),
+                    }).collect::<Vec<_>>(),
+                });
+            }
+        },
+    }
+
+    render_admin_teams(&state, username, error, report_ctx)
+}
+
+/// Render the team-migration admin page, optionally with an import report.
+fn render_admin_teams(
+    state: &AppState,
+    username: Option<String>,
+    error: Option<String>,
+    import_report: Option<minijinja::Value>,
+) -> Response {
+    let team_paths = all_team_paths(state);
+    let tmpl = match state.templates.get_template("admin/teams.html") {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let html = match tmpl.render(minijinja::context! {
+        username => username,
+        is_admin => true,
+        team_paths => team_paths,
+        error => error.unwrap_or_default(),
         import_report => import_report,
     }) {
         Ok(h) => h,

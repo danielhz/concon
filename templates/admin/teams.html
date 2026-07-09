@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Concon - Team Migration{% endblock %}
+
+{% block content %}
+<h1>Team Migration</h1>
+
+<p><a href="/_admin">&laquo; Back to administration</a></p>
+
+{% if error %}<div class="callout alert">{{ error }}</div>{% endif %}
+
+<p>Export a team subtree (its sub-teams, members and roles — version-annotated) as a bundle, or import a bundle from another concon instance. Import is <strong>merge-not-replace</strong>: teams that already exist at the target path are skipped, and members/admins are linked only for users that already exist on this instance (import users first). Datasets' RDF and files are a separate migration step.</p>
+
+<h2>Export a team subtree</h2>
+{% if team_paths %}
+<form method="get" action="/_admin/teams/export">
+  <label>Team subtree
+    <input type="text" name="team" list="team-paths" placeholder="e.g. materials or materials/atomistic" required>
+    <datalist id="team-paths">
+      {% for p in team_paths %}<option value="{{ p }}"></option>{% endfor %}
+    </datalist>
+  </label>
+  <button type="submit" class="button">Export subtree (JSON)</button>
+</form>
+{% else %}
+<p>No teams to export yet.</p>
+{% endif %}
+
+<h2>Import a team subtree</h2>
+<form method="post" action="/_admin/teams/import" enctype="multipart/form-data">
+  <label>Bundle
+    <input type="file" name="bundle" accept="application/json,.json" required>
+  </label>
+  <label>Recreate under parent team (blank = root)
+    <input type="text" name="parent" list="team-paths" placeholder="e.g. org (blank = top level)">
+  </label>
+  <label><input type="checkbox" name="dry_run" checked> Dry run (preview only — don't write)</label>
+  <button type="submit" class="button">Import subtree</button>
+</form>
+
+{% if import_report %}
+<div class="callout {% if import_report.applied %}success{% else %}primary{% endif %}">
+  <h3>{% if import_report.applied %}Imported{% else %}Preview (dry run){% endif %}</h3>
+  {% if import_report.version_mismatch %}
+  <p class="callout warning">Version mismatch: bundle schema v{{ import_report.bundle_schema_version }} vs this instance v{{ import_report.target_schema_version }} (concon {{ import_report.concon_version }}). Team structure still imports; review before relying on it across a schema change.</p>
+  {% endif %}
+  <p>Target parent: <code>{{ import_report.target_parent_path or "(root)" }}</code>. {% if import_report.applied %}Created{% else %}Would create{% endif %} <strong>{{ import_report.created_count }}</strong> team(s), skipped (already present) <strong>{{ import_report.skipped_count }}</strong>.</p>
+  {% if import_report.missing_users %}
+  <p class="callout warning">Referenced users absent on this instance (their memberships/roles were skipped — import them first): {{ import_report.missing_users | join(", ") }}</p>
+  {% endif %}
+  <table class="hover">
+    <thead><tr><th>Team path</th><th>Status</th><th>Members linked</th><th>Admins linked</th></tr></thead>
+    <tbody>
+      {% for r in import_report.rows %}
+      <tr>
+        <td><code>{{ r.target_path }}</code></td>
+        <td>{% if r.skipped_existing %}skipped (exists){% elif import_report.applied %}created{% else %}to create{% endif %}</td>
+        <td>{{ r.members }}</td>
+        <td>{{ r.admins }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
