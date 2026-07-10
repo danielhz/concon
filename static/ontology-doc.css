@@ -285,8 +285,36 @@ nav#toc .toc-group.datprop  a { border-color: var(--c-datprop-rule);    backgrou
 nav#toc .toc-group.datprop  h3 .dot { background: var(--c-datprop-rule); }
 nav#toc .toc-group.indiv    a { border-color: var(--c-individual-rule); background: var(--c-individual-bg); }
 nav#toc .toc-group.indiv    h3 .dot { background: var(--c-individual-rule); }
+nav#toc .toc-group.external a { border-color: var(--c-muted); background: var(--c-code-bg); }
+nav#toc .toc-group.external h3 .dot { background: var(--c-muted); }
 nav#toc ul.toc-chips a:hover,
 nav#toc ul.toc-chips a:focus { border-color: var(--c-link); }
+
+/* === External terms appendix (Epic G gateway — used, not defined here) === */
+
+section.ccx-external {
+  margin: 2.5em 0 1em;
+  padding-top: 1em;
+  border-top: 2px solid var(--c-rule);
+}
+section.ccx-external .ccx-external-note { color: var(--c-muted); font-weight: 400; }
+ul.ccx-external-list {
+  list-style: none;
+  padding-left: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em 0.6em;
+}
+ul.ccx-external-list > li > a {
+  display: inline-block;
+  padding: 0.15em 0.6em;
+  border: 1px solid var(--c-rule);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  text-decoration: none;
+}
+ul.ccx-external-list > li > a:hover { border-color: var(--c-link); }
 
 /* === Per-term outgoing/incoming property lists === */
 

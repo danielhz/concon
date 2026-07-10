@@ -99,7 +99,7 @@ pub(crate) fn rdf_format_for(format: &str) -> Option<RdfFormat> {
 }
 
 /// Abbreviate a well-known IRI to a `prefix:local` short form for display.
-fn short_form(iri: &str) -> String {
+pub(crate) fn short_form(iri: &str) -> String {
     const PREFIXES: &[(&str, &str)] = &[
         ("https://w3id.org/mlips/entity/", "entity:"),
         ("https://w3id.org/mlips#", "mlips:"),
@@ -152,7 +152,7 @@ const VIEWABLE_NAMESPACES: &[&str] = &[
 /// Whether `iri` is a domain-vocabulary term that earns its own local view
 /// (see `VIEWABLE_NAMESPACES`). Entity IRIs are handled separately (they use
 /// the short `_entity/{id}` form).
-fn earns_local_view(iri: &str) -> bool {
+pub(crate) fn earns_local_view(iri: &str) -> bool {
     VIEWABLE_NAMESPACES.iter().any(|ns| iri.starts_with(ns))
 }
 

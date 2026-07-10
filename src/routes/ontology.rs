@@ -21,10 +21,11 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use oxigraph::io::RdfSerializer;
 use oxigraph::sparql::QueryResults;
+use oxigraph::store::Store;
 
 use super::entity;
 use crate::state::AppState;
-use crate::store::{DOC_INDEX_FILE, sparql_query};
+use crate::store::{DOC_INDEX_FILE, sparql_query, sparql_query_union};
 
 /// Named graphs whose union is "the ontology" serialized at the base URL —
 /// the extracted schema and the controlled vocabulary (the `mlips#` terms the
@@ -43,7 +44,18 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, url_prefix: &str) -> Resp
     let Some(bytes) = state.store_manager.read_doc_file(dataset_name, DOC_INDEX_FILE) else {
         return (StatusCode::NOT_FOUND, "No document for this dataset").into_response();
     };
-    let html = augment_doc(String::from_utf8_lossy(&bytes).into_owned(), url_prefix);
+    // External terms (used-not-defined) are derived live from the dataset, so
+    // the doc's "External terms" section stays current as the KG grows.
+    let external = state
+        .store_manager
+        .get_dataset(dataset_name)
+        .map(|store| external_terms(&store, url_prefix))
+        .unwrap_or_default();
+    let html = augment_doc(
+        String::from_utf8_lossy(&bytes).into_owned(),
+        url_prefix,
+        &external,
+    );
     // Served as application/xhtml+xml: the curated document is authored as XHTML
     // (XML declaration, xmlns, self-closed tags, and CDATA in the owl-xml axiom
     // blocks). The HTML5 parser mangles CDATA, so the document must be parsed as
@@ -65,7 +77,7 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, url_prefix: &str) -> Resp
 ///     section; it builds its DOM via createElement, i.e. well-formed nodes).
 ///
 /// The curated document body is otherwise untouched (no regeneration).
-fn augment_doc(doc: String, url_prefix: &str) -> String {
+fn augment_doc(doc: String, url_prefix: &str, external: &[ExternalTerm]) -> String {
     // Stylesheets plus `rel="alternate"` pointers so a tool that lands on the
     // document (no RDF `Accept` header) can discover the machine-readable RDF.
     // The alternates share the document's own (negotiated) base URL — the
@@ -83,7 +95,6 @@ fn augment_doc(doc: String, url_prefix: &str) -> String {
         ),
         base = base
     );
-    let body_top = format!("{}{}", chrome_fragment(url_prefix), build_toc(&doc));
     let body_end = format!(
         concat!(
             "<script src=\"/static/concon-explore.js\" defer=\"defer\"",
@@ -93,7 +104,13 @@ fn augment_doc(doc: String, url_prefix: &str) -> String {
     );
     let doc = inject_view_links(doc, url_prefix);
     let doc = insert_before(doc, "</head>", &head);
-    let doc = insert_after_body_open(doc, &body_top);
+    // Chrome stays at the top of <body>; the generated table of contents moves
+    // below the title block + visualization figure (before the first module).
+    let doc = insert_after_body_open(doc, &chrome_fragment(url_prefix));
+    let toc = build_toc(&doc, external);
+    let doc = insert_before_first_module(doc, &toc);
+    // "External terms" appendix (used-not-defined terms → their `_view`).
+    let doc = insert_before(doc, "</body>", &external_terms_section(external));
     insert_before(doc, "</body>", &body_end)
 }
 
@@ -227,7 +244,7 @@ fn breadcrumb_parts(url_prefix: &str) -> (String, String, String) {
 /// Build a table of contents from the document's term sections
 /// (`<section id="X" class="term TYPE">`), grouped by term type. The section id
 /// is the term's local name and its in-document anchor. Empty if no terms.
-fn build_toc(doc: &str) -> String {
+fn build_toc(doc: &str, external: &[ExternalTerm]) -> String {
     let (mut classes, mut object_props, mut datatype_props, mut individuals) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut rest = doc;
@@ -261,7 +278,7 @@ fn build_toc(doc: &str) -> String {
         ("Datatype properties", "datprop", datatype_props),
         ("Individuals", "indiv", individuals),
     ];
-    if groups.iter().all(|(_, _, v)| v.is_empty()) {
+    if groups.iter().all(|(_, _, v)| v.is_empty()) && external.is_empty() {
         return String::new();
     }
     let mut s = String::from(
@@ -283,8 +300,112 @@ fn build_toc(doc: &str) -> String {
         }
         s.push_str("</ul></div>");
     }
+    // External-terms group (Epic G gateway): each chip links to the term's
+    // `_view`, so the element list itself reaches every individual of that type.
+    if !external.is_empty() {
+        s.push_str(&format!(
+            "<div class=\"toc-group external\">\
+             <h3><span class=\"dot\"></span>External terms <span class=\"count\">{n}</span></h3>\
+             <ul class=\"toc-chips\">",
+            n = external.len(),
+        ));
+        for t in external {
+            s.push_str(&format!(
+                "<li><a href=\"{href}\" title=\"{iri}\">{disp}</a></li>",
+                href = xml_escape(&t.href),
+                iri = xml_escape(&t.iri),
+                disp = xml_escape(&t.display),
+            ));
+        }
+        s.push_str("</ul></div>");
+    }
     s.push_str("</nav>");
     s
+}
+
+/// An external vocabulary term the ontology uses but does not define, with its
+/// concon resource-view href (Epic G).
+struct ExternalTerm {
+    iri: String,
+    display: String,
+    href: String,
+}
+
+/// External terms (used-not-defined), derived live from the dataset: IRIs that
+/// appear as an `rdfs:domain`/`rdfs:range` of a property or as an `rdf:type` in
+/// the data, restricted to the modelled external domain vocabularies
+/// (`entity::earns_local_view`: schema/prov/qudt/mls/cmso/mdo) and excluding our
+/// own `mlips#` terms (which ARE defined here) and the built-ins. Each gets its
+/// `_view` href so the doc becomes a gateway to the individuals of that type.
+fn external_terms(store: &Store, url_prefix: &str) -> Vec<ExternalTerm> {
+    let q = r#"SELECT DISTINCT ?t WHERE {
+        { ?p <http://www.w3.org/2000/01/rdf-schema#domain> ?t }
+        UNION { ?p <http://www.w3.org/2000/01/rdf-schema#range> ?t }
+        UNION { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }
+        FILTER(isIRI(?t))
+    }"#;
+    let mut out = Vec::new();
+    if let Ok(QueryResults::Solutions(sols)) = sparql_query_union(store, q) {
+        for sol in sols.flatten() {
+            let Some(term) = sol.get("t") else { continue };
+            let iri = term.to_string();
+            let iri = iri.trim_matches(|c| c == '<' || c == '>').to_string();
+            if entity::earns_local_view(&iri) && !iri.starts_with(MLIPS_TERM_NS) {
+                out.push(ExternalTerm {
+                    display: entity::short_form(&iri),
+                    href: entity::native_href(&iri, url_prefix),
+                    iri,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.display.cmp(&b.display));
+    out
+}
+
+/// The "External terms" appendix section (Epic G gateway): each term links to
+/// its `_view`. Well-formed XML; empty string when there are none.
+fn external_terms_section(external: &[ExternalTerm]) -> String {
+    if external.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "<section id=\"external-terms\" class=\"ccx-external\">\
+         <h2>External terms <span class=\"ccx-external-note\">— used, not defined here</span></h2>\
+         <p>Vocabulary terms this ontology references (in property domains/ranges and as instance types) but does not itself define. Each links to its concon resource view, which lists the individuals of that type in this dataset.</p>\
+         <ul class=\"ccx-external-list\">",
+    );
+    for t in external {
+        s.push_str(&format!(
+            "<li><a href=\"{href}\" title=\"{iri}\">{disp}</a></li>",
+            href = xml_escape(&t.href),
+            iri = xml_escape(&t.iri),
+            disp = xml_escape(&t.display),
+        ));
+    }
+    s.push_str("</ul></section>");
+    s
+}
+
+/// Insert `frag` just before the first module section (`<section id="…-module">`),
+/// so the table of contents sits below the title block + visualization figure.
+/// Falls back to the top of `<body>` if the document has no module sections.
+fn insert_before_first_module(doc: String, frag: &str) -> String {
+    let mut from = 0;
+    while let Some(rel) = doc[from..].find("<section") {
+        let start = from + rel;
+        let Some(gt) = doc[start..].find('>') else { break };
+        let tag = &doc[start..start + gt];
+        if attr_value(tag, "id").is_some_and(|id| id.ends_with("-module")) {
+            let mut out = String::with_capacity(doc.len() + frag.len());
+            out.push_str(&doc[..start]);
+            out.push_str(frag);
+            out.push_str(&doc[start..]);
+            return out;
+        }
+        from = start + gt + 1;
+    }
+    insert_after_body_open(doc, frag)
 }
 
 /// Value of attribute `name` within an element's attribute string `tag`.
@@ -427,6 +548,7 @@ mod tests {
              </body></html>"
                 .to_string(),
             "/mlips/_ds/mlips",
+            &[],
         );
         // Stylesheets in <head>.
         assert!(out.find("/static/ontology-doc.css").unwrap() < out.find("</head>").unwrap());
@@ -485,12 +607,46 @@ mod tests {
         let doc = "<section id=\"C\" class=\"term class\"></section>\
                    <section id=\"op\" class=\"term object-property\"></section>\
                    <section id=\"mod\" class=\"module\"></section>";
-        let toc = build_toc(doc);
+        let toc = build_toc(doc, &[]);
         assert!(toc.contains("href=\"#C\"") && toc.contains("Classes"));
         assert!(toc.contains("href=\"#op\"") && toc.contains("Object properties"));
         assert!(!toc.contains("#mod"), "non-term sections excluded");
-        // No terms → empty.
-        assert_eq!(build_toc("<section id=\"x\" class=\"module\"></section>"), "");
+        // No terms and no external → empty.
+        assert_eq!(build_toc("<section id=\"x\" class=\"module\"></section>", &[]), "");
+    }
+
+    #[test]
+    fn toc_repositions_below_figure_and_lists_external_terms() {
+        let external = vec![ExternalTerm {
+            iri: "https://schema.org/ScholarlyArticle".into(),
+            display: "schema:ScholarlyArticle".into(),
+            href: "/mlips/_ds/mlips/_view?iri=https%3A%2F%2Fschema.org%2FScholarlyArticle".into(),
+        }];
+        let doc = "<html><head></head><body>\
+             <section id=\"ontology-metadata\"><h1>T</h1></section>\
+             <section id=\"visualization\"><h2>Viz</h2></section>\
+             <section id=\"algorithm-module\"><h2>Algorithm</h2>\
+               <section id=\"Foo\" class=\"term class\"><h4>Foo</h4></section>\
+             </section>\
+             </body></html>"
+            .to_string();
+        let out = augment_doc(doc, "/mlips/_ds/mlips", &external);
+
+        // TOC sits AFTER the visualization figure and BEFORE the first module.
+        let toc = out.find("<nav id=\"toc\"").unwrap();
+        assert!(out.find("id=\"visualization\"").unwrap() < toc, "TOC after figure");
+        assert!(toc < out.find("id=\"algorithm-module\"").unwrap(), "TOC before first module");
+
+        // External-terms TOC group + appendix section, each linking to the _view.
+        assert!(out.contains("External terms"));
+        assert!(out.contains("id=\"external-terms\""));
+        assert_eq!(
+            out.matches("/_view?iri=https%3A%2F%2Fschema.org%2FScholarlyArticle").count(),
+            2,
+            "external term linked from both the TOC chip and the appendix"
+        );
+        // The appendix comes after the module content, before </body>.
+        assert!(out.find("id=\"algorithm-module\"").unwrap() < out.find("id=\"external-terms\"").unwrap());
     }
 
     #[test]
