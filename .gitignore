@@ -25,3 +25,9 @@ mlipe.toml
 system.ttl
 data/
 *~
+
+# Claude Code agent artifacts must never reach this public-mirrored repo.
+# Orchestration/coordination lives in the parent coordination repo
+# (concon-platform-project); contributor docs live in README.org / docs/.
+.claude/
+CLAUDE.md
