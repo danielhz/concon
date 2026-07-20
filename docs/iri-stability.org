@@ -1,0 +1,23 @@
+#+TITLE: Concon IRI Stability
+
+Concon can host public Linked Data resources — an ontology-document view, per-entity dereferencing, and content negotiation (see =url-design.org= and =edge-mapping.org=). A hosted resource's published identifiers must stay stable independently of where Concon runs. These rules apply to any code that serves or generates resource IRIs.
+
+* Identity vs. serving
+
+Two layers that must never be conflated:
+
+- *Identity layer* — the permanent IRIs that live in the RDF and are cited (e.g. =https://w3id.org/mlips#MLIPMethod=). These never change.
+- *Serving layer* — where the app actually runs (=<host>/team/_ds/dataset/…=). The host is swappable and *never appears in a canonical IRI*.
+
+The edge (nginx, or a w3id =.htaccess=) maps identity → serving. Concon serves at its native URLs; the edge redirects, preserving =Accept=.
+
+* Rules
+
+1. *Never mint a hosted resource's individuals under a Concon or serving-host namespace.* A resource keeps its own canonical IRIs; Concon serves them at native URLs but does not rename them.
+2. *The identity→serving mapping lives at the edge, not in the app.* Do not add resource-specific compatibility routes (e.g. =/mlips/…=) inside Concon.
+3. *The serving host must never appear in a canonical IRI.* Changing hosts must cost nothing in published identifiers.
+4. *Preserve the hash/slash split.* A resource's =#=-IRIs are one negotiated document (the client strips the fragment, fetches the single resource, and jumps to the =#Term= section); only slash IRIs (e.g. =…/entity/{id}=) need per-resource dereferencing (303 + negotiation).
+
+* Content negotiation
+
+Concon performs =Accept=-based negotiation at its native URLs (HTML doc, Turtle, RDF/XML, and — where available — N-Triples/JSON-LD with =rel=alternate=). The edge only redirects; it does not negotiate.
