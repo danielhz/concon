@@ -558,6 +558,7 @@ async fn content_post(
                 | Some("_mcp")
                 | Some("_update")
                 | Some("_graph")
+                | Some("_recompute")
                 | Some("_shacl/_query")
                 | Some("_shacl/_update")
         ),
@@ -650,7 +651,14 @@ async fn content_post(
                     }
                     match sparql::sparql_update_post(&state, &qualified, &headers, &body_str).await
                     {
-                        Ok(status) => status.into_response(),
+                        Ok(status) => {
+                            // Keep the derived graph coherent after an update that
+                            // may have touched a source graph (or written
+                            // `computed` directly — such writes are not durable;
+                            // the rebuild erases them). Epic M2.
+                            ingest::recompute_after_update(&state, &qualified);
+                            status.into_response()
+                        }
                         Err(e) => e.into_response(),
                     }
                 }
@@ -661,6 +669,14 @@ async fn content_post(
                         return r;
                     }
                     ingest::post_graph(&state, &qualified, gparams.graph.as_deref(), &headers, &body)
+                }
+                Some("_recompute") => {
+                    if let Err(r) =
+                        ingest::authorize_write(&state, &headers, &cookies, &qualified)
+                    {
+                        return r;
+                    }
+                    ingest::recompute_graph(&state, &qualified)
                 }
                 Some("_shacl/_query") => {
                     let shacl_store = state.store_manager.get_or_create_shacl_store(&qualified);
