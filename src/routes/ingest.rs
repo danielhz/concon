@@ -23,9 +23,11 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::model::{GraphName, NamedNode};
+use oxigraph::store::Store;
 use tower_cookies::Cookies;
 
 use super::{ontology, web};
+use crate::inference;
 use crate::state::AppState;
 use crate::store::DOC_INDEX_FILE;
 
@@ -125,6 +127,57 @@ fn dataset_store(state: &AppState, dataset_name: &str) -> Result<oxigraph::store
     })
 }
 
+/// Reject a consumer write to the concon-derived `…/graph/computed` graph
+/// (Epic M3): it is read-only to consumers and rebuilt automatically from the
+/// source graphs. Returns `Some(409)` when `node` addresses that graph.
+fn reject_if_computed(node: &NamedNode) -> Option<Response> {
+    inference::is_reserved_computed_graph(node.as_str()).then(|| {
+        (
+            StatusCode::CONFLICT,
+            "The '…/graph/computed' graph is concon-derived and read-only; it is rebuilt \
+             automatically from the source graphs after each ingest. Use `POST _recompute` \
+             to force a rebuild.",
+        )
+            .into_response()
+    })
+}
+
+/// Rebuild the dataset's derived `computed` graph after a source-graph write
+/// (Epic M2 auto-recompute). Best-effort: the source write already succeeded,
+/// so a rebuild failure is logged and swallowed (the derived graph is left
+/// stale until the next successful recompute) rather than failing the write.
+fn auto_recompute(store: &Store, dataset_name: &str) {
+    match inference::recompute(store) {
+        Ok(report) => {
+            if let Some(graph) = &report.computed_graph {
+                tracing::info!(
+                    dataset = dataset_name,
+                    graph = graph.as_str(),
+                    inserted = report.inserted,
+                    "recomputed derived graph"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
+            dataset = dataset_name,
+            error = %e,
+            "auto-recompute of derived graph failed; it is left stale"
+        ),
+    }
+}
+
+/// Rebuild `computed` after a successful `_update` (Epic M2). A SPARQL update
+/// can touch source graphs — leaving `computed` stale — or write `computed`
+/// directly (the 409 read-only guard only covers `_graph`, not arbitrary
+/// `_update`). Recomputing after every successful update keeps `computed`
+/// coherent and makes any `_update`-written `computed` triples non-durable (the
+/// rebuild clears and re-derives). Best-effort, like [`auto_recompute`].
+pub(crate) fn recompute_after_update(state: &AppState, dataset_name: &str) {
+    if let Some(store) = state.store_manager.get_dataset(dataset_name) {
+        auto_recompute(&store, dataset_name);
+    }
+}
+
 /// `PUT _graph` — replace a named graph: clear it, then load the body into it.
 /// Idempotent replace-by-graph (not atomic across the clear+load; a re-PUT
 /// recovers from a mid-load failure).
@@ -143,10 +196,17 @@ pub fn put_graph(
         Ok(n) => n,
         Err(r) => return r,
     };
+    if let Some(r) = reject_if_computed(&node) {
+        return r;
+    }
     if store.clear_graph(node.as_ref()).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to clear graph").into_response();
     }
-    load_into_graph(&store, node, body_format(headers), body)
+    let resp = load_into_graph(&store, node, body_format(headers), body);
+    if resp.status() == StatusCode::NO_CONTENT {
+        auto_recompute(&store, dataset_name);
+    }
+    resp
 }
 
 /// `POST _graph` — merge the body into a named graph (no clear).
@@ -165,7 +225,14 @@ pub fn post_graph(
         Ok(n) => n,
         Err(r) => return r,
     };
-    load_into_graph(&store, node, body_format(headers), body)
+    if let Some(r) = reject_if_computed(&node) {
+        return r;
+    }
+    let resp = load_into_graph(&store, node, body_format(headers), body);
+    if resp.status() == StatusCode::NO_CONTENT {
+        auto_recompute(&store, dataset_name);
+    }
+    resp
 }
 
 fn load_into_graph(
@@ -191,9 +258,32 @@ pub fn delete_graph(state: &AppState, dataset_name: &str, graph: Option<&str>) -
         Ok(n) => n,
         Err(r) => return r,
     };
+    if let Some(r) = reject_if_computed(&node) {
+        return r;
+    }
     match store.clear_graph(node.as_ref()) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            auto_recompute(&store, dataset_name);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to clear graph").into_response(),
+    }
+}
+
+/// `POST _recompute` — force a full rebuild of the dataset's derived `computed`
+/// graph (Epic M2 explicit trigger), e.g. after a rule change or a missed
+/// auto-recompute. Write-authorized (checked by the caller). Returns a JSON
+/// summary of the rebuild.
+pub fn recompute_graph(state: &AppState, dataset_name: &str) -> Response {
+    let store = match dataset_store(state, dataset_name) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match inference::recompute(&store) {
+        Ok(report) => (StatusCode::OK, axum::Json(report)).into_response(),
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Recompute failed: {e}")).into_response()
+        }
     }
 }
 
@@ -384,5 +474,111 @@ mod tests {
         assert!(!ct_eq("token", "tokem"));
         assert!(!ct_eq("token", "tok"));
         assert!(!ct_eq("", "x"));
+    }
+
+    // ---- Epic M: inference triggers + read-only computed graph ----
+
+    /// PUT to the reserved `…/graph/computed` graph is rejected (409) even with
+    /// valid write auth: it is concon-derived and read-only (M3).
+    #[tokio::test]
+    async fn test_put_computed_graph_rejected() {
+        let server = TestServer::new(create_router(setup_state()));
+        let r = server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/computed")
+            .add_header("authorization", basic_header("admin", "secret"))
+            .add_header("content-type", "text/turtle")
+            .text("<urn:s> <urn:p> <urn:o> .")
+            .await;
+        r.assert_status(StatusCode::CONFLICT);
+    }
+
+    /// DELETE to the reserved computed graph is likewise rejected.
+    #[tokio::test]
+    async fn test_delete_computed_graph_rejected() {
+        let server = TestServer::new(create_router(setup_state()));
+        let r = server
+            .delete("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/computed")
+            .add_header("authorization", basic_header("admin", "secret"))
+            .await;
+        r.assert_status(StatusCode::CONFLICT);
+    }
+
+    /// After a source-graph PUT with an `owl:inverseOf` declaration and a
+    /// forward triple, auto-recompute materializes the inverse into `computed`,
+    /// visible through the public union `_sparql` endpoint.
+    #[tokio::test]
+    async fn test_put_source_auto_recomputes_inverse() {
+        let server = TestServer::new(create_router(setup_state()));
+        let ttl = "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+                   @prefix ex: <https://w3id.org/mlips#> .\n\
+                   ex:hasResult owl:inverseOf ex:isResultOf .\n\
+                   ex:study ex:hasResult ex:r .";
+        server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/kg")
+            .add_header("authorization", basic_header("admin", "secret"))
+            .add_header("content-type", "text/turtle")
+            .text(ttl)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        // The inverse triple is derived (not uploaded) and visible in the union.
+        let q = server
+            .get("/_ds/pubds/_sparql")
+            .add_query_param(
+                "query",
+                "ASK { <https://w3id.org/mlips#r> \
+                 <https://w3id.org/mlips#isResultOf> <https://w3id.org/mlips#study> }",
+            )
+            .await;
+        q.assert_status_ok();
+        assert!(q.text().contains("true"), "inverse should be auto-materialized");
+
+        // And it lives specifically in the computed graph.
+        let g = server
+            .get("/_ds/pubds/_sparql")
+            .add_query_param(
+                "query",
+                "ASK { GRAPH <https://w3id.org/mlips/graph/computed> { \
+                 <https://w3id.org/mlips#r> <https://w3id.org/mlips#isResultOf> \
+                 <https://w3id.org/mlips#study> } }",
+            )
+            .await;
+        assert!(g.text().contains("true"), "derived triple should be in computed graph");
+    }
+
+    /// `POST _recompute` requires write auth and returns a JSON summary.
+    #[tokio::test]
+    async fn test_recompute_endpoint_auth_and_summary() {
+        let server = TestServer::new(create_router(setup_state()));
+
+        // Unauthenticated → 401.
+        server
+            .post("/_ds/pubds/_recompute")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+
+        // Load a source graph, then force a rebuild.
+        server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/schema")
+            .add_header("authorization", basic_header("admin", "secret"))
+            .add_header("content-type", "text/turtle")
+            .text("<urn:a> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <urn:b> .")
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let r = server
+            .post("/_ds/pubds/_recompute")
+            .add_header("authorization", basic_header("admin", "secret"))
+            .await;
+        r.assert_status_ok();
+        let body: serde_json::Value = r.json();
+        assert_eq!(
+            body["computed_graph"], "https://w3id.org/mlips/graph/computed",
+            "summary reports the derived graph IRI"
+        );
     }
 }
