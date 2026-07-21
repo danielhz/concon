@@ -159,7 +159,7 @@ fn graph_format_from_accept(headers: &HeaderMap) -> RdfFormat {
 /// DESCRIBE results are serialized directly from the result iterator — they are
 /// NOT inserted back into the store (the previous code did, which let an
 /// anonymous CONSTRUCT mutate the dataset and dump the whole default graph).
-fn format_results(
+pub(crate) fn format_results(
     results: QueryResults,
     graph_format: RdfFormat,
 ) -> Result<(HeaderMap, String), (StatusCode, String)> {

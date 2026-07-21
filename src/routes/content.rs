@@ -7,6 +7,7 @@ use tower_cookies::Cookies;
 use super::entity;
 use super::files;
 use super::ingest;
+use super::mcp;
 use super::ontology;
 use super::sparql;
 use super::web;
@@ -243,7 +244,12 @@ async fn content_get(
             // login inside the handler.
             !matches!(
                 view.as_deref(),
-                Some("_sparql") | Some("_query") | Some("_entity") | Some("_view") | None
+                Some("_sparql")
+                    | Some("_mcp")
+                    | Some("_query")
+                    | Some("_entity")
+                    | Some("_view")
+                    | None
             )
         }
         ParsedPath::FileCatalog { view, .. } => view.as_deref() != Some("_query"),
@@ -320,6 +326,10 @@ async fn content_get(
                         Err(e) => e.into_response(),
                     }
                 }
+                // MCP is POST-only (JSON-RPC); a GET declines the (absent) event
+                // stream. The public-read gate above already 404'd private
+                // datasets for anonymous callers, so this leaks nothing.
+                Some("_mcp") => mcp::handle_get(),
                 // Generic resource view for an arbitrary IRI (Epic G). Entities
                 // keep the short `_entity/{id}` form above; this handles local
                 // terms and external domain-vocab terms addressed by full IRI.
@@ -545,6 +555,7 @@ async fn content_post(
         ParsedPath::DatasetView { view, .. } => !matches!(
             view.as_deref(),
             Some("_sparql")
+                | Some("_mcp")
                 | Some("_update")
                 | Some("_graph")
                 | Some("_shacl/_query")
@@ -559,11 +570,13 @@ async fn content_post(
         return axum::response::Redirect::to("/_login").into_response();
     }
 
-    // Minimal Public-read gate for the read-via-POST endpoint: anonymous
-    // `_sparql` POST is allowed only on Public datasets. Write views enforce
-    // their own write auth (see `ingest::authorize_write`) in the handler.
+    // Minimal Public-read gate for the read-via-POST endpoints: anonymous
+    // `_sparql` and `_mcp` POST is allowed only on Public datasets (both are
+    // read-only query surfaces). Write views enforce their own write auth (see
+    // `ingest::authorize_write`) in the handler.
     let anon_sparql_post = session.is_none()
-        && matches!(&parsed, ParsedPath::DatasetView { view, .. } if view.as_deref() == Some("_sparql"));
+        && matches!(&parsed, ParsedPath::DatasetView { view, .. }
+            if matches!(view.as_deref(), Some("_sparql") | Some("_mcp")));
     if anon_sparql_post
         && !crate::auth::is_dataset_public(
             &state.store_manager.system,
@@ -626,6 +639,9 @@ async fn content_post(
                         Err(e) => e.into_response(),
                     }
                 }
+                // MCP JSON-RPC. Visibility already enforced above (anon → public
+                // datasets only); the endpoint is read-only and capped.
+                Some("_mcp") => mcp::handle(&state, &qualified, &body_str),
                 Some("_update") => {
                     if let Err(r) =
                         ingest::authorize_write(&state, &headers, &cookies, &qualified)
