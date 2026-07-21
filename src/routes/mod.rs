@@ -4,6 +4,7 @@ mod entity;
 pub mod files;
 mod health;
 mod ingest;
+mod mcp;
 mod ontology;
 mod sparql;
 pub mod web;
