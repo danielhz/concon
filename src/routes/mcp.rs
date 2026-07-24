@@ -113,7 +113,10 @@ fn tools_list() -> Value {
                 prefix header, the classes (curie · label · comment), the properties \
                 (curie · label · domain→range · comment), and competency-question \
                 question→SPARQL example pairs. Everything is derived from the dataset's own \
-                graphs. Call this FIRST to learn the vocabulary before writing SPARQL.",
+                graphs. Call this FIRST to learn the vocabulary before writing SPARQL. Note: \
+                when a property declares more than one domain or range, one representative \
+                value is shown (not authoritative) — query rdfs:domain/rdfs:range directly \
+                with run-sparql if you need the full set.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -121,7 +124,9 @@ fn tools_list() -> Value {
             "description": "Execute a read-only SPARQL 1.1 query (SELECT/ASK return \
                 SPARQL-results JSON; CONSTRUCT/DESCRIBE return Turtle) against this dataset's \
                 union graph. Query-only: UPDATE requests are rejected. Bounded at 30 seconds \
-                and 10000 result rows (truncation is flagged in the output).",
+                and 10000 result rows; if the cap is hit the first content block still holds \
+                the well-formed (truncated) data and a second content block notes the \
+                truncation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -149,7 +154,22 @@ fn handle_tools_call(state: &AppState, dataset_name: &str, id: Value, params: &V
                 return tool_error(id, "Missing required 'query' argument");
             };
             match run_sparql(&store, query) {
-                Ok(text) => tool_text(id, text),
+                Ok((body, truncated)) => {
+                    // Data goes in its own block, kept well-formed; truncation
+                    // (if any) is a separate note block so parsing the data
+                    // never has to strip a trailer.
+                    let mut content = vec![json!({ "type": "text", "text": body })];
+                    if truncated {
+                        content.push(json!({
+                            "type": "text",
+                            "text": "Note: the result set was truncated at 10000 rows \
+                                (the maximum this endpoint returns). The data block above is \
+                                well-formed and complete up to that cap; narrow the query \
+                                (add filters, LIMIT, or paginate) to see more."
+                        }));
+                    }
+                    rpc_result(id, json!({ "content": content, "isError": false }))
+                }
                 Err(msg) => tool_error(id, &msg),
             }
         }
@@ -161,16 +181,18 @@ fn handle_tools_call(state: &AppState, dataset_name: &str, id: Value, params: &V
 /// same row-cap logic as `_sparql`. Reuses `sparql::format_results` so there is
 /// exactly one hardened serialization surface. UPDATE strings fail to parse as
 /// a query and surface as a tool error.
-fn run_sparql(store: &Store, query: &str) -> Result<String, String> {
+///
+/// Returns `(body, truncated)`. The `body` is left **well-formed** (valid
+/// SPARQL-results JSON or Turtle) even when the 10k-row cap fires — truncation
+/// is reported by the caller in a *separate* MCP content block, never spliced
+/// into the data, so an agent can always parse the first block.
+fn run_sparql(store: &Store, query: &str) -> Result<(String, bool), String> {
     let results =
         sparql_query_union_timeout(store, query, QUERY_TIMEOUT).map_err(|e| e.to_string())?;
     let (headers, body) =
         sparql::format_results(results, RdfFormat::Turtle).map_err(|(_, msg)| msg)?;
-    let mut text = body;
-    if headers.contains_key("x-concon-results-truncated") {
-        text.push_str("\n\n[results truncated at 10000 rows]");
-    }
-    Ok(text)
+    let truncated = headers.contains_key("x-concon-results-truncated");
+    Ok((body, truncated))
 }
 
 // ---------------------------------------------------------------------------
@@ -697,5 +719,48 @@ mod tests {
         assert_eq!(resp["result"]["isError"], false);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("# Classes (0)"), "got:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn test_run_sparql_truncation_keeps_data_parseable() {
+        let (server, state) = server_and_state();
+        // Insert > MAX_RESULT_ROWS (10 000) triples so a SELECT over them trips
+        // the cap and truncation fires.
+        let store = state.store_manager.get_dataset("root/pub").unwrap();
+        let mut insert = String::from("INSERT DATA { GRAPH <http://example.org/big> {\n");
+        for i in 0..10_001 {
+            insert.push_str(&format!(
+                "<http://example.org/s{i}> <http://example.org/p> \"v{i}\" .\n"
+            ));
+        }
+        insert.push_str("} }");
+        sparql_update(&store, &insert).unwrap();
+
+        let resp = rpc(
+            &server,
+            "pub",
+            json!({"jsonrpc":"2.0","id":11,"method":"tools/call",
+                   "params":{"name":"run-sparql",
+                             "arguments":{"query":"SELECT ?s ?p ?o WHERE { ?s ?p ?o }"}}}),
+        )
+        .await;
+
+        assert_eq!(resp["result"]["isError"], false);
+        let content = resp["result"]["content"].as_array().unwrap();
+        // Two content blocks: the well-formed data, then a separate truncation
+        // note — never spliced together (the finding-#1 regression guard).
+        assert_eq!(content.len(), 2, "expected data + truncation-note blocks");
+        // The data block MUST still parse as SPARQL-results JSON (the old bug
+        // appended a trailer that made it invalid) and be capped at 10 000 rows.
+        let data = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(data).expect("data block must be valid JSON");
+        assert_eq!(
+            parsed["results"]["bindings"].as_array().unwrap().len(),
+            10_000
+        );
+        assert!(
+            content[1]["text"].as_str().unwrap().contains("truncated"),
+            "second block should note truncation"
+        );
     }
 }
