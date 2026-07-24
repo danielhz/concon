@@ -35,9 +35,14 @@
 {% endblock %}
 
 {% block content %}
-<h1 style="word-break: break-all;">{{ subject_short }}</h1>
+<h1 style="word-break: break-all;">
+    <a href="/">Home</a> /
+    <a href="{{ team_href }}">{{ team_label }}</a> /
+    <a href="{{ dataset_base }}/_query">{{ dataset_label }}</a> /
+    {{ subject_short }}
+</h1>
 <p class="entity-iri">&lt;{{ subject_iri }}&gt;
-  <a class="defined-at" href="{{ defined_at }}" title="{{ defined_at }} — the canonical IRI, resolved by its defining authority">↗ defined at {{ defined_at_authority }}</a>
+  <a class="defined-at" href="{{ defined_at }}" title="{{ defined_at }} — the canonical IRI, resolved by its defining authority">↗ canonical URL</a>
 </p>
 {% if label %}<p class="entity-label">{{ label }}</p>{% endif %}
 {% if types %}

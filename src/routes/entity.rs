@@ -22,6 +22,7 @@ use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 use serde::Serialize;
 
+use super::ontology;
 use crate::state::AppState;
 use crate::store::{sparql_query_union, sparql_update};
 
@@ -154,18 +155,6 @@ const VIEWABLE_NAMESPACES: &[&str] = &[
 /// the short `_entity/{id}` form).
 pub(crate) fn earns_local_view(iri: &str) -> bool {
     VIEWABLE_NAMESPACES.iter().any(|ns| iri.starts_with(ns))
-}
-
-/// The authority (host) of an IRI, for labelling the uniform "↗ defined at"
-/// out-link — e.g. `w3id.org` for our terms/entities, `schema.org` for a
-/// schema.org term. Uniform (no per-kind special-casing): the canonical IRI
-/// names where the resource is defined, and this just surfaces its authority.
-/// Falls back to the whole IRI if it has no recognisable `scheme://host`.
-fn iri_authority(iri: &str) -> String {
-    iri.split_once("://")
-        .map(|(_, rest)| rest.split(['/', '#', '?']).next().unwrap_or(rest))
-        .unwrap_or(iri)
-        .to_string()
 }
 
 /// Map a target IRI to a URL the browser can follow, keeping navigation inside
@@ -771,6 +760,10 @@ pub async fn serve_resource(
             let annotations = annotations_of(&store, &subject_iri);
             let can_annotate = username.is_some();
 
+            // Breadcrumb (Home / <team> / <dataset> / <entity>), same parts as
+            // the ontology-doc chrome; the entity itself is the <h1> text.
+            let (team_href, team_label, dataset_label) = ontology::breadcrumb_parts(url_prefix);
+
             let tmpl = match state.templates.get_template("entity.html") {
                 Ok(t) => t,
                 Err(_) => {
@@ -785,11 +778,13 @@ pub async fn serve_resource(
                 // an entity, `_view?iri=…` for any other resource); also the
                 // base for the "Other formats" content-negotiated fetches.
                 self_href => native_href(&subject_iri, url_prefix),
-                // "↗ defined at": the subject's own canonical IRI (Epic G3). For
-                // a term this resolves to its defining authority (our doc, or
-                // schema.org, …); for an entity, to itself.
+                // "↗ canonical URL": the subject's own canonical IRI (Epic G3).
+                // For a term this resolves to its defining authority (our doc,
+                // or schema.org, …); for an entity, to itself.
                 defined_at => &subject_iri,
-                defined_at_authority => iri_authority(&subject_iri),
+                team_href => team_href,
+                team_label => team_label,
+                dataset_label => dataset_label,
                 label => label,
                 kind => kind,
                 types => &types,
@@ -881,15 +876,6 @@ mod tests {
             native_href("http://www.w3.org/2001/XMLSchema#string", "/mlips/_ds/mlips"),
             "http://www.w3.org/2001/XMLSchema#string"
         );
-    }
-
-    #[test]
-    fn test_iri_authority() {
-        assert_eq!(iri_authority("https://w3id.org/mlips#MLIPMethod"), "w3id.org");
-        assert_eq!(iri_authority("https://w3id.org/mlips/entity/kumar2025"), "w3id.org");
-        assert_eq!(iri_authority("https://schema.org/ScholarlyArticle"), "schema.org");
-        assert_eq!(iri_authority("http://qudt.org/schema/qudt/Unit"), "qudt.org");
-        assert_eq!(iri_authority("mailto:x"), "mailto:x"); // no scheme://host → whole IRI
     }
 
     #[test]
