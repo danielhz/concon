@@ -223,8 +223,15 @@
         rows.forEach(function (b) {
           var item = document.createElement("div");
           item.className = "ccx-cq";
+          // Anchor the item at its identifier so fragment links (…/#CQ1)
+          // resolve to the question; the heading self-links the anchor.
+          item.id = b.id.value;
           var hd = document.createElement("h3");
-          hd.textContent = b.id.value + (b.label ? " — " + b.label.value : "");
+          var link = document.createElement("a");
+          link.href = "#" + b.id.value;
+          link.textContent = b.id.value;
+          hd.appendChild(link);
+          if (b.label) hd.appendChild(document.createTextNode(" — " + b.label.value));
           item.appendChild(hd);
           var p = document.createElement("p");
           p.className = "ccx-cq-q";
@@ -239,6 +246,12 @@
           section.appendChild(item);
         });
         document.body.appendChild(section);
+        // The section renders after page load, so the browser's initial
+        // fragment scroll ran before any CQ anchor existed — re-resolve it.
+        if (location.hash) {
+          var target = document.getElementById(location.hash.slice(1));
+          if (target && section.contains(target)) target.scrollIntoView();
+        }
       })
       .catch(function () {
         /* no cq graph: skip the section */

@@ -76,7 +76,9 @@ pub fn serve_doc(state: &AppState, dataset_name: &str, url_prefix: &str) -> Resp
 ///   - before `</body>`: the explore-enhancer `<script>` (B2/B3 controls + CQ
 ///     section; it builds its DOM via createElement, i.e. well-formed nodes).
 ///
-/// The curated document body is otherwise untouched (no regeneration).
+/// It also wraps each per-term OWL/XML axiom block in a collapsed native
+/// `<details>` (`collapse_owl_xml`); the curated document body is otherwise
+/// untouched (no regeneration).
 fn augment_doc(doc: String, url_prefix: &str, external: &[ExternalTerm]) -> String {
     // Stylesheets plus `rel="alternate"` pointers so a tool that lands on the
     // document (no RDF `Accept` header) can discover the machine-readable RDF.
@@ -103,6 +105,7 @@ fn augment_doc(doc: String, url_prefix: &str, external: &[ExternalTerm]) -> Stri
         p = url_prefix
     );
     let doc = inject_view_links(doc, url_prefix);
+    let doc = collapse_owl_xml(doc);
     let doc = insert_before(doc, "</head>", &head);
     // Chrome stays at the top of <body>; the generated table of contents moves
     // below the title block + visualization figure (before the first module).
@@ -164,6 +167,39 @@ fn inject_view_links(doc: String, url_prefix: &str) -> String {
     let mut out = doc;
     for (pos, frag) in inserts.into_iter().rev() {
         out.insert_str(pos, &frag);
+    }
+    out
+}
+
+/// Epic O1: hide each verbatim OWL/XML axiom block (`<pre class="owl-xml">…`
+/// `</pre>`) behind a native `<details>` disclosure, collapsed by default —
+/// the axiom serialization is secondary content but visually dominates each
+/// term section when inline. Native `<details>`/`<summary>` only (no JS), and
+/// the wrapper is well-formed XML (the doc is served application/xhtml+xml);
+/// the `<pre>` and its CDATA content are moved verbatim, never rewritten.
+fn collapse_owl_xml(doc: String) -> String {
+    const OPEN: &str = "<details class=\"ccx-owl-xml\"><summary>OWL/XML</summary>";
+    const CLOSE: &str = "</details>";
+    let mut inserts: Vec<(usize, &str)> = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = doc[from..].find("<pre") {
+        let pre_start = from + rel;
+        let Some(gt_rel) = doc[pre_start..].find('>') else { break };
+        let tag = &doc[pre_start..pre_start + gt_rel];
+        from = pre_start + gt_rel + 1;
+        if !attr_value(tag, "class").unwrap_or("").contains("owl-xml") {
+            continue;
+        }
+        let Some(close_rel) = doc[from..].find("</pre>") else { break };
+        let close_end = from + close_rel + "</pre>".len();
+        inserts.push((pre_start, OPEN));
+        inserts.push((close_end, CLOSE));
+        from = close_end;
+    }
+    // Splice right-to-left so earlier byte offsets stay valid.
+    let mut out = doc;
+    for (pos, frag) in inserts.into_iter().rev() {
+        out.insert_str(pos, frag);
     }
     out
 }
@@ -544,7 +580,8 @@ mod tests {
     fn test_augment_doc_injects_assets_chrome_toc() {
         let out = augment_doc(
             "<html><head></head><body>\
-             <section id=\"Foo\" class=\"term class\"><h4>Foo</h4></section>\
+             <section id=\"Foo\" class=\"term class\"><h4>Foo</h4>\
+             <pre class=\"owl-xml\"><![CDATA[<owl:Class/>]]></pre></section>\
              </body></html>"
                 .to_string(),
             "/mlips/_ds/mlips",
@@ -575,8 +612,13 @@ mod tests {
             assert!(out.contains(&link), "missing alternate link for {media}");
             assert!(out.find(&link).unwrap() < head_end, "{media} link not in <head>");
         }
-        // Original content preserved.
+        // Original content preserved; the OWL/XML axiom block is collapsed
+        // behind a closed <details> (Epic O1).
         assert!(out.contains("<h4>Foo</h4>"));
+        assert!(out.contains(
+            "<details class=\"ccx-owl-xml\"><summary>OWL/XML</summary>\
+             <pre class=\"owl-xml\"><![CDATA[<owl:Class/>]]></pre></details>"
+        ));
     }
 
     #[test]
@@ -600,6 +642,35 @@ mod tests {
         // unchanged) and the non-term section gets no link.
         assert!(out.contains("id=\"Hyperparameter\""));
         assert_eq!(out.matches("ccx-view-link").count(), 1);
+    }
+
+    #[test]
+    fn collapse_owl_xml_wraps_axiom_blocks_in_closed_details() {
+        let doc = "<body>\
+             <section id=\"A\" class=\"term class\"><h4>A</h4>\
+               <pre class=\"owl-xml\"><![CDATA[<owl:Class rdf:about=\"#A\"/>]]></pre>\
+             </section>\
+             <section id=\"B\" class=\"term class\"><h4>B</h4>\
+               <pre class=\"owl-xml\"><![CDATA[<owl:Class rdf:about=\"#B\"/>]]></pre>\
+             </section>\
+             <pre class=\"ccx-cq-sparql\">SELECT * WHERE { ?s ?p ?o }</pre>\
+             </body>"
+            .to_string();
+        let out = collapse_owl_xml(doc);
+        // Every owl-xml block is wrapped — and only those (the SPARQL pre is
+        // untouched), each in its own balanced, closed-by-default disclosure.
+        assert_eq!(out.matches("<details class=\"ccx-owl-xml\">").count(), 2);
+        assert_eq!(out.matches("<summary>OWL/XML</summary>").count(), 2);
+        assert_eq!(out.matches("</details>").count(), 2);
+        assert!(!out.contains("<details open"), "collapsed by default");
+        assert!(out.contains(
+            "<details class=\"ccx-owl-xml\"><summary>OWL/XML</summary>\
+             <pre class=\"owl-xml\"><![CDATA[<owl:Class rdf:about=\"#A\"/>]]></pre></details>"
+        ), "pre + CDATA moved verbatim inside the disclosure");
+        assert!(out.contains("<pre class=\"ccx-cq-sparql\">SELECT * WHERE { ?s ?p ?o }</pre>"));
+        // No owl-xml blocks → identity.
+        let plain = "<body><pre class=\"other\">x</pre></body>".to_string();
+        assert_eq!(collapse_owl_xml(plain.clone()), plain);
     }
 
     #[test]
