@@ -132,8 +132,9 @@ CURL="curl -fsS -H \"Authorization: Bearer $CONCON_INGEST_TOKEN\""   # secret fr
 $CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @schema.ttl   "$BASE/_graph?graph=https://w3id.org/mlips/graph/schema"
 $CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @vocab.ttl    "$BASE/_graph?graph=https://w3id.org/mlips/graph/vocab"
 $CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @kg.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/kg"
-$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @computed.ttl "$BASE/_graph?graph=https://w3id.org/mlips/graph/computed"
 $CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @cq.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/cq"
+# NOTE: do NOT PUT `…/graph/computed` — it is concon-derived (Epic M) and read-only;
+# a PUT to it returns 409. concon auto-recomputes it after each source-graph PUT above.
 
 # Curated document + its stylesheet (served at the dataset base, augmented later).
 $CURL -X PUT -H 'Content-Type: application/xhtml+xml' --data-binary @mlips.source.xhtml "$BASE/_doc"
@@ -141,6 +142,12 @@ $CURL -X PUT -H 'Content-Type: text/css'              --data-binary @mlips.css  
 #+end_src
 
 (Graph names and the schema/vocab split are the blessed ingest contract; @coder finalises the per-graph file boundaries. Writes require auth; anonymous reads require the dataset to be Public.)
+
+The =…/graph/computed= graph (inferred inverses, subclass/domain/range closure, …) is *materialised by concon*, not uploaded (Epic M): each source-graph PUT above triggers an automatic recompute. Consumers must *not* PUT =computed= — it is server-derived and read-only (a PUT returns =409=). For a dataset that was *loaded before Epic M shipped* (so its source graphs are already present and no further PUT is imminent), force the first build once with an authenticated recompute:
+
+#+begin_src bash
+$CURL -X POST "$BASE/_recompute"    # one-time per pre-existing dataset; returns a JSON rebuild summary
+#+end_src
 
 * Staging verification
 
