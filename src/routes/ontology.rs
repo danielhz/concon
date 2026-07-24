@@ -225,7 +225,7 @@ fn chrome_fragment(url_prefix: &str) -> String {
 
 /// Parse `url_prefix` (e.g. `/mlips/_ds/mlips`) into (team href, team label,
 /// dataset label) for the breadcrumb.
-fn breadcrumb_parts(url_prefix: &str) -> (String, String, String) {
+pub(crate) fn breadcrumb_parts(url_prefix: &str) -> (String, String, String) {
     let (team_path, dataset) = match url_prefix.split_once("/_ds/") {
         Some((t, d)) => (t.trim_matches('/'), d.trim_matches('/')),
         None => ("", url_prefix.trim_matches('/')),
