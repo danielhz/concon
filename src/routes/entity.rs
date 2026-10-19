@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use super::ontology;
 use crate::state::AppState;
-use crate::store::{sparql_query_union, sparql_update};
+use crate::store::{QUERY_TIMEOUT, sparql_query_union, sparql_query_union_timeout, sparql_update};
 
 // Epic H — annotations. An `oa:Annotation` per note, targeting the resource
 // IRI, kept in its own named graph (out of the ontology/KG graphs).
@@ -281,7 +281,7 @@ fn forward_rows(store: &Store, subject_iri: &str) -> Vec<PropertyRow> {
     rows
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ReverseRow {
     source_iri: String,
     source_href: String,
@@ -295,12 +295,22 @@ struct ReverseRow {
 }
 
 /// Reverse triples `?s ?p <object>`, with labels in the same query.
-fn reverse_rows(store: &Store, object_iri: &str) -> Vec<ReverseRow> {
+/// Reverse links of `object_iri` (the "Referenced by" table). With
+/// `exclude_type_links`, the `?s rdf:type <object_iri>` rows are left out —
+/// on a class view they are exactly the (collapsed, paginated) instance list
+/// (issue #4), and listing every instance again below it defeats the collapse.
+fn reverse_rows(store: &Store, object_iri: &str, exclude_type_links: bool) -> Vec<ReverseRow> {
     // GROUP BY + SAMPLE so multi-labelled subjects/predicates don't multiply
     // rows (see `forward_rows`).
+    let type_filter = if exclude_type_links {
+        format!("FILTER(?p != <{RDF_TYPE}>)")
+    } else {
+        String::new()
+    };
     let q = format!(
         r#"SELECT ?s ?p (SAMPLE(?sl) AS ?slab) (SAMPLE(?pl) AS ?plab) WHERE {{
             ?s ?p <{object_iri}> .
+            {type_filter}
             OPTIONAL {{ ?s <{RDFS_LABEL}> ?sl }}
             OPTIONAL {{ ?p <{RDFS_LABEL}> ?pl }}
         }} GROUP BY ?s ?p ORDER BY ?p ?s"#
@@ -544,7 +554,11 @@ struct LinkRow {
 /// class-instance and property-usage lists.
 fn link_rows(store: &Store, query: &str, var: &str, url_prefix: &str) -> Vec<LinkRow> {
     let mut rows = Vec::new();
-    if let Ok(QueryResults::Solutions(sols)) = sparql_query_union(store, query) {
+    // Bounded like the public `_sparql` endpoint: a page of a very large
+    // class must not hold a worker indefinitely.
+    if let Ok(QueryResults::Solutions(sols)) =
+        sparql_query_union_timeout(store, query, QUERY_TIMEOUT)
+    {
         for sol in sols.flatten() {
             if let Some(Term::NamedNode(n)) = sol.get(var) {
                 let iri = n.as_str().to_string();
@@ -560,24 +574,39 @@ fn link_rows(store: &Store, query: &str, var: &str, url_prefix: &str) -> Vec<Lin
     rows
 }
 
-/// Run a `SELECT (COUNT(DISTINCT ?x) AS ?n)` query and return the count
-/// (0 on any error or missing binding).
+/// Run a `SELECT (COUNT(DISTINCT ?x) AS ?n)` query and return the count.
+/// A failed or timed-out query counts as 0 (the list then renders empty), and
+/// is logged so that state is diagnosable.
 fn count_query(store: &Store, query: &str) -> usize {
-    if let Ok(QueryResults::Solutions(mut sols)) = sparql_query_union(store, query)
-        && let Some(Ok(sol)) = sols.next()
-        && let Some(Term::Literal(lit)) = sol.get("n")
-    {
-        return lit.value().parse().unwrap_or(0);
+    match sparql_query_union_timeout(store, query, QUERY_TIMEOUT) {
+        Ok(QueryResults::Solutions(mut sols)) => match sols.next() {
+            Some(Ok(sol)) => match sol.get("n") {
+                Some(Term::Literal(lit)) => lit.value().parse().unwrap_or(0),
+                _ => 0,
+            },
+            Some(Err(e)) => {
+                tracing::warn!("resource-list count failed: {e}");
+                0
+            }
+            None => 0,
+        },
+        Ok(_) => 0,
+        Err(e) => {
+            tracing::warn!("resource-list count failed: {e}");
+            0
+        }
     }
-    0
 }
 
 /// Number of distinct (subclass-aware) instances of a class. Deliberately
 /// label-free: no `OPTIONAL`/`GROUP BY`, so it stays cheap on a large class.
+/// Counts IRIs only, like the page query (blank-node instances have no link
+/// to render), so the total and the rows agree.
 fn class_instance_count(store: &Store, class_iri: &str) -> usize {
     let q = format!(
         r#"SELECT (COUNT(DISTINCT ?i) AS ?n) WHERE {{
             ?i a/<{RDFS_SUBCLASS_OF}>* <{class_iri}> .
+            FILTER(isIRI(?i))
         }}"#
     );
     count_query(store, &q)
@@ -596,17 +625,20 @@ fn class_instances(
     let q = format!(
         r#"SELECT ?i (SAMPLE(?l) AS ?lab) WHERE {{
             ?i a/<{RDFS_SUBCLASS_OF}>* <{class_iri}> .
+            FILTER(isIRI(?i))
             OPTIONAL {{ ?i <{RDFS_LABEL}> ?l }}
         }} GROUP BY ?i ORDER BY ?i LIMIT {limit} OFFSET {offset}"#
     );
     link_rows(store, &q, "i", url_prefix)
 }
 
-/// Number of distinct subjects that use a property.
+/// Number of distinct IRI subjects that use a property (blank-node subjects
+/// are not listed, so they are not counted).
 fn property_usage_count(store: &Store, property_iri: &str) -> usize {
     let q = format!(
         r#"SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{
             ?s <{property_iri}> ?o .
+            FILTER(isIRI(?s))
         }}"#
     );
     count_query(store, &q)
@@ -624,6 +656,7 @@ fn property_usages(
     let q = format!(
         r#"SELECT ?s (SAMPLE(?l) AS ?lab) WHERE {{
             ?s <{property_iri}> ?o .
+            FILTER(isIRI(?s))
             OPTIONAL {{ ?s <{RDFS_LABEL}> ?l }}
         }} GROUP BY ?s ORDER BY ?s LIMIT {limit} OFFSET {offset}"#
     );
@@ -659,7 +692,9 @@ struct ResourceList {
 /// `total` rows, `page_size` rows per page. `fetch(offset, limit)` loads the
 /// rows of the chosen page; it is called exactly once, after the page has been
 /// clamped, so a `?page=` beyond the end shows the last page rather than an
-/// empty one. Page links are `self_href` + `page=N` + `#fragment`.
+/// empty one (`Some(0)` is clamped to page 1 and, like any explicit page,
+/// expanded — the route maps `?page=0` to `None` before it gets here). Page
+/// links are `self_href` + `page=N` + `#fragment`.
 fn paginate(
     total: usize,
     page: Option<u32>,
@@ -851,13 +886,16 @@ pub async fn serve_resource(
                     r.target_href = native_href(&r.target_iri, url_prefix);
                 }
             }
-            let mut reverse = reverse_rows(&store, &subject_iri);
+            let types = types_of(&store, &subject_iri);
+            let kind = resource_kind(&types);
+            // On a class view the `rdf:type` back-links are the instance list
+            // (collapsed and paginated below), so the table leaves them out.
+            let mut reverse = reverse_rows(&store, &subject_iri, kind == "class");
             for r in &mut reverse {
                 if r.source_kind == "iri" {
                     r.source_href = native_href(&r.source_iri, url_prefix);
                 }
             }
-            let types = types_of(&store, &subject_iri);
             let label = lookup_label(&store, &subject_iri);
 
             // Self permalink (the concon-native view URL: `_entity/{id}` for
@@ -869,7 +907,6 @@ pub async fn serve_resource(
             // Per-kind content (G2): a class lists its (subclass-aware)
             // instances; a property lists the subjects that use it. Both are
             // collapsed and paginated (issue #4); `?page=` selects the page.
-            let kind = resource_kind(&types);
             let instances = (kind == "class").then(|| {
                 paginate(
                     class_instance_count(&store, &subject_iri),
@@ -1075,7 +1112,8 @@ mlips:MLMethod a owl:Class ; rdfs:subClassOf mlips:Method .
 mlips:usesFramework a owl:ObjectProperty .
 <https://w3id.org/mlips/entity/a> a mlips:Method ; mlips:usesFramework <https://w3id.org/mlips/entity/tf> .
 <https://w3id.org/mlips/entity/b> a mlips:MLMethod ; rdfs:label "B" ; rdfs:label "B"@en .
-<https://w3id.org/mlips/entity/c> a mlips:Method ; mlips:usesFramework <https://w3id.org/mlips/entity/tf> ."#;
+<https://w3id.org/mlips/entity/c> a mlips:Method ; mlips:usesFramework <https://w3id.org/mlips/entity/tf> .
+[] a mlips:Method ; mlips:usesFramework <https://w3id.org/mlips/entity/tf> ."#;
         store
             .load_from_reader(RdfFormat::Turtle, ttl.as_bytes())
             .unwrap();
@@ -1084,7 +1122,8 @@ mlips:usesFramework a owl:ObjectProperty .
         // Subclass-aware: a, b (via MLMethod ⊑ Method), c — three distinct, and
         // the multi-labelled b appears once (dedup), with a native _entity href.
         // The count query agrees with the list (same subclass-aware pattern,
-        // DISTINCT so the double label does not double-count b).
+        // DISTINCT so the double label does not double-count b; the blank-node
+        // instance is neither listed nor counted).
         assert_eq!(
             class_instance_count(&store, "https://w3id.org/mlips#Method"),
             3
@@ -1143,6 +1182,16 @@ mlips:usesFramework a owl:ObjectProperty .
         assert!(class_instances(&store, "https://w3id.org/mlips#Method", prefix, 3, 2).is_empty());
         let u2 = property_usages(&store, "https://w3id.org/mlips#usesFramework", prefix, 1, 5);
         assert_eq!(ids(&u2), ["c"]);
+
+        // "Referenced by" on a class: the rdf:type back-links (a, c, and the
+        // blank node) are the instance list, so a class view drops them and
+        // keeps the other reverse links (MLMethod ⊑ Method).
+        let all = reverse_rows(&store, "https://w3id.org/mlips#Method", false);
+        assert_eq!(all.len(), 4, "{all:?}");
+        let non_type = reverse_rows(&store, "https://w3id.org/mlips#Method", true);
+        assert_eq!(non_type.len(), 1, "{non_type:?}");
+        assert_eq!(non_type[0].predicate_iri, RDFS_SUBCLASS_OF);
+        assert!(non_type[0].source_iri.ends_with("#MLMethod"));
 
         // Kind classification.
         assert_eq!(resource_kind(&types_of(&store, "https://w3id.org/mlips#Method")), "class");
@@ -1399,7 +1448,8 @@ mlips:usesFramework a owl:ObjectProperty .
              mlips:Method a owl:Class .\n\
              mlips:MLMethod a owl:Class ; rdfs:subClassOf mlips:Method .\n\
              mlips:Empty a owl:Class .\n\
-             mlips:usesFramework a owl:ObjectProperty .\n",
+             mlips:usesFramework a owl:ObjectProperty .\n\
+             [] a mlips:Method ; rdfs:label \"Anon\" ; mlips:usesFramework <https://w3id.org/mlips/entity/tf> .\n",
         );
         for i in 0..n {
             // Zero-padded ids so IRI order == numeric order; the last one is an
@@ -1430,10 +1480,24 @@ mlips:usesFramework a owl:ObjectProperty .
         };
 
         // Collapsed by default: a <details> without `open`, total in summary,
-        // first page of rows present, next link but no previous.
+        // first page of rows present, next link but no previous. The blank-node
+        // instance is neither counted nor listed. The "Referenced by" table no
+        // longer repeats the instances (their rdf:type back-links), so the
+        // labels of the instances appear only inside the list.
         let r = get(None, class_iri).await;
         r.assert_status_ok();
-        let list = list_block(&r.text(), "instances");
+        let body = r.text();
+        assert_eq!(
+            body.matches("Inst 000").count(),
+            1,
+            "instance only in the list"
+        );
+        assert!(!body.contains("Anon"), "blank-node instance not rendered");
+        assert!(
+            body.contains("Referenced by (1)"),
+            "only the subclass back-link remains"
+        );
+        let list = list_block(&body, "instances");
         assert!(
             list.starts_with(r#"<details id="instances" class="resource-list-box">"#),
             "collapsed (no `open`): {list}"
@@ -1479,23 +1543,43 @@ mlips:usesFramework a owl:ObjectProperty .
         assert!(list.contains("Page 2 of 2"));
         assert!(list.contains(r#"rel="prev""#) && !list.contains(r#"rel="next""#));
 
-        // Past the end clamps to the last page; garbage is ignored (page 1,
-        // collapsed).
-        let r = get(Some("99"), class_iri).await;
-        r.assert_status_ok();
-        assert!(list_block(&r.text(), "instances").contains("Page 2 of 2"));
-        let r = get(Some("x"), class_iri).await;
-        r.assert_status_ok();
-        let list = list_block(&r.text(), "instances");
-        assert!(list.contains("Inst 000") && !list.contains(r#"resource-list-box" open"#));
+        // Past the end clamps to the last page (expanded), including a number
+        // beyond u32; garbage and `0` mean "no page" (page 1, collapsed).
+        for huge in ["99", "99999999999", "18446744073709551615"] {
+            let r = get(Some(huge), class_iri).await;
+            r.assert_status_ok();
+            let list = list_block(&r.text(), "instances");
+            assert!(
+                list.contains("Page 2 of 2") && list.contains(" open=\"\""),
+                "{huge}: {list}"
+            );
+        }
+        for junk in ["x", "0", "-1", "1.5", "99999999999999999999999"] {
+            let r = get(Some(junk), class_iri).await;
+            r.assert_status_ok();
+            let list = list_block(&r.text(), "instances");
+            assert!(
+                list.contains("Inst 000") && !list.contains(r#"resource-list-box" open"#),
+                "{junk}: {list}"
+            );
+        }
 
         // The property view gets the same treatment, under its own fragment id.
         let r = get(None, "https://w3id.org/mlips#usesFramework").await;
         r.assert_status_ok();
         let list = list_block(&r.text(), "usages");
         assert!(list.starts_with(r#"<details id="usages" class="resource-list-box">"#));
-        assert!(list.contains(&format!("Used by ({n})")));
+        assert!(
+            list.contains(&format!("Used by ({n})")),
+            "bnode subject not counted: {list}"
+        );
         assert!(list.contains("page=2#usages"));
+        let r = get(Some("2"), "https://w3id.org/mlips#usesFramework").await;
+        let list = list_block(&r.text(), "usages");
+        assert!(
+            list.contains(&format!("Showing {n}–{n} of {n} subjects")),
+            "{list}"
+        );
 
         // A class without instances: a collapsed, empty list with a zero count.
         let r = get(None, "https://w3id.org/mlips#Empty").await;
