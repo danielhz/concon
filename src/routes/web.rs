@@ -10,7 +10,7 @@ use tower_cookies::Cookies;
 use crate::auth;
 use crate::migrate_io;
 use crate::state::AppState;
-use crate::store::sparql_update;
+use crate::store::{is_valid_dataset_name, is_valid_name_segment, sparql_update};
 
 const SESSION_COOKIE: &str = "mlipe_session";
 
@@ -309,19 +309,33 @@ struct CreateDatasetForm {
     team: String,
 }
 
+/// Create a dataset from the team page form. Requires a logged-in user who is
+/// a root-team admin or an admin of the owning team (the form's `team` path;
+/// empty or `root` means the root team). Name and team segments are validated
+/// before they reach the filesystem, an IRI, or the system store.
 async fn create_dataset_web(
     State(state): State<AppState>,
     cookies: Cookies,
     Form(form): Form<CreateDatasetForm>,
 ) -> Response {
-    // Require login
-    if get_username(&cookies, &state).is_none() {
+    let Some(session) = get_username(&cookies, &state) else {
         return Redirect::to("/_login").into_response();
-    }
+    };
 
-    let name = form.name.trim().to_string();
-    if name.is_empty() {
-        return Redirect::to("/").into_response();
+    let name = form.name.trim();
+    let team_path = form.team.trim().trim_matches('/');
+    let team_segments: Vec<String> = if team_path.is_empty() || team_path == "root" {
+        Vec::new()
+    } else {
+        team_path.split('/').map(str::to_string).collect()
+    };
+    if !is_valid_name_segment(name) || !team_segments.iter().all(|s| is_valid_name_segment(s)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Invalid dataset or team name: use ASCII letters, digits, '_', '-' and '.', \
+             not starting with '.'",
+        )
+            .into_response();
     }
 
     let visibility = match form.visibility.as_str() {
@@ -330,30 +344,36 @@ async fn create_dataset_web(
         _ => "PublicVisibility",
     };
 
-    // Resolve team path to IRI
-    let team_path = form.team.trim().to_string();
-    let team_segments: Vec<String> = if team_path.is_empty() {
-        Vec::new()
-    } else {
-        team_path.split('/').map(|s| s.to_string()).collect()
+    // Resolve the team path to an IRI; an unknown team is an error, never a
+    // silent fallback to root.
+    let system = &state.store_manager.system;
+    let Some(team_iri) = auth::resolve_team_path(system, &team_segments) else {
+        return (StatusCode::BAD_REQUEST, "Unknown team").into_response();
     };
-    let team_iri = auth::resolve_team_path(&state.store_manager.system, &team_segments)
-        .unwrap_or_else(|| "https://mlipe.2mia.org/teams/root".to_string());
     let team_iri = team_iri.trim_matches(|c| c == '<' || c == '>').to_string();
+    if !auth::can_create_dataset_in_team(system, &session.user_iri, &team_iri) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Only root-team admins or admins of this team may create datasets here",
+        )
+            .into_response();
+    }
 
-    // Qualify dataset name with team path
-    let qualified_name = if team_path.is_empty() {
-        format!("root/{}", name)
+    let qualified_name = if team_segments.is_empty() {
+        format!("root/{name}")
     } else {
-        format!("{}/{}", team_path, name)
+        format!("{}/{name}", team_segments.join("/"))
     };
 
-    if state.store_manager.create_dataset(&qualified_name).is_ok() {
-        let _ = state.store_manager.insert_dataset_metadata_full(
-            &qualified_name,
-            visibility,
-            &team_iri,
-        );
+    if let Err(e) = state.store_manager.create_dataset(&qualified_name) {
+        return (StatusCode::CONFLICT, e).into_response();
+    }
+    if let Err(e) =
+        state
+            .store_manager
+            .insert_dataset_metadata_full(&qualified_name, visibility, &team_iri)
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
     Redirect::to("/").into_response()
@@ -364,17 +384,34 @@ struct DeleteDatasetForm {
     name: String,
 }
 
+/// Delete a dataset from the dataset page form (`name` is the qualified name,
+/// e.g. `materials/foo`). Requires a logged-in user with write permission on
+/// that dataset (root-team admin or admin of the owning team).
 async fn delete_dataset_web(
     State(state): State<AppState>,
     cookies: Cookies,
     Form(form): Form<DeleteDatasetForm>,
 ) -> Response {
-    if get_username(&cookies, &state).is_none() {
+    let Some(session) = get_username(&cookies, &state) else {
         return Redirect::to("/_login").into_response();
+    };
+
+    let name = form.name.trim();
+    if !is_valid_dataset_name(name) {
+        return (StatusCode::BAD_REQUEST, "Invalid dataset name").into_response();
+    }
+    if !auth::can_write_dataset(&state.store_manager.system, &session.user_iri, name) {
+        return (
+            StatusCode::FORBIDDEN,
+            "No write permission for this dataset",
+        )
+            .into_response();
     }
 
-    let _ = state.store_manager.delete_dataset(&form.name);
-    Redirect::to("/").into_response()
+    match state.store_manager.delete_dataset(name) {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
+    }
 }
 
 pub async fn dataset_query(
@@ -428,6 +465,7 @@ pub async fn dataset_query(
             username => session.map(|s| s.username),
             is_admin => admin,
             dataset_name => display_name,
+            qualified_name => dataset_name,
             url_prefix => url_prefix,
             breadcrumbs => breadcrumbs,
             initial_query => initial_query,

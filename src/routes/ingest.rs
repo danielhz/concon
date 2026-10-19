@@ -70,17 +70,8 @@ pub fn authorize_write(
     }
 
     // 2. Session or HTTP Basic → a user identity with per-dataset write check.
-    let user_iri = web::get_username(cookies, state)
-        .map(|s| s.user_iri)
-        .or_else(|| crate::auth::authenticate_basic(&state.store_manager.system, authorization));
-
-    let Some(user_iri) = user_iri else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"concon ingest\"")],
-            "Authentication required",
-        )
-            .into_response());
+    let Some(user_iri) = authenticate_user(state, headers, cookies) else {
+        return Err(unauthorized_response());
     };
 
     if !crate::auth::can_write_dataset(&state.store_manager.system, &user_iri, dataset_name) {
@@ -89,6 +80,33 @@ pub fn authorize_write(
         );
     }
     Ok(())
+}
+
+/// Resolve the request's user identity: a session cookie (web UI) or HTTP
+/// Basic (non-interactive clients). Returns the user IRI as stored in the
+/// system store; `None` when neither credential is present and valid. The
+/// ingest token is *not* an identity — see `authorize_write`.
+pub fn authenticate_user(
+    state: &AppState,
+    headers: &HeaderMap,
+    cookies: &Cookies,
+) -> Option<String> {
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    web::get_username(cookies, state)
+        .map(|s| s.user_iri)
+        .or_else(|| crate::auth::authenticate_basic(&state.store_manager.system, authorization))
+}
+
+/// The 401 sent when a privileged endpoint gets no usable credential.
+pub fn unauthorized_response() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Basic realm=\"concon ingest\"")],
+        "Authentication required",
+    )
+        .into_response()
 }
 
 /// Map the request `Content-Type` to an RDF parsing format. Defaults to Turtle
