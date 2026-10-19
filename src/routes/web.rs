@@ -20,7 +20,7 @@ const SESSION_COOKIE: &str = "mlipe_session";
 /// cookie covers every route, and a `Max-Age` equal to the server-side session
 /// lifetime so the browser and the `SessionStore` expire it together.
 fn session_cookie(state: &AppState, session_id: String) -> tower_cookies::Cookie<'static> {
-    use tower_cookies::cookie::{time, SameSite};
+    use tower_cookies::cookie::{SameSite, time};
     let max_age = time::Duration::try_from(state.session_store.max_age())
         .expect("session max age fits in a cookie Max-Age");
     tower_cookies::Cookie::build((SESSION_COOKIE, session_id))
@@ -36,7 +36,9 @@ fn session_cookie(state: &AppState, session_id: String) -> tower_cookies::Cookie
 /// carry the same `Path` as the one set at login, or the browser keeps the
 /// original.
 fn session_cookie_removal() -> tower_cookies::Cookie<'static> {
-    tower_cookies::Cookie::build(SESSION_COOKIE).path("/").build()
+    tower_cookies::Cookie::build(SESSION_COOKIE)
+        .path("/")
+        .build()
 }
 
 /// Example pre-filled query over the schema (classes & properties) — the

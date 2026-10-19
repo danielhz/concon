@@ -21,7 +21,9 @@ async fn main() {
     )
     .expect("Failed to initialize application state");
     if !cfg.server.secure_cookies {
-        tracing::warn!("server.secure_cookies = false: session cookie is not marked Secure (development only)");
+        tracing::warn!(
+            "server.secure_cookies = false: session cookie is not marked Secure (development only)"
+        );
     }
 
     if app_state.store_manager.is_system_empty() {
