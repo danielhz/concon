@@ -49,9 +49,11 @@ const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const RDF_LANGSTRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 
-/// Display cap for a resource view's instance / usage list (Epic B4 spirit —
-/// bound the per-view work; the list flags truncation when the cap is hit).
-const RESOURCE_LIST_LIMIT: usize = 200;
+/// Page size of a resource view's instance / usage list (issue #4). The list
+/// is collapsed by default and paginated server-side (`?page=N`), so a view
+/// never loads more than one page of rows — the Epic B4 per-view bound — while
+/// every row stays reachable.
+const RESOURCE_LIST_PAGE_SIZE: usize = 50;
 
 /// Pick the response serialization from the `Accept` header. Mirrors the
 /// onto-server: Turtle, RDF/XML (a.k.a. OWL/XML), or XHTML (default).
@@ -529,7 +531,7 @@ fn resource_kind(types: &[TypeRef]) -> &'static str {
 
 /// A link to another resource (instance-list / usage-list rows), with its
 /// native (view→view) href resolved.
-#[derive(Serialize)]
+#[derive(Serialize, Debug, PartialEq)]
 struct LinkRow {
     iri: String,
     href: String,
@@ -558,28 +560,142 @@ fn link_rows(store: &Store, query: &str, var: &str, url_prefix: &str) -> Vec<Lin
     rows
 }
 
-/// Subclass-aware instance list for a class view (the B2 Explore query, with
-/// the merged `GROUP BY`+`SAMPLE` label dedup), capped at `RESOURCE_LIST_LIMIT`.
-fn class_instances(store: &Store, class_iri: &str, url_prefix: &str) -> Vec<LinkRow> {
+/// Run a `SELECT (COUNT(DISTINCT ?x) AS ?n)` query and return the count
+/// (0 on any error or missing binding).
+fn count_query(store: &Store, query: &str) -> usize {
+    if let Ok(QueryResults::Solutions(mut sols)) = sparql_query_union(store, query)
+        && let Some(Ok(sol)) = sols.next()
+        && let Some(Term::Literal(lit)) = sol.get("n")
+    {
+        return lit.value().parse().unwrap_or(0);
+    }
+    0
+}
+
+/// Number of distinct (subclass-aware) instances of a class. Deliberately
+/// label-free: no `OPTIONAL`/`GROUP BY`, so it stays cheap on a large class.
+fn class_instance_count(store: &Store, class_iri: &str) -> usize {
+    let q = format!(
+        r#"SELECT (COUNT(DISTINCT ?i) AS ?n) WHERE {{
+            ?i a/<{RDFS_SUBCLASS_OF}>* <{class_iri}> .
+        }}"#
+    );
+    count_query(store, &q)
+}
+
+/// One page of the subclass-aware instance list for a class view (the B2
+/// Explore query, with the merged `GROUP BY`+`SAMPLE` label dedup), ordered
+/// by IRI so pages are stable.
+fn class_instances(
+    store: &Store,
+    class_iri: &str,
+    url_prefix: &str,
+    offset: usize,
+    limit: usize,
+) -> Vec<LinkRow> {
     let q = format!(
         r#"SELECT ?i (SAMPLE(?l) AS ?lab) WHERE {{
             ?i a/<{RDFS_SUBCLASS_OF}>* <{class_iri}> .
             OPTIONAL {{ ?i <{RDFS_LABEL}> ?l }}
-        }} GROUP BY ?i ORDER BY ?i LIMIT {RESOURCE_LIST_LIMIT}"#
+        }} GROUP BY ?i ORDER BY ?i LIMIT {limit} OFFSET {offset}"#
     );
     link_rows(store, &q, "i", url_prefix)
 }
 
-/// Distinct subjects that use a property (its usage list for a property view),
-/// capped at `RESOURCE_LIST_LIMIT`.
-fn property_usages(store: &Store, property_iri: &str, url_prefix: &str) -> Vec<LinkRow> {
+/// Number of distinct subjects that use a property.
+fn property_usage_count(store: &Store, property_iri: &str) -> usize {
+    let q = format!(
+        r#"SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{
+            ?s <{property_iri}> ?o .
+        }}"#
+    );
+    count_query(store, &q)
+}
+
+/// One page of the distinct subjects that use a property (its usage list for
+/// a property view), ordered by IRI so pages are stable.
+fn property_usages(
+    store: &Store,
+    property_iri: &str,
+    url_prefix: &str,
+    offset: usize,
+    limit: usize,
+) -> Vec<LinkRow> {
     let q = format!(
         r#"SELECT ?s (SAMPLE(?l) AS ?lab) WHERE {{
             ?s <{property_iri}> ?o .
             OPTIONAL {{ ?s <{RDFS_LABEL}> ?l }}
-        }} GROUP BY ?s ORDER BY ?s LIMIT {RESOURCE_LIST_LIMIT}"#
+        }} GROUP BY ?s ORDER BY ?s LIMIT {limit} OFFSET {offset}"#
     );
     link_rows(store, &q, "s", url_prefix)
+}
+
+/// A collapsible, server-paginated resource list (a class's instances or a
+/// property's usages — issue #4). The template renders it as a `<details>`
+/// block whose summary carries `total`, with `prev_href`/`next_href` page
+/// links; no client-side script is involved.
+#[derive(Serialize, Debug, PartialEq)]
+struct ResourceList {
+    /// The rows of the current page.
+    rows: Vec<LinkRow>,
+    /// Total number of rows across all pages.
+    total: usize,
+    /// Current page (1-based, clamped into `1..=pages`).
+    page: usize,
+    /// Number of pages (at least 1, so an empty list still has "page 1 of 1").
+    pages: usize,
+    /// 1-based index of the first / last row on this page (`0`/`0` when empty).
+    first: usize,
+    last: usize,
+    prev_href: Option<String>,
+    next_href: Option<String>,
+    /// Whether the `<details>` starts expanded: the list is collapsed when the
+    /// view is opened, and expanded when the user has asked for a page
+    /// (`?page=N`), so following a page link lands on a visible list.
+    open: bool,
+}
+
+/// Build the page `page` (1-based; `None` = page 1, collapsed) of a list with
+/// `total` rows, `page_size` rows per page. `fetch(offset, limit)` loads the
+/// rows of the chosen page; it is called exactly once, after the page has been
+/// clamped, so a `?page=` beyond the end shows the last page rather than an
+/// empty one. Page links are `self_href` + `page=N` + `#fragment`.
+fn paginate(
+    total: usize,
+    page: Option<u32>,
+    page_size: usize,
+    self_href: &str,
+    fragment: &str,
+    fetch: impl FnOnce(usize, usize) -> Vec<LinkRow>,
+) -> ResourceList {
+    let page_size = page_size.max(1);
+    let pages = total.div_ceil(page_size).max(1);
+    let current = (page.unwrap_or(1) as usize).clamp(1, pages);
+    let offset = (current - 1) * page_size;
+    let rows = if total == 0 {
+        Vec::new()
+    } else {
+        fetch(offset, page_size)
+    };
+    let href = |n: usize| {
+        let sep = if self_href.contains('?') { '&' } else { '?' };
+        format!("{self_href}{sep}page={n}#{fragment}")
+    };
+    ResourceList {
+        first: if rows.is_empty() { 0 } else { offset + 1 },
+        last: if rows.is_empty() {
+            0
+        } else {
+            offset + rows.len()
+        },
+        total,
+        page: current,
+        pages,
+        prev_href: (current > 1).then(|| href(current - 1)),
+        next_href: (current < pages).then(|| href(current + 1)),
+        open: page.is_some(),
+        rows,
+    }
 }
 
 /// Extract the lexical value of a literal term, if the term is a literal.
@@ -625,6 +741,7 @@ fn entity_not_found(state: &AppState, subject_iri: &str, format: &str) -> Respon
 /// Dereference the entity `<ENTITY_BASE>{id}` (the short `_entity/{id}` route).
 /// A thin wrapper over the generic [`serve_resource`]; the entity route is kept
 /// as the canonical, ergonomic form for our own `entity/` namespace.
+#[allow(clippy::too_many_arguments)] // mirrors `serve_resource`
 pub async fn serve_entity(
     state: &AppState,
     dataset_name: &str,
@@ -633,6 +750,7 @@ pub async fn serve_entity(
     headers: &HeaderMap,
     username: Option<String>,
     is_admin: bool,
+    page: Option<u32>,
 ) -> Response {
     let subject_iri = format!("{ENTITY_BASE}{id}");
     serve_resource(
@@ -643,6 +761,7 @@ pub async fn serve_entity(
         headers,
         username,
         is_admin,
+        page,
     )
     .await
 }
@@ -652,6 +771,7 @@ pub async fn serve_entity(
 /// `Accept` exactly like the entity route; the HTML view is the generalised
 /// per-resource page. `url_prefix` is the dataset base used to build native
 /// (view→view) links, e.g. `/mlips/_ds/mlips`.
+#[allow(clippy::too_many_arguments)] // route-dispatch signature: request facts + `?page=`
 pub async fn serve_resource(
     state: &AppState,
     dataset_name: &str,
@@ -660,6 +780,7 @@ pub async fn serve_resource(
     headers: &HeaderMap,
     username: Option<String>,
     is_admin: bool,
+    page: Option<u32>,
 ) -> Response {
     let format = negotiate_format(headers);
 
@@ -739,19 +860,40 @@ pub async fn serve_resource(
             let types = types_of(&store, &subject_iri);
             let label = lookup_label(&store, &subject_iri);
 
+            // Self permalink (the concon-native view URL: `_entity/{id}` for
+            // an entity, `_view?iri=…` for any other resource); also the base
+            // for the "Other formats" content-negotiated fetches and for the
+            // list page links.
+            let self_href = native_href(&subject_iri, url_prefix);
+
             // Per-kind content (G2): a class lists its (subclass-aware)
-            // instances; a property lists the subjects that use it.
+            // instances; a property lists the subjects that use it. Both are
+            // collapsed and paginated (issue #4); `?page=` selects the page.
             let kind = resource_kind(&types);
-            let instances = if kind == "class" {
-                class_instances(&store, &subject_iri, url_prefix)
-            } else {
-                Vec::new()
-            };
-            let usages = if kind == "property" {
-                property_usages(&store, &subject_iri, url_prefix)
-            } else {
-                Vec::new()
-            };
+            let instances = (kind == "class").then(|| {
+                paginate(
+                    class_instance_count(&store, &subject_iri),
+                    page,
+                    RESOURCE_LIST_PAGE_SIZE,
+                    &self_href,
+                    "instances",
+                    |offset, limit| {
+                        class_instances(&store, &subject_iri, url_prefix, offset, limit)
+                    },
+                )
+            });
+            let usages = (kind == "property").then(|| {
+                paginate(
+                    property_usage_count(&store, &subject_iri),
+                    page,
+                    RESOURCE_LIST_PAGE_SIZE,
+                    &self_href,
+                    "usages",
+                    |offset, limit| {
+                        property_usages(&store, &subject_iri, url_prefix, offset, limit)
+                    },
+                )
+            });
 
             // Epic H — annotations. Notes are readable by anyone who can read
             // the view; the add-note form is shown to any logged-in user, on
@@ -774,10 +916,7 @@ pub async fn serve_resource(
                 subject_iri => &subject_iri,
                 subject_short => short_form(&subject_iri),
                 subject_local => local_name(&subject_iri),
-                // Self permalink (the concon-native view URL: `_entity/{id}` for
-                // an entity, `_view?iri=…` for any other resource); also the
-                // base for the "Other formats" content-negotiated fetches.
-                self_href => native_href(&subject_iri, url_prefix),
+                self_href => &self_href,
                 // "↗ canonical URL": the subject's own canonical IRI (Epic G3).
                 // For a term this resolves to its defining authority (our doc,
                 // or schema.org, …); for an entity, to itself.
@@ -793,11 +932,7 @@ pub async fn serve_resource(
                 forward_count => forward.len(),
                 reverse_count => reverse.len(),
                 instances => &instances,
-                instance_count => instances.len(),
-                instances_truncated => instances.len() >= RESOURCE_LIST_LIMIT,
                 usages => &usages,
-                usage_count => usages.len(),
-                usages_truncated => usages.len() >= RESOURCE_LIST_LIMIT,
                 annotations => &annotations,
                 annotation_count => annotations.len(),
                 can_annotate => can_annotate,
@@ -948,8 +1083,22 @@ mlips:usesFramework a owl:ObjectProperty .
 
         // Subclass-aware: a, b (via MLMethod ⊑ Method), c — three distinct, and
         // the multi-labelled b appears once (dedup), with a native _entity href.
-        let instances = class_instances(&store, "https://w3id.org/mlips#Method", prefix);
-        assert_eq!(instances.len(), 3, "expected 3 distinct instances (b not doubled)");
+        // The count query agrees with the list (same subclass-aware pattern,
+        // DISTINCT so the double label does not double-count b).
+        assert_eq!(
+            class_instance_count(&store, "https://w3id.org/mlips#Method"),
+            3
+        );
+        assert_eq!(
+            class_instance_count(&store, "https://w3id.org/mlips#MLMethod"),
+            1
+        );
+        let instances = class_instances(&store, "https://w3id.org/mlips#Method", prefix, 0, 50);
+        assert_eq!(
+            instances.len(),
+            3,
+            "expected 3 distinct instances (b not doubled)"
+        );
         let b = instances
             .iter()
             .find(|r| r.iri.ends_with("/b"))
@@ -958,8 +1107,42 @@ mlips:usesFramework a owl:ObjectProperty .
         assert_eq!(b.href, "/mlips/_ds/mlips/_entity/b");
 
         // Property usage: a and c use usesFramework → two distinct subjects.
-        let usages = property_usages(&store, "https://w3id.org/mlips#usesFramework", prefix);
+        assert_eq!(
+            property_usage_count(&store, "https://w3id.org/mlips#usesFramework"),
+            2
+        );
+        let usages = property_usages(
+            &store,
+            "https://w3id.org/mlips#usesFramework",
+            prefix,
+            0,
+            50,
+        );
         assert_eq!(usages.len(), 2);
+
+        // Paging slices (issue #4): ordered by IRI (a, b, c), offset/limit
+        // select a stable window, and an offset past the end is empty.
+        let ids = |rows: &[LinkRow]| -> Vec<String> {
+            rows.iter()
+                .map(|r| r.iri.rsplit('/').next().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(ids(&instances), ["a", "b", "c"]);
+        let page2 = class_instances(&store, "https://w3id.org/mlips#Method", prefix, 2, 2);
+        assert_eq!(ids(&page2), ["c"]);
+        assert_eq!(
+            ids(&class_instances(
+                &store,
+                "https://w3id.org/mlips#Method",
+                prefix,
+                1,
+                1
+            )),
+            ["b"]
+        );
+        assert!(class_instances(&store, "https://w3id.org/mlips#Method", prefix, 3, 2).is_empty());
+        let u2 = property_usages(&store, "https://w3id.org/mlips#usesFramework", prefix, 1, 5);
+        assert_eq!(ids(&u2), ["c"]);
 
         // Kind classification.
         assert_eq!(resource_kind(&types_of(&store, "https://w3id.org/mlips#Method")), "class");
@@ -1075,7 +1258,274 @@ mlips:usesFramework a owl:ObjectProperty .
         assert_eq!(rdf_format_for("xhtml"), None);
         assert_eq!(rdf_format_for("nonsense"), None);
         // content_type_for stays consistent with the new codes.
-        assert_eq!(content_type_for("nt"), "application/n-triples; charset=utf-8");
-        assert_eq!(content_type_for("jsonld"), "application/ld+json; charset=utf-8");
+        assert_eq!(
+            content_type_for("nt"),
+            "application/n-triples; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for("jsonld"),
+            "application/ld+json; charset=utf-8"
+        );
+    }
+
+    /// The `<details id="{id}">…</details>` block of a rendered entity view
+    /// (the list under test), so row assertions are not confused by the same
+    /// labels appearing in the "Referenced by" table.
+    fn list_block(body: &str, id: &str) -> String {
+        let start = body
+            .find(&format!(r#"<details id="{id}""#))
+            .unwrap_or_else(|| panic!("no <details id={id}> in:\n{body}"));
+        let end = body[start..]
+            .find("</details>")
+            .expect("closing </details>");
+        body[start..start + end].to_string()
+    }
+
+    fn fake_rows(offset: usize, limit: usize) -> Vec<LinkRow> {
+        (offset..offset + limit)
+            .map(|i| LinkRow {
+                iri: format!("https://x/{i}"),
+                href: format!("/x/{i}"),
+                display: format!("x:{i}"),
+                label: None,
+            })
+            .collect()
+    }
+
+    /// Issue #4 paging boundaries: page clamping, first/last indices, prev/next
+    /// links, and the collapsed-by-default rule (`open` only with `?page=`).
+    #[test]
+    fn paginate_boundaries() {
+        // `fetch` receives the clamped window and is told the page size.
+        let calls = std::cell::Cell::new(0);
+        let fetch = |offset: usize, limit: usize| {
+            calls.set(calls.get() + 1);
+            fake_rows(offset, limit.min(7usize.saturating_sub(offset)))
+        };
+
+        // Empty list: one page, no rows, no links, collapsed, fetch not called.
+        let l = paginate(0, None, 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!(calls.get(), 0);
+        assert_eq!((l.total, l.page, l.pages, l.first, l.last), (0, 1, 1, 0, 0));
+        assert!(l.rows.is_empty() && l.prev_href.is_none() && l.next_href.is_none());
+        assert!(!l.open, "collapsed when no page was requested");
+
+        // 7 rows, page size 3 → 3 pages. Page 1 (implicit): rows 1–3, next only.
+        let l = paginate(7, None, 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.page, l.pages, l.first, l.last), (1, 3, 1, 3));
+        assert_eq!(l.rows.len(), 3);
+        assert_eq!(l.prev_href, None);
+        assert_eq!(
+            l.next_href.as_deref(),
+            Some("/d/_entity/C?page=2#instances")
+        );
+        assert!(!l.open);
+
+        // Explicit page 1: same page, but expanded.
+        let l = paginate(7, Some(1), 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.page, l.first, l.last), (1, 1, 3));
+        assert!(l.open, "expanded when a page was requested");
+
+        // Middle page: both links.
+        let l = paginate(7, Some(2), 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.first, l.last), (4, 6));
+        assert_eq!(
+            l.prev_href.as_deref(),
+            Some("/d/_entity/C?page=1#instances")
+        );
+        assert_eq!(
+            l.next_href.as_deref(),
+            Some("/d/_entity/C?page=3#instances")
+        );
+
+        // Last (partial) page: one row, prev only.
+        let l = paginate(7, Some(3), 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.first, l.last), (7, 7));
+        assert_eq!(l.rows.len(), 1);
+        assert!(l.prev_href.is_some() && l.next_href.is_none());
+
+        // Out of range clamps: 0 → 1, 99 → last page (never an empty page).
+        let l = paginate(7, Some(0), 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.page, l.first), (1, 1));
+        let l = paginate(7, Some(99), 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.page, l.first, l.last), (3, 7, 7));
+        assert!(l.open);
+
+        // Exact multiple: 6 rows / 3 → 2 pages, page 2 is full and last.
+        let l = paginate(6, Some(2), 3, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.pages, l.first, l.last), (2, 4, 6));
+        assert!(l.next_href.is_none());
+
+        // A `_view?iri=…` self href already has a query string → `&page=`.
+        let l = paginate(
+            7,
+            Some(1),
+            3,
+            "/d/_view?iri=https%3A%2F%2Fx%23C",
+            "usages",
+            fetch,
+        );
+        assert_eq!(
+            l.next_href.as_deref(),
+            Some("/d/_view?iri=https%3A%2F%2Fx%23C&page=2#usages")
+        );
+
+        // A zero page size cannot divide by zero: it is treated as 1.
+        let l = paginate(2, None, 0, "/d/_entity/C", "instances", fetch);
+        assert_eq!((l.pages, l.rows.len()), (2, 1));
+    }
+
+    /// Issue #4 end to end: the class view serves the instance list collapsed
+    /// (no `open`), with the total in the summary; `?page=N` expands it and
+    /// pages through the rows at `RESOURCE_LIST_PAGE_SIZE`; a page past the end
+    /// clamps to the last page; an individual's `_entity` view is unaffected.
+    #[tokio::test]
+    async fn class_view_instances_collapsed_and_paginated() {
+        use crate::routes::create_router;
+        use axum_test::TestServer;
+
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("root/pub").unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata("root/pub")
+            .unwrap();
+        let store = state.store_manager.get_dataset("root/pub").unwrap();
+        let n = RESOURCE_LIST_PAGE_SIZE + 1;
+        let mut ttl = String::from(
+            "@prefix mlips: <https://w3id.org/mlips#> .\n\
+             @prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             mlips:Method a owl:Class .\n\
+             mlips:MLMethod a owl:Class ; rdfs:subClassOf mlips:Method .\n\
+             mlips:Empty a owl:Class .\n\
+             mlips:usesFramework a owl:ObjectProperty .\n",
+        );
+        for i in 0..n {
+            // Zero-padded ids so IRI order == numeric order; the last one is an
+            // instance via the subclass, to keep the count subclass-aware.
+            let cls = if i == n - 1 {
+                "mlips:MLMethod"
+            } else {
+                "mlips:Method"
+            };
+            ttl.push_str(&format!(
+                "<https://w3id.org/mlips/entity/i{i:03}> a {cls} ; rdfs:label \"Inst {i:03}\" ; \
+                 mlips:usesFramework <https://w3id.org/mlips/entity/tf> .\n"
+            ));
+        }
+        store
+            .load_from_reader(RdfFormat::Turtle, ttl.as_bytes())
+            .unwrap();
+        drop(store);
+
+        let server = TestServer::new(create_router(state));
+        let class_iri = "https://w3id.org/mlips#Method";
+        let get = |page: Option<&str>, iri: &str| {
+            let mut req = server.get("/_ds/pub/_view").add_query_param("iri", iri);
+            if let Some(p) = page {
+                req = req.add_query_param("page", p);
+            }
+            req
+        };
+
+        // Collapsed by default: a <details> without `open`, total in summary,
+        // first page of rows present, next link but no previous.
+        let r = get(None, class_iri).await;
+        r.assert_status_ok();
+        let list = list_block(&r.text(), "instances");
+        assert!(
+            list.starts_with(r#"<details id="instances" class="resource-list-box">"#),
+            "collapsed (no `open`): {list}"
+        );
+        assert!(
+            list.contains(&format!("Instances ({n})")),
+            "total in summary"
+        );
+        assert!(
+            list.contains("Inst 000") && list.contains("Inst 049"),
+            "first page rows: {list}"
+        );
+        assert!(
+            !list.contains("Inst 050"),
+            "row beyond the page not on page 1"
+        );
+        assert!(
+            list.contains(&format!("Showing 1–{} of {n} instances", n - 1)),
+            "{list}"
+        );
+        assert!(list.contains(r#"rel="next""#) && !list.contains(r#"rel="prev""#));
+        assert!(
+            list.contains("page=2#instances"),
+            "next link points at page 2"
+        );
+
+        // Page 2: expanded, the one remaining row, previous link only.
+        let r = get(Some("2"), class_iri).await;
+        r.assert_status_ok();
+        let list = list_block(&r.text(), "instances");
+        assert!(
+            list.starts_with(r#"<details id="instances" class="resource-list-box" open="">"#),
+            "expanded: {list}"
+        );
+        assert!(
+            list.contains("Inst 050") && !list.contains("Inst 049"),
+            "{list}"
+        );
+        assert!(
+            list.contains(&format!("Showing {n}–{n} of {n} instances")),
+            "{list}"
+        );
+        assert!(list.contains("Page 2 of 2"));
+        assert!(list.contains(r#"rel="prev""#) && !list.contains(r#"rel="next""#));
+
+        // Past the end clamps to the last page; garbage is ignored (page 1,
+        // collapsed).
+        let r = get(Some("99"), class_iri).await;
+        r.assert_status_ok();
+        assert!(list_block(&r.text(), "instances").contains("Page 2 of 2"));
+        let r = get(Some("x"), class_iri).await;
+        r.assert_status_ok();
+        let list = list_block(&r.text(), "instances");
+        assert!(list.contains("Inst 000") && !list.contains(r#"resource-list-box" open"#));
+
+        // The property view gets the same treatment, under its own fragment id.
+        let r = get(None, "https://w3id.org/mlips#usesFramework").await;
+        r.assert_status_ok();
+        let list = list_block(&r.text(), "usages");
+        assert!(list.starts_with(r#"<details id="usages" class="resource-list-box">"#));
+        assert!(list.contains(&format!("Used by ({n})")));
+        assert!(list.contains("page=2#usages"));
+
+        // A class without instances: a collapsed, empty list with a zero count.
+        let r = get(None, "https://w3id.org/mlips#Empty").await;
+        r.assert_status_ok();
+        let list = list_block(&r.text(), "instances");
+        assert!(list.starts_with(r#"<details id="instances" class="resource-list-box">"#));
+        assert!(list.contains("Instances (0)"), "{list}");
+        assert!(list.contains("No instances in this dataset."));
+        assert!(!list.contains("pager"), "no pager on an empty list");
+
+        // A single-page list (the subclass has one direct instance) shows its
+        // range but no page position / links.
+        let r = get(None, "https://w3id.org/mlips#MLMethod").await;
+        r.assert_status_ok();
+        let list = list_block(&r.text(), "instances");
+        assert!(
+            list.contains("Instances (1)") && list.contains("Inst 050"),
+            "{list}"
+        );
+        assert!(list.contains("Showing 1–1 of 1 instances"));
+        assert!(!list.contains("pager-pos") && !list.contains("rel="));
+
+        // An individual's `_entity` view has neither list and still works.
+        let r = server.get("/_ds/pub/_entity/i000").await;
+        r.assert_status_ok();
+        let body = r.text();
+        assert!(
+            !body.contains("<details id="),
+            "no instance/usage list on an individual"
+        );
+        assert!(body.contains("Inst 000"));
     }
 }

@@ -21,8 +21,13 @@
   .annot { color: #888; font-size: 0.85em; margin-left: 0.4em; }
   .nolabel { font-family: monospace; font-style: italic; color: #888; }
   .empty { color: #888; font-style: italic; }
-  ul.resource-list { columns: 2; column-gap: 2rem; margin: 0.5em 0 1.5em; padding-left: 1.2em; }
+  details.resource-list-box { margin: 1em 0 1.5em; }
+  details.resource-list-box > summary { cursor: pointer; }
+  details.resource-list-box > summary h2 { display: inline; }
+  ul.resource-list { columns: 2; column-gap: 2rem; margin: 0.5em 0 0.5em; padding-left: 1.2em; }
   ul.resource-list li { break-inside: avoid; margin: 0.15em 0; }
+  .pager { color: #555; font-size: 0.9em; margin: 0.3em 0 0; }
+  .pager .pager-pos { margin: 0 0.6em; }
   ul.annotations { list-style: none; padding-left: 0; margin: 0.5em 0 1em; }
   li.annotation { border: 1px solid #e6e6e6; border-radius: 0.4em; padding: 0.5em 0.8em; margin: 0.5em 0; }
   .annotation-meta { font-size: 0.85em; color: #767676; margin-bottom: 0.3em; }
@@ -51,28 +56,34 @@
 </p>
 {% endif %}
 
+{# Collapsible, server-paginated resource lists (issue #4): a class's instances, a property's usages. Collapsed on open, expanded when a `?page=` was requested; the page links are plain hrefs (no script). #}
+{% macro resource_list(list, id, heading, noun, empty_text) %}
+<details id="{{ id }}" class="resource-list-box"{% if list.open %} open=""{% endif %}>
+  <summary><h2>{{ heading }} ({{ list.total }})</h2></summary>
+  {% if list.rows %}
+  <ul class="resource-list">
+    {% for r in list.rows %}
+    <li><a href="{{ r.href }}" title="{{ r.iri }}">{% if r.label %}{{ r.label }}{% else %}<span class="nolabel">{{ r.display }}</span>{% endif %}</a></li>
+    {% endfor %}
+  </ul>
+  <p class="pager">
+    Showing {{ list.first }}–{{ list.last }} of {{ list.total }} {{ noun }}.
+    {% if list.pages > 1 %}
+    {% if list.prev_href %}<a rel="prev" href="{{ list.prev_href }}">← Previous</a>{% endif %}
+    <span class="pager-pos">Page {{ list.page }} of {{ list.pages }}</span>
+    {% if list.next_href %}<a rel="next" href="{{ list.next_href }}">Next →</a>{% endif %}
+    {% endif %}
+  </p>
+  {% else %}<p class="empty">{{ empty_text }}</p>{% endif %}
+</details>
+{% endmacro %}
+
 {% if kind == "class" %}
-<h2>Instances ({{ instance_count }}{% if instances_truncated %}+{% endif %})</h2>
-{% if instances %}
-<ul class="resource-list">
-  {% for r in instances %}
-  <li><a href="{{ r.href }}" title="{{ r.iri }}">{% if r.label %}{{ r.label }}{% else %}<span class="nolabel">{{ r.display }}</span>{% endif %}</a></li>
-  {% endfor %}
-</ul>
-{% if instances_truncated %}<p class="empty">Showing the first {{ instance_count }} instances.</p>{% endif %}
-{% else %}<p class="empty">No instances in this dataset.</p>{% endif %}
+{{ resource_list(instances, "instances", "Instances", "instances", "No instances in this dataset.") }}
 {% endif %}
 
 {% if kind == "property" %}
-<h2>Used by ({{ usage_count }}{% if usages_truncated %}+{% endif %})</h2>
-{% if usages %}
-<ul class="resource-list">
-  {% for r in usages %}
-  <li><a href="{{ r.href }}" title="{{ r.iri }}">{% if r.label %}{{ r.label }}{% else %}<span class="nolabel">{{ r.display }}</span>{% endif %}</a></li>
-  {% endfor %}
-</ul>
-{% if usages_truncated %}<p class="empty">Showing the first {{ usage_count }} subjects.</p>{% endif %}
-{% else %}<p class="empty">Not used by any subject in this dataset.</p>{% endif %}
+{{ resource_list(usages, "usages", "Used by", "subjects", "Not used by any subject in this dataset.") }}
 {% endif %}
 
 <h2>Properties ({{ forward_count }})</h2>

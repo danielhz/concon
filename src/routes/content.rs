@@ -220,15 +220,15 @@ async fn content_get(
 ) -> Response {
     let parsed = parse_path(&path);
 
-    // Extract page parameter from query string
-    let page: u32 = raw_query
-        .as_deref()
-        .and_then(|q| {
-            q.split('&')
-                .find_map(|p| p.strip_prefix("page="))
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(1);
+    // Extract the `?page=` parameter from the query string. `None` when absent
+    // or unparsable: the team page defaults to page 1, and the entity view's
+    // instance/usage list stays collapsed unless a page was asked for.
+    let page_param: Option<u32> = raw_query.as_deref().and_then(|q| {
+        q.split('&')
+            .find_map(|p| p.strip_prefix("page="))
+            .and_then(|v| v.parse().ok())
+    });
+    let page: u32 = page_param.unwrap_or(1);
 
     // Require login for UI pages (team pages, dataset query UI, file browsing).
     // SPARQL endpoints remain accessible for programmatic access.
@@ -340,7 +340,14 @@ async fn content_get(
                         let is_admin = web::is_root_admin(&session, &state);
                         let username = session.map(|s| s.username);
                         entity::serve_resource(
-                            &state, &qualified, &url_prefix, iri, &headers, username, is_admin,
+                            &state,
+                            &qualified,
+                            &url_prefix,
+                            iri,
+                            &headers,
+                            username,
+                            is_admin,
+                            page_param,
                         )
                         .await
                     }
@@ -356,7 +363,14 @@ async fn content_get(
                         let is_admin = web::is_root_admin(&session, &state);
                         let username = session.map(|s| s.username);
                         entity::serve_entity(
-                            &state, &qualified, &url_prefix, id, &headers, username, is_admin,
+                            &state,
+                            &qualified,
+                            &url_prefix,
+                            id,
+                            &headers,
+                            username,
+                            is_admin,
+                            page_param,
                         )
                         .await
                     }
