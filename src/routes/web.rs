@@ -14,6 +14,31 @@ use crate::store::sparql_update;
 
 const SESSION_COOKIE: &str = "mlipe_session";
 
+/// Build the session cookie with its hardening attributes: `HttpOnly` (no
+/// script access), `SameSite=Lax` (not sent on cross-site POSTs, which closes
+/// form CSRF), `Secure` unless `server.secure_cookies = false`, `Path=/` so one
+/// cookie covers every route, and a `Max-Age` equal to the server-side session
+/// lifetime so the browser and the `SessionStore` expire it together.
+fn session_cookie(state: &AppState, session_id: String) -> tower_cookies::Cookie<'static> {
+    use tower_cookies::cookie::{time, SameSite};
+    let max_age = time::Duration::try_from(state.session_store.max_age())
+        .expect("session max age fits in a cookie Max-Age");
+    tower_cookies::Cookie::build((SESSION_COOKIE, session_id))
+        .path("/")
+        .http_only(true)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Lax)
+        .max_age(max_age)
+        .build()
+}
+
+/// The cookie to pass to `Cookies::remove` on logout. The removal cookie must
+/// carry the same `Path` as the one set at login, or the browser keeps the
+/// original.
+fn session_cookie_removal() -> tower_cookies::Cookie<'static> {
+    tower_cookies::Cookie::build(SESSION_COOKIE).path("/").build()
+}
+
 /// Example pre-filled query over the schema (classes & properties) — the
 /// "query the ontology" entry point. Generic enough for any ontology dataset.
 const EXAMPLE_ONTOLOGY_QUERY: &str = "PREFIX owl: <http://www.w3.org/2002/07/owl#>\n\
@@ -184,7 +209,7 @@ async fn login_submit(
     {
         if auth::verify_password(&form.password, &password_hash) {
             let session_id = state.session_store.create_session(form.username, user_iri);
-            cookies.add(tower_cookies::Cookie::new(SESSION_COOKIE, session_id));
+            cookies.add(session_cookie(&state, session_id));
             return Redirect::to("/").into_response();
         }
     }
@@ -209,7 +234,7 @@ async fn login_submit(
 async fn logout(State(state): State<AppState>, cookies: Cookies) -> Redirect {
     if let Some(cookie) = cookies.get(SESSION_COOKIE) {
         state.session_store.remove_session(cookie.value());
-        cookies.remove(tower_cookies::Cookie::from(SESSION_COOKIE));
+        cookies.remove(session_cookie_removal());
     }
     Redirect::to("/")
 }
@@ -1589,4 +1614,161 @@ async fn teams_list(State(state): State<AppState>, cookies: Cookies) -> Response
     };
 
     Html(html).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use axum_test::TestServer;
+
+    use super::SESSION_COOKIE;
+    use crate::auth::SessionStore;
+    use crate::routes::create_router;
+    use crate::state::AppState;
+    use crate::store::sparql_update;
+
+    /// In-memory state with one user "admin"/"secret" (root-team admin).
+    fn setup_state() -> AppState {
+        let state = AppState::new().unwrap();
+        let hash = crate::auth::hash_password("secret");
+        sparql_update(
+            &state.store_manager.system,
+            &format!(
+                r#"
+                PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+                INSERT DATA {{
+                    <https://mlipe.2mia.org/teams/root> a mlipe:Team ;
+                        mlipe:teamName "root" ;
+                        mlipe:hasAdmin <https://mlipe.2mia.org/users/admin> .
+                    <https://mlipe.2mia.org/users/admin> mlipe:username "admin" ;
+                        mlipe:passwordHash "{hash}" .
+                }}
+                "#
+            ),
+        )
+        .unwrap();
+        state
+    }
+
+    /// A server that keeps cookies between requests, like a browser.
+    fn server_for(state: AppState) -> TestServer {
+        TestServer::builder()
+            .save_cookies()
+            .build(create_router(state))
+    }
+
+    async fn login(server: &TestServer) -> axum_test::TestResponse {
+        server
+            .post("/_login")
+            .form(&[("username", "admin"), ("password", "secret")])
+            .await
+    }
+
+    /// The raw `Set-Cookie` header for the session cookie on a response.
+    fn session_set_cookie(response: &axum_test::TestResponse) -> String {
+        response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .find(|v| v.starts_with(&format!("{SESSION_COOKIE}=")))
+            .expect("login response sets the session cookie")
+    }
+
+    /// Case-insensitive attribute check on a raw `Set-Cookie` value, matching
+    /// on `; name` so a value cannot satisfy an attribute name.
+    fn has_attr(set_cookie: &str, attr: &str) -> bool {
+        set_cookie
+            .split(';')
+            .skip(1)
+            .any(|part| part.trim().eq_ignore_ascii_case(attr))
+    }
+
+    #[tokio::test]
+    async fn login_sets_hardened_session_cookie() {
+        let server = server_for(setup_state());
+        let response = login(&server).await;
+        response.assert_status(StatusCode::SEE_OTHER);
+
+        let set_cookie = session_set_cookie(&response);
+        assert!(has_attr(&set_cookie, "HttpOnly"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "Secure"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "SameSite=Lax"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "Path=/"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "Max-Age=43200"), "{set_cookie}");
+
+        // The browser-side cookie is also usable: a login-gated page renders.
+        let page = server.get("/_change-password").await;
+        page.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn secure_cookies_false_drops_only_the_secure_flag() {
+        let mut state = setup_state();
+        state.secure_cookies = false;
+        let server = server_for(state);
+        let set_cookie = session_set_cookie(&login(&server).await);
+        assert!(!has_attr(&set_cookie, "Secure"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "HttpOnly"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "SameSite=Lax"), "{set_cookie}");
+    }
+
+    #[tokio::test]
+    async fn bad_password_sets_no_cookie() {
+        let server = server_for(setup_state());
+        let response = server
+            .post("/_login")
+            .form(&[("username", "admin"), ("password", "WRONG")])
+            .await;
+        response.assert_status_ok();
+        assert!(response.headers().get("set-cookie").is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_clears_the_cookie_and_the_server_session() {
+        let state = setup_state();
+        let session_store = state.session_store.clone();
+        let server = server_for(state);
+
+        let login_response = login(&server).await;
+        let session_id = login_response.cookie(SESSION_COOKIE).value().to_string();
+        assert!(session_store.get_session(&session_id).is_some());
+
+        let logout_response = server.post("/_logout").await;
+        logout_response.assert_status(StatusCode::SEE_OTHER);
+
+        // The removal cookie must match the login cookie's path, otherwise the
+        // browser keeps the original cookie alongside the expired one.
+        let set_cookie = session_set_cookie(&logout_response);
+        assert!(has_attr(&set_cookie, "Path=/"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "Max-Age=0"), "{set_cookie}");
+        assert!(session_store.get_session(&session_id).is_none());
+
+        // Gated pages are closed again.
+        let page = server.get("/_change-password").await;
+        page.assert_status(StatusCode::SEE_OTHER);
+        assert_eq!(page.headers()["location"], "/_login");
+    }
+
+    /// A cookie whose session has outlived the server-side max age is
+    /// rejected even though the browser still sends it.
+    #[tokio::test]
+    async fn expired_session_is_rejected_server_side() {
+        let mut state = setup_state();
+        state.session_store = Arc::new(SessionStore::with_max_age(
+            std::time::Duration::from_millis(50),
+        ));
+        let server = server_for(state);
+
+        login(&server).await.assert_status(StatusCode::SEE_OTHER);
+        server.get("/_change-password").await.assert_status_ok();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let page = server.get("/_change-password").await;
+        page.assert_status(StatusCode::SEE_OTHER);
+        assert_eq!(page.headers()["location"], "/_login");
+    }
 }

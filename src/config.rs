@@ -37,6 +37,16 @@ impl Default for GrobidConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Mark the session cookie `Secure` so browsers only send it over HTTPS.
+    /// Defaults to `true` (concon is deployed behind TLS); set to `false` only
+    /// for local development over plain `http://`, where a `Secure` cookie
+    /// would never be sent back and login would appear not to work.
+    #[serde(default = "default_secure_cookies")]
+    pub secure_cookies: bool,
+}
+
+fn default_secure_cookies() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -57,6 +67,7 @@ impl Default for Config {
             server: ServerConfig {
                 host: "0.0.0.0".into(),
                 port: 3000,
+                secure_cookies: default_secure_cookies(),
             },
             store: StoreConfig {
                 system_data: DEFAULT_SYSTEM_DATA_PATH.into(),
@@ -136,6 +147,26 @@ mod tests {
         let contents = std::fs::read_to_string("concon.example.toml")
             .expect("concon.example.toml present at the crate root");
         let _: Config = toml::from_str(&contents).expect("example config parses into Config");
+    }
+
+    /// `secure_cookies` is opt-out: a config that omits it gets `true`, and an
+    /// explicit `false` (local HTTP development) is honoured.
+    #[test]
+    fn secure_cookies_defaults_to_true() {
+        let minimal = r#"
+            [server]
+            host = "127.0.0.1"
+            port = 3000
+            [store]
+            system_data = "system.ttl"
+            data_dir = "data"
+        "#;
+        let cfg: Config = toml::from_str(minimal).unwrap();
+        assert!(cfg.server.secure_cookies);
+
+        let dev = minimal.replace("port = 3000", "port = 3000\nsecure_cookies = false");
+        let cfg: Config = toml::from_str(&dev).unwrap();
+        assert!(!cfg.server.secure_cookies);
     }
 
     /// A freshly-seeded system store must report the current schema version, so

@@ -1,6 +1,10 @@
 [server]
 host = "0.0.0.0"
 port = 3000
+# Mark the login session cookie `Secure` (sent over HTTPS only). Default true;
+# set to false only for local development over plain http://, otherwise the
+# browser never returns the cookie and login appears not to work.
+# secure_cookies = true
 
 [store]
 # Path to the Turtle file containing system data (users, teams, datasets).
