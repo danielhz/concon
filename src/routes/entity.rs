@@ -524,6 +524,17 @@ pub async fn add_annotation_iri(
         // Nothing to add — just bounce back to the view.
         return Redirect::to(&redirect_to).into_response();
     }
+    if note.len() > crate::markdown::MAX_NOTE_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Note too long: {} bytes, maximum {} bytes",
+                note.len(),
+                crate::markdown::MAX_NOTE_BYTES
+            ),
+        )
+            .into_response();
+    }
     let Some(store) = state.store_manager.get_dataset(dataset_name) else {
         return (StatusCode::NOT_FOUND, "Dataset not found").into_response();
     };
@@ -1020,7 +1031,7 @@ mlips:usesFramework a owl:ObjectProperty .
         assert!(rows[0].anchor.starts_with("note-"), "{}", rows[0].anchor);
         assert!(rows[0].anchor.len() > "note-".len(), "{}", rows[0].anchor);
         let html = &rows[0].body_html;
-        assert!(html.contains("great work!<br>"), "{html}");
+        assert!(html.contains("great work!<br />"), "{html}");
         assert!(html.contains("says \"me\""), "{html}");
 
         // Targets are isolated: a different entity has no notes.
@@ -1057,7 +1068,7 @@ mlips:usesFramework a owl:ObjectProperty .
         assert!(html.contains(r#"<a href="https://example.org/p""#), "{html}");
         assert!(html.contains("<code>run()</code>"), "{html}");
         assert!(!html.contains("<script"), "{html}");
-        assert!(!html.contains("alert"), "{html}");
+        assert!(html.contains("&lt;script&gt;alert(1)"), "{html}");
     }
 
     #[test]

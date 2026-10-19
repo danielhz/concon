@@ -159,7 +159,7 @@
 {% else %}<p class="empty">No notes yet.</p>{% endif %}
 {% if can_annotate %}
 <form class="annotate-form" method="post" action="{{ self_href }}">
-  <textarea name="note" rows="4" placeholder="Add a note… (Markdown)" required=""></textarea>
+  <textarea name="note" rows="4" placeholder="Add a note… (Markdown)" required="" maxlength="32768"></textarea>
   <p class="annotate-hint">Markdown: <code>**bold**</code>, <code>`code`</code>, fenced code blocks, <code>[text](url)</code>; cite a note above with its <code>#</code> link.</p>
   <div><button type="submit">Add note</button></div>
 </form>
