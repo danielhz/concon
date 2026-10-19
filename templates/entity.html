@@ -27,8 +27,24 @@
   li.annotation { border: 1px solid #e6e6e6; border-radius: 0.4em; padding: 0.5em 0.8em; margin: 0.5em 0; }
   .annotation-meta { font-size: 0.85em; color: #767676; margin-bottom: 0.3em; }
   .annotation-author { font-weight: 600; }
-  .annotation-body { white-space: pre-wrap; }
+  .annotation-link { color: #aaa; text-decoration: none; margin-left: 0.4em; }
+  .annotation-link:hover { color: #555; }
+  li.annotation:target { border-color: #8aa; background: #f4fafa; }
+  .annotation-body { overflow-wrap: anywhere; }
+  .annotation-body > :first-child { margin-top: 0; }
+  .annotation-body > :last-child { margin-bottom: 0; }
+  .annotation-body p { margin: 0.4em 0; }
+  .annotation-body code { background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 0.2em; font-size: 0.92em; }
+  .annotation-body pre { background: #f4f4f4; padding: 0.5em 0.7em; border-radius: 0.3em; overflow-x: auto; }
+  .annotation-body pre code { background: none; padding: 0; }
+  .annotation-body blockquote { margin: 0.4em 0; padding-left: 0.8em; border-left: 3px solid #ddd; color: #555; }
+  .annotation-body ul, .annotation-body ol { margin: 0.3em 0; padding-left: 1.5em; }
+  .annotation-body table { border-collapse: collapse; margin: 0.4em 0; }
+  .annotation-body th, .annotation-body td { border: 1px solid #ddd; padding: 0.2em 0.5em; }
+  .annotation-body h1, .annotation-body h2, .annotation-body h3,
+  .annotation-body h4, .annotation-body h5, .annotation-body h6 { font-size: 1.05em; margin: 0.6em 0 0.2em; }
   .annotate-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 0.4em; }
+  .annotate-hint { font-size: 0.85em; color: #767676; margin: 0 0 0.4em; }
   .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
   .formats code { background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 0.2em; }
 </style>
@@ -133,16 +149,18 @@
 {% if annotations %}
 <ul class="annotations">
   {% for a in annotations %}
-  <li class="annotation">
-    <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}</div>
-    <div class="annotation-body">{{ a.body }}</div>
+  <li class="annotation" id="{{ a.anchor }}">
+    <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}<a class="annotation-link" href="#{{ a.anchor }}" title="Link to this note (paste as [text](#{{ a.anchor }}) to cite it)">#</a></div>
+    {# body_html is Markdown rendered and sanitised server-side (src/markdown.rs); the raw source never reaches the page unescaped. #}
+    <div class="annotation-body">{{ a.body_html | safe }}</div>
   </li>
   {% endfor %}
 </ul>
 {% else %}<p class="empty">No notes yet.</p>{% endif %}
 {% if can_annotate %}
 <form class="annotate-form" method="post" action="{{ self_href }}">
-  <textarea name="note" rows="3" placeholder="Add a note…" required=""></textarea>
+  <textarea name="note" rows="4" placeholder="Add a note… (Markdown)" required=""></textarea>
+  <p class="annotate-hint">Markdown: <code>**bold**</code>, <code>`code`</code>, fenced code blocks, <code>[text](url)</code>; cite a note above with its <code>#</code> link.</p>
   <div><button type="submit">Add note</button></div>
 </form>
 {% elif not username %}
