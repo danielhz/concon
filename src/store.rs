@@ -6,6 +6,9 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use oxigraph::io::RdfFormat;
+use oxigraph::model::{
+    GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, QuadRef, TermRef,
+};
 use oxigraph::sparql::{
     CancellationToken, QueryEvaluationError, QueryResults, SparqlEvaluator, UpdateEvaluationError,
 };
@@ -82,6 +85,53 @@ pub fn sparql_update(store: &Store, update: &str) -> Result<(), UpdateEvaluation
 
 /// File name of the served ontology document within a dataset's doc store.
 pub const DOC_INDEX_FILE: &str = "index.xhtml";
+
+/// Namespace of the system-store vocabulary.
+pub const MLIPE_NS: &str = "https://mlipe.2mia.org/ontology#";
+/// IRI prefix of dataset resources in the system store (`…/datasets/<name>`).
+pub const DATASET_IRI_PREFIX: &str = "https://mlipe.2mia.org/datasets/";
+
+/// Upper bound on the length of one dataset/team name segment.
+pub const MAX_NAME_SEGMENT_LEN: usize = 128;
+/// Upper bound on the length of a whole qualified dataset name.
+pub const MAX_DATASET_NAME_LEN: usize = 256;
+
+/// Whether `s` is a safe, well-formed name segment — one path component of a
+/// qualified dataset name (`team/sub/dataset`) or one team-path segment. The
+/// allow-list is deliberately conservative: a segment becomes a filesystem
+/// directory name, part of an IRI, and a SPARQL literal, so it must not be
+/// able to escape any of those. ASCII letters, digits, `_`, `-` and `.` only;
+/// no leading `.` (rules out `.`, `..` and hidden directories); length-capped.
+pub fn is_valid_name_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_NAME_SEGMENT_LEN
+        && !s.starts_with('.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// Whether `name` is a well-formed qualified dataset name: one or more
+/// `/`-separated valid segments (see `is_valid_name_segment`), no empty
+/// segment (so no leading/trailing/double `/`), total length capped. Every
+/// dataset name reaching the store must pass this before it is used as a
+/// path, an IRI, or a literal.
+pub fn is_valid_dataset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_DATASET_NAME_LEN
+        && name.split('/').all(is_valid_name_segment)
+}
+
+/// A `mlipe:` vocabulary term as a named node.
+fn mlipe_node(local: &str) -> Result<NamedNode, String> {
+    NamedNode::new(format!("{MLIPE_NS}{local}")).map_err(|e| e.to_string())
+}
+
+/// The three visibility levels a dataset may carry (`mlipe:hasVisibility`).
+pub const VISIBILITIES: [&str; 3] = [
+    "PublicVisibility",
+    "LoggedUsersVisibility",
+    "TeamOnlyVisibility",
+];
 
 /// Manages multiple Oxigraph stores, one per dataset.
 pub struct StoreManager {
@@ -171,6 +221,9 @@ impl StoreManager {
 
     /// Create a new dataset with a persistent store.
     pub fn create_dataset(&self, name: &str) -> Result<(), String> {
+        if !is_valid_dataset_name(name) {
+            return Err(format!("Invalid dataset name '{}'", name));
+        }
         let mut datasets = self.datasets.write().map_err(|e| e.to_string())?;
         if datasets.contains_key(name) {
             return Err(format!("Dataset '{}' already exists", name));
@@ -227,18 +280,52 @@ impl StoreManager {
             }
         }
 
-        // Remove dataset metadata from system store
-        let update = format!(
-            r#"
-            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            DELETE WHERE {{
-                ?ds a mlipe:Dataset ;
-                    mlipe:datasetName "{name}" .
-                ?ds ?p ?o .
-            }}
-            "#,
-        );
-        let _ = sparql_update(&self.system, &update);
+        // Remove dataset metadata from system store. Built with the model API
+        // (no SPARQL text is assembled from `name`): find every resource whose
+        // `mlipe:datasetName` is `name`, then drop all quads it is the subject
+        // of (type, name, visibility) and all quads it is the object of (the
+        // owning team's `mlipe:ownsDataset`).
+        if let Err(e) = self.remove_dataset_metadata(name) {
+            tracing::warn!(
+                "Dataset '{}' deleted but its metadata was not removed: {}",
+                name,
+                e
+            );
+        }
+        Ok(())
+    }
+
+    /// Remove every system-store quad about the dataset named `name` (as
+    /// subject or object). Pure model-API traversal; `name` is only ever used
+    /// as a literal value.
+    fn remove_dataset_metadata(&self, name: &str) -> Result<(), String> {
+        let dataset_name = mlipe_node("datasetName")?;
+        let name_lit = Literal::new_simple_literal(name);
+        let subjects: Vec<_> = self
+            .system
+            .quads_for_pattern(
+                None,
+                Some(dataset_name.as_ref()),
+                Some(TermRef::from(name_lit.as_ref())),
+                None,
+            )
+            .filter_map(|q| q.ok().map(|q| q.subject))
+            .collect();
+        for ds in subjects {
+            let ds_ref = NamedOrBlankNodeRef::from(&ds);
+            let as_subject = self
+                .system
+                .quads_for_pattern(Some(ds_ref), None, None, None)
+                .filter_map(Result::ok);
+            let as_object = self
+                .system
+                .quads_for_pattern(None, None, Some(TermRef::from(ds_ref)), None)
+                .filter_map(Result::ok);
+            let quads: Vec<_> = as_subject.chain(as_object).collect();
+            for q in &quads {
+                self.system.remove(q).map_err(|e| e.to_string())?;
+            }
+        }
         Ok(())
     }
 
@@ -268,18 +355,38 @@ impl StoreManager {
         visibility: &str,
         team_iri: &str,
     ) -> Result<(), String> {
-        let update = format!(
-            r#"
-            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            INSERT DATA {{
-                <https://mlipe.2mia.org/datasets/{name}> a mlipe:Dataset ;
-                    mlipe:datasetName "{name}" ;
-                    mlipe:hasVisibility mlipe:{visibility} .
-                <{team_iri}> mlipe:ownsDataset <https://mlipe.2mia.org/datasets/{name}> .
-            }}
-            "#,
-        );
-        sparql_update(&self.system, &update).map_err(|e| e.to_string())
+        // Built with the model API rather than `format!`-ed SPARQL: `name` is
+        // validated and then only ever an IRI path tail / a literal value, and
+        // `visibility` must be one of the known levels.
+        if !is_valid_dataset_name(name) {
+            return Err(format!("Invalid dataset name '{}'", name));
+        }
+        if !VISIBILITIES.contains(&visibility) {
+            return Err(format!("Invalid visibility '{}'", visibility));
+        }
+        let team_iri = team_iri.trim_matches(|c| c == '<' || c == '>');
+        let team = NamedNode::new(team_iri).map_err(|e| format!("Invalid team IRI: {e}"))?;
+        let ds = NamedNode::new(format!("{DATASET_IRI_PREFIX}{name}"))
+            .map_err(|e| format!("Invalid dataset IRI: {e}"))?;
+        let rdf_type =
+            NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        let dataset_class = mlipe_node("Dataset")?;
+        let p_name = mlipe_node("datasetName")?;
+        let p_visibility = mlipe_node("hasVisibility")?;
+        let p_owns = mlipe_node("ownsDataset")?;
+        let visibility_node = mlipe_node(visibility)?;
+        let name_lit = Literal::new_simple_literal(name);
+        let g = GraphNameRef::DefaultGraph;
+        let quads = [
+            QuadRef::new(&ds, rdf_type, &dataset_class, g),
+            QuadRef::new(&ds, &p_name, &name_lit, g),
+            QuadRef::new(&ds, &p_visibility, &visibility_node, g),
+            QuadRef::new(&team, &p_owns, &ds, g),
+        ];
+        for q in quads {
+            self.system.insert(q).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     /// Check whether the system store has any triples.
@@ -605,6 +712,93 @@ mod tests {
             }
         }
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_dataset_name_validation() {
+        for ok in ["root/ds", "mlips/mlips", "a", "team/sub/ds-1.2_x", "A-b.c"] {
+            assert!(is_valid_dataset_name(ok), "{ok} should be valid");
+        }
+        for bad in [
+            "",
+            "/",
+            "root/",
+            "/ds",
+            "root//ds",
+            "../etc",
+            "root/..",
+            "root/.hidden",
+            ".",
+            "a b",
+            "root/ds\"",
+            "root/ds>",
+            "root/ds;",
+            "ro\u{e9}t/ds",
+            "root/ds\n",
+        ] {
+            assert!(!is_valid_dataset_name(bad), "{bad:?} should be invalid");
+        }
+        let long_segment = "a".repeat(MAX_NAME_SEGMENT_LEN + 1);
+        assert!(!is_valid_dataset_name(&long_segment));
+        let long_name = (0..3)
+            .map(|_| "a".repeat(100))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(!is_valid_dataset_name(&long_name));
+    }
+
+    #[test]
+    fn test_create_dataset_rejects_invalid_name() {
+        let manager = StoreManager::new_in_memory().unwrap();
+        assert!(manager.create_dataset("../escape").is_err());
+        assert!(manager.create_dataset("root/.hidden").is_err());
+        assert!(manager.list_datasets().is_empty());
+        assert!(manager.insert_dataset_metadata("root/\"x").is_err());
+        assert!(
+            manager
+                .insert_dataset_metadata_with_visibility("root/x", "NotAVisibility")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_dataset_metadata_insert_and_remove() {
+        let manager = StoreManager::new_in_memory().unwrap();
+        manager.create_dataset("team/meta-ds").unwrap();
+        manager
+            .insert_dataset_metadata_full(
+                "team/meta-ds",
+                "TeamOnlyVisibility",
+                "<https://mlipe.2mia.org/teams/team>",
+            )
+            .unwrap();
+
+        let ask = |q: &str| {
+            matches!(
+                sparql_query(&manager.system, q),
+                Ok(QueryResults::Boolean(true))
+            )
+        };
+        assert!(ask(r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+               ASK { <https://mlipe.2mia.org/datasets/team/meta-ds> a mlipe:Dataset ;
+                         mlipe:datasetName "team/meta-ds" ;
+                         mlipe:hasVisibility mlipe:TeamOnlyVisibility .
+                     <https://mlipe.2mia.org/teams/team> mlipe:ownsDataset
+                         <https://mlipe.2mia.org/datasets/team/meta-ds> . }"#));
+
+        manager.delete_dataset("team/meta-ds").unwrap();
+        assert!(!ask(
+            r#"ASK { { <https://mlipe.2mia.org/datasets/team/meta-ds> ?p ?o }
+                    UNION { ?s ?p <https://mlipe.2mia.org/datasets/team/meta-ds> } }"#
+        ));
+        // Unrelated metadata is untouched.
+        manager.create_dataset("root/other").unwrap();
+        manager.insert_dataset_metadata("root/other").unwrap();
+        manager.create_dataset("root/gone").unwrap();
+        manager.insert_dataset_metadata("root/gone").unwrap();
+        manager.delete_dataset("root/gone").unwrap();
+        assert!(ask(r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+               ASK { ?ds mlipe:datasetName "root/other" }"#));
     }
 
     #[test]

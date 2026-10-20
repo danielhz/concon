@@ -16,9 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/mlipe /usr/local/bin/mlipe
+COPY --from=builder /app/target/release/concon /usr/local/bin/concon
 
 WORKDIR /app
 EXPOSE 3000
 
-CMD ["mlipe"]
+CMD ["concon"]

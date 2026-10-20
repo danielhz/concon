@@ -63,7 +63,7 @@ See =file-sharing.org= for details.
 | =/_users=           | Users list                                     |
 | =/_users/daniel=    | Daniel's profile page                          |
 | =/_change-password= | Change password page                           |
-| =/_api/datasets=    | Dataset API (JSON)                             |
+| =/_api/datasets=    | Dataset API (JSON; list is public, create/delete need an authorized user) |
 
 ** Team hierarchy
 

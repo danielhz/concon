@@ -29,7 +29,7 @@ INSERT DATA { ex:s ex:p ex:o . }"></textarea>
 <h2>Manage</h2>
 <form method="post" action="/_datasets/delete" class="delete-form"
       onsubmit="return confirm('Delete dataset \'{{ dataset_name }}\'? This cannot be undone.')">
-    <input type="hidden" name="name" value="{{ dataset_name }}">
+    <input type="hidden" name="name" value="{{ qualified_name }}">
     <button type="submit" class="btn-danger">Delete dataset</button>
 </form>
 {% endif %}

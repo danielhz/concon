@@ -4,10 +4,11 @@ use std::sync::RwLock;
 use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use oxigraph::model::NamedNode;
 use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
-use crate::store::{sparql_query, sparql_update};
+use crate::store::{MLIPE_NS, sparql_query, sparql_update};
 
 pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
@@ -212,6 +213,36 @@ pub fn is_root_admin(store: &Store, user_iri: &str) -> bool {
             _ => None,
         })
         .unwrap_or(false)
+}
+
+/// Whether `user_iri` is a direct admin (`mlipe:hasAdmin`) of `team_iri`.
+/// Model-API lookup — neither IRI is interpolated into SPARQL text.
+pub fn is_team_admin(store: &Store, user_iri: &str, team_iri: &str) -> bool {
+    let strip = |s: &str| s.trim_matches(|c| c == '<' || c == '>').to_string();
+    let (Ok(team), Ok(user), Ok(has_admin)) = (
+        NamedNode::new(strip(team_iri)),
+        NamedNode::new(strip(user_iri)),
+        NamedNode::new(format!("{MLIPE_NS}hasAdmin")),
+    ) else {
+        return false;
+    };
+    store
+        .quads_for_pattern(
+            Some(team.as_ref().into()),
+            Some(has_admin.as_ref()),
+            Some(user.as_ref().into()),
+            None,
+        )
+        .next()
+        .is_some_and(|q| q.is_ok())
+}
+
+/// Whether `user_iri` may create a dataset owned by `team_iri`: root-team
+/// admins may create anywhere; otherwise the user must be an admin of that
+/// team. (The pre-creation counterpart of `can_write_dataset`, which needs the
+/// dataset's metadata to exist.)
+pub fn can_create_dataset_in_team(store: &Store, user_iri: &str, team_iri: &str) -> bool {
+    is_root_admin(store, user_iri) || is_team_admin(store, user_iri, team_iri)
 }
 
 /// Get datasets accessible to a user.

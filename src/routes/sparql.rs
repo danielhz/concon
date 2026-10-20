@@ -299,6 +299,15 @@ mod tests {
         TestServer::new(app)
     }
 
+    /// A server with one public dataset, created on the store directly (the
+    /// dataset API requires an authorized user).
+    fn test_server_with_dataset(name: &str) -> TestServer {
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset(name).unwrap();
+        state.store_manager.insert_dataset_metadata(name).unwrap();
+        TestServer::new(create_router(state))
+    }
+
     #[tokio::test]
     async fn test_sparql_query_on_nonexistent_dataset() {
         let server = test_server();
@@ -311,12 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sparql_query_empty_dataset() {
-        let server = test_server();
-
-        server
-            .post("/_api/datasets")
-            .json(&serde_json::json!({"name": "root/sparql-test"}))
-            .await;
+        let server = test_server_with_dataset("root/sparql-test");
 
         let response = server
             .get("/_ds/sparql-test/_sparql")
@@ -330,12 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sparql_query_missing_param() {
-        let server = test_server();
-
-        server
-            .post("/_api/datasets")
-            .json(&serde_json::json!({"name": "root/sparql-test-2"}))
-            .await;
+        let server = test_server_with_dataset("root/sparql-test-2");
 
         let response = server.get("/_ds/sparql-test-2/_sparql").await;
         response.assert_status(axum::http::StatusCode::BAD_REQUEST);
@@ -343,12 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sparql_post_query() {
-        let server = test_server();
-
-        server
-            .post("/_api/datasets")
-            .json(&serde_json::json!({"name": "root/sparql-post-test"}))
-            .await;
+        let server = test_server_with_dataset("root/sparql-post-test");
 
         let response = server
             .post("/_ds/sparql-post-test/_sparql")
