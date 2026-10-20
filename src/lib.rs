@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod grobid;
 pub mod inference;
+pub mod markdown;
 pub mod migrate_io;
 pub mod migration;
 pub mod routes;

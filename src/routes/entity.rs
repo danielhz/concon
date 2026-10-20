@@ -440,16 +440,34 @@ fn build_annotation_insert(subject_iri: &str, note: &str, username: &str) -> Str
 /// One annotation note on a resource (Epic H): author, timestamp, text.
 #[derive(Serialize)]
 struct AnnotationRow {
+    /// Fragment id for citing this note from another one (`#note-<uuid>`),
+    /// derived from the annotation IRI minted by [`build_annotation_insert`].
+    anchor: String,
     creator: String,
     created: String,
+    /// The note as written — Markdown source.
     body: String,
+    /// `body` rendered through [`crate::markdown::render_note_html`]:
+    /// sanitised HTML, emitted with `| safe` by the template.
+    body_html: String,
+}
+
+/// Fragment id for an annotation: `note-` + the IRI's local part, kept only
+/// when it is fragment-safe (the server mints `…/annotation/<uuid>`, so this
+/// holds for every stored note); otherwise fall back to the note's position.
+fn annotation_anchor(annotation_iri: &str, position: usize) -> String {
+    let local = annotation_iri.rsplit('/').next().unwrap_or("");
+    let safe = !local.is_empty()
+        && local.len() <= 128
+        && local.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    if safe { format!("note-{local}") } else { format!("note-{position}") }
 }
 
 /// Notes targeting `subject_iri`, oldest first (Epic H). Read from the
 /// dedicated annotations graph only.
 fn annotations_of(store: &Store, subject_iri: &str) -> Vec<AnnotationRow> {
     let q = format!(
-        r#"SELECT ?body ?creator ?created WHERE {{
+        r#"SELECT ?a ?body ?creator ?created WHERE {{
             GRAPH <{ANNOTATIONS_GRAPH}> {{
                 ?a <{OA_HAS_TARGET}> <{subject_iri}> ; <{OA_HAS_BODY}> ?body .
                 OPTIONAL {{ ?a <{DCTERMS_CREATOR}> ?creator }}
@@ -463,9 +481,15 @@ fn annotations_of(store: &Store, subject_iri: &str) -> Vec<AnnotationRow> {
             let Some(body) = literal_value(sol.get("body")) else {
                 continue;
             };
+            let ann_iri = match sol.get("a") {
+                Some(Term::NamedNode(n)) => n.as_str(),
+                _ => "",
+            };
             rows.push(AnnotationRow {
+                anchor: annotation_anchor(ann_iri, rows.len() + 1),
                 creator: literal_value(sol.get("creator")).unwrap_or_else(|| "anonymous".into()),
                 created: literal_value(sol.get("created")).unwrap_or_default(),
+                body_html: crate::markdown::render_note_html(&body),
                 body,
             });
         }
@@ -511,6 +535,17 @@ pub async fn add_annotation_iri(
     if note.is_empty() {
         // Nothing to add — just bounce back to the view.
         return Redirect::to(&redirect_to).into_response();
+    }
+    if note.len() > crate::markdown::MAX_NOTE_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Note too long: {} bytes, maximum {} bytes",
+                note.len(),
+                crate::markdown::MAX_NOTE_BYTES
+            ),
+        )
+            .into_response();
     }
     let Some(store) = state.store_manager.get_dataset(dataset_name) else {
         return (StatusCode::NOT_FOUND, "Dataset not found").into_response();
@@ -1222,6 +1257,14 @@ mlips:usesFramework a owl:ObjectProperty .
         assert_eq!(rows[0].body, note, "note text preserved through escape/store");
         assert_eq!(rows[0].creator, "alice");
         assert!(!rows[0].created.is_empty(), "NOW() stamped a created time");
+        // The anchor comes from the STRUUID-minted annotation IRI, and the
+        // body is also served as rendered Markdown (newline → <br>, quotes
+        // intact, nothing script-like).
+        assert!(rows[0].anchor.starts_with("note-"), "{}", rows[0].anchor);
+        assert!(rows[0].anchor.len() > "note-".len(), "{}", rows[0].anchor);
+        let html = &rows[0].body_html;
+        assert!(html.contains("great work!<br />"), "{html}");
+        assert!(html.contains("says \"me\""), "{html}");
 
         // Targets are isolated: a different entity has no notes.
         assert!(annotations_of(&store, "https://w3id.org/mlips/entity/other").is_empty());
@@ -1240,6 +1283,56 @@ mlips:usesFramework a owl:ObjectProperty .
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].body, "a note on a class");
         assert_eq!(rows[0].creator, "bob");
+    }
+
+    /// Markdown in a stored note is rendered (link + code) and sanitised
+    /// (script dropped) on read-back; the raw source is kept as-is.
+    #[test]
+    fn annotation_markdown_is_rendered_and_sanitised() {
+        let store = Store::new().unwrap();
+        let term = "https://w3id.org/mlips#Method";
+        let note = "see [the paper](https://example.org/p) and `run()` <script>alert(1)</script>";
+        sparql_update(&store, &build_annotation_insert(term, note, "bob")).expect("insert");
+        let rows = annotations_of(&store, term);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, note, "raw Markdown source is stored untouched");
+        let html = &rows[0].body_html;
+        assert!(html.contains(r#"<a href="https://example.org/p""#), "{html}");
+        assert!(html.contains("<code>run()</code>"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
+        assert!(html.contains("&lt;script&gt;alert(1)"), "{html}");
+    }
+
+    /// The add-note POST refuses a note over `MAX_NOTE_BYTES` with 413 and
+    /// stores nothing; a note exactly at the cap is accepted.
+    #[tokio::test]
+    async fn oversized_note_is_rejected_before_storing() {
+        use crate::markdown::MAX_NOTE_BYTES;
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("t/d").unwrap();
+        let subject = "https://w3id.org/mlips#Method";
+        let too_long = "x".repeat(MAX_NOTE_BYTES + 1);
+        let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &too_long).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        assert!(annotations_of(&store, subject).is_empty(), "nothing stored");
+
+        let at_cap = "y".repeat(MAX_NOTE_BYTES);
+        let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &at_cap).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(annotations_of(&store, subject).len(), 1);
+    }
+
+    #[test]
+    fn annotation_anchor_is_fragment_safe() {
+        assert_eq!(
+            annotation_anchor("https://w3id.org/mlips/annotation/0b1c-2d3e", 7),
+            "note-0b1c-2d3e"
+        );
+        // Unsafe or missing local part → positional fallback.
+        assert_eq!(annotation_anchor("https://x/annotation/a b", 3), "note-3");
+        assert_eq!(annotation_anchor("https://x/annotation/\"><x", 4), "note-4");
+        assert_eq!(annotation_anchor("", 5), "note-5");
     }
 
     #[test]
