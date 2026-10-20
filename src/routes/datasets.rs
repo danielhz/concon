@@ -1,15 +1,17 @@
 //! Dataset management API (`/_api/datasets`) and entity search.
 //!
-//! Listing is public (it mirrors what the home page shows). Creating and
-//! deleting a dataset are privileged: both resolve the caller to a user
-//! (session cookie or HTTP Basic) and check the role matrix — a root-team
-//! admin may do anything; otherwise the user must be an admin of the dataset's
-//! owning team (the team named by the qualified name's path, e.g.
-//! `materials/foo` is owned by team `materials`; a bare `foo` lives under
-//! `root/`). Delete additionally accepts the write-only ingest token, like
-//! the other dataset write endpoints (`ingest::authorize_write`). Names are
-//! validated against `store::is_valid_dataset_name` before they reach the
-//! filesystem, an IRI, or the system store.
+//! Listing respects visibility exactly like the home page: an anonymous
+//! caller sees the Public datasets (`auth::get_public_datasets`); an
+//! authenticated user sees what `auth::get_user_datasets` grants (root admins
+//! everything). Creating and deleting a dataset are privileged: both resolve
+//! the caller to a *user* (session cookie or HTTP Basic — the write-only
+//! ingest token is deliberately not accepted, it carries no identity) and
+//! check the role matrix — a root-team admin may do anything; otherwise the
+//! user must be an admin of the dataset's owning team (the team named by the
+//! qualified name's path, e.g. `materials/foo` is owned by team `materials`;
+//! a bare `foo` lives under `root/`). Names are validated against
+//! `store::is_valid_dataset_name` before they reach the filesystem, an IRI,
+//! or the system store.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -45,8 +47,19 @@ struct CreateDataset {
     name: String,
 }
 
-async fn list_datasets(State(state): State<AppState>) -> Json<DatasetList> {
-    let datasets = state.store_manager.list_datasets();
+async fn list_datasets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    cookies: Cookies,
+) -> Json<DatasetList> {
+    let system = &state.store_manager.system;
+    let infos = match ingest::authenticate_user(&state, &headers, &cookies) {
+        Some(user_iri) => auth::get_user_datasets(system, &user_iri),
+        None => auth::get_public_datasets(system),
+    };
+    let mut datasets: Vec<String> = infos.into_iter().map(|d| d.name).collect();
+    datasets.sort();
+    datasets.dedup();
     Json(DatasetList { datasets })
 }
 
@@ -112,7 +125,11 @@ async fn create_dataset(
         .insert_dataset_metadata_full(&name, "PublicVisibility", &team_iri)
     {
         Ok(()) => StatusCode::CREATED.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => {
+            // Do not leave an ownerless, metadata-less store behind.
+            let _ = state.store_manager.delete_dataset(&name);
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
     }
 }
 
@@ -122,10 +139,19 @@ async fn delete_dataset(
     cookies: Cookies,
     Path(name): Path<String>,
 ) -> Response {
-    // Same gate as every other dataset write: ingest token, or a user with
-    // write permission on this dataset (root admin / owning-team admin).
-    if let Err(denied) = ingest::authorize_write(&state, &headers, &cookies, &name) {
-        return denied;
+    // User-only, the same shape as create: the shared ingest token may
+    // replace graphs but not drop a whole dataset (irreversible; also removes
+    // docs, SHACL and metadata). The user needs write permission on the
+    // dataset (root admin / owning-team admin).
+    let Some(user_iri) = ingest::authenticate_user(&state, &headers, &cookies) else {
+        return ingest::unauthorized_response();
+    };
+    if !auth::can_write_dataset(&state.store_manager.system, &user_iri, &name) {
+        return (
+            StatusCode::FORBIDDEN,
+            "No write permission for this dataset",
+        )
+            .into_response();
     }
     if !is_valid_dataset_name(&name) {
         return (StatusCode::BAD_REQUEST, "Invalid dataset name").into_response();
@@ -476,7 +502,7 @@ mod tests {
     // ── ingest token ─────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_ingest_token_deletes_but_cannot_create() {
+    async fn test_ingest_token_is_not_an_identity() {
         let mut state = setup_state();
         state.ingest_token = Some("tok-123".into());
         let server = TestServer::new(create_router(state));
@@ -492,8 +518,64 @@ mod tests {
             .delete("/_api/datasets/root/existing")
             .add_header("authorization", "Bearer tok-123")
             .await;
-        r.assert_status(StatusCode::NO_CONTENT);
-        assert!(list(&server).await.is_empty());
+        r.assert_status(StatusCode::UNAUTHORIZED);
+        assert_eq!(list(&server).await, vec!["root/existing"]);
+    }
+
+    // ── listing respects visibility ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_respects_visibility() {
+        let state = setup_state();
+        state
+            .store_manager
+            .create_dataset("materials/hidden")
+            .unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata_full(
+                "materials/hidden",
+                "TeamOnlyVisibility",
+                "https://mlipe.2mia.org/teams/materials",
+            )
+            .unwrap();
+        state.store_manager.create_dataset("root/members").unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata_with_visibility("root/members", "LoggedUsersVisibility")
+            .unwrap();
+        let server = TestServer::new(create_router(state.clone()));
+
+        // Anonymous: Public only.
+        assert_eq!(list(&server).await, vec!["root/existing"]);
+
+        let listed = |cookie: Cookie<'static>| async {
+            let body: serde_json::Value =
+                server.get("/_api/datasets").add_cookie(cookie).await.json();
+            let mut v: Vec<String> = body["datasets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        // Bob (member, no admin): Public + LoggedUsers.
+        assert_eq!(
+            listed(session_cookie(&state, "bob")).await,
+            vec!["root/existing", "root/members"]
+        );
+        // Alice (materials admin): also her team's TeamOnly dataset.
+        assert_eq!(
+            listed(session_cookie(&state, "alice")).await,
+            vec!["materials/hidden", "root/existing", "root/members"]
+        );
+        // Root admin: everything.
+        assert_eq!(
+            listed(session_cookie(&state, "admin")).await,
+            vec!["materials/hidden", "root/existing", "root/members"]
+        );
     }
 
     // ── web form handlers (/_datasets/new, /_datasets/delete) ────────────

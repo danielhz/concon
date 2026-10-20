@@ -373,6 +373,8 @@ async fn create_dataset_web(
             .store_manager
             .insert_dataset_metadata_full(&qualified_name, visibility, &team_iri)
     {
+        // Do not leave an ownerless, metadata-less store behind.
+        let _ = state.store_manager.delete_dataset(&qualified_name);
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 

@@ -285,7 +285,13 @@ impl StoreManager {
         // `mlipe:datasetName` is `name`, then drop all quads it is the subject
         // of (type, name, visibility) and all quads it is the object of (the
         // owning team's `mlipe:ownsDataset`).
-        let _ = self.remove_dataset_metadata(name);
+        if let Err(e) = self.remove_dataset_metadata(name) {
+            tracing::warn!(
+                "Dataset '{}' deleted but its metadata was not removed: {}",
+                name,
+                e
+            );
+        }
         Ok(())
     }
 
