@@ -32,12 +32,17 @@ fn session_cookie(state: &AppState, session_id: String) -> tower_cookies::Cookie
         .build()
 }
 
-/// The cookie to pass to `Cookies::remove` on logout. The removal cookie must
-/// carry the same `Path` as the one set at login, or the browser keeps the
-/// original.
-fn session_cookie_removal() -> tower_cookies::Cookie<'static> {
+/// The cookie to pass to `Cookies::remove` on logout. It mirrors the login
+/// cookie's attributes: the `Path` must match or the browser keeps the
+/// original, and RFC 6265bis lets a user agent refuse a non-`Secure` removal
+/// of a `Secure` cookie, so the flags are mirrored too.
+fn session_cookie_removal(state: &AppState) -> tower_cookies::Cookie<'static> {
+    use tower_cookies::cookie::SameSite;
     tower_cookies::Cookie::build(SESSION_COOKIE)
         .path("/")
+        .http_only(true)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Lax)
         .build()
 }
 
@@ -210,6 +215,11 @@ async fn login_submit(
         auth::find_user_by_username(&state.store_manager.system, &form.username)
     {
         if auth::verify_password(&form.password, &password_hash) {
+            // A re-login replaces the session the browser already presented,
+            // so the old id does not stay valid for the rest of its 12 h.
+            if let Some(old) = cookies.get(SESSION_COOKIE) {
+                state.session_store.remove_session(old.value());
+            }
             let session_id = state.session_store.create_session(form.username, user_iri);
             cookies.add(session_cookie(&state, session_id));
             return Redirect::to("/").into_response();
@@ -236,7 +246,7 @@ async fn login_submit(
 async fn logout(State(state): State<AppState>, cookies: Cookies) -> Redirect {
     if let Some(cookie) = cookies.get(SESSION_COOKIE) {
         state.session_store.remove_session(cookie.value());
-        cookies.remove(session_cookie_removal());
+        cookies.remove(session_cookie_removal(&state));
     }
     Redirect::to("/")
 }
@@ -1746,12 +1756,35 @@ mod tests {
         let set_cookie = session_set_cookie(&logout_response);
         assert!(has_attr(&set_cookie, "Path=/"), "{set_cookie}");
         assert!(has_attr(&set_cookie, "Max-Age=0"), "{set_cookie}");
+        // Same flags as the login cookie, so a user agent that refuses to let
+        // a non-Secure Set-Cookie touch a Secure cookie still clears it.
+        assert!(has_attr(&set_cookie, "HttpOnly"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "Secure"), "{set_cookie}");
+        assert!(has_attr(&set_cookie, "SameSite=Lax"), "{set_cookie}");
         assert!(session_store.get_session(&session_id).is_none());
 
         // Gated pages are closed again.
         let page = server.get("/_change-password").await;
         page.assert_status(StatusCode::SEE_OTHER);
         assert_eq!(page.headers()["location"], "/_login");
+    }
+
+    /// Logging in while already logged in replaces the server-side session:
+    /// the id the browser presented stops working, only the new one is valid.
+    #[tokio::test]
+    async fn relogin_drops_the_previous_session() {
+        let state = setup_state();
+        let session_store = state.session_store.clone();
+        let server = server_for(state);
+
+        let first = login(&server).await.cookie(SESSION_COOKIE).value().to_string();
+        assert!(session_store.get_session(&first).is_some());
+
+        let second = login(&server).await.cookie(SESSION_COOKIE).value().to_string();
+        assert_ne!(first, second);
+        assert!(session_store.get_session(&first).is_none());
+        assert!(session_store.get_session(&second).is_some());
+        server.get("/_change-password").await.assert_status_ok();
     }
 
     /// A cookie whose session has outlived the server-side max age is

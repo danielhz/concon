@@ -48,6 +48,12 @@ pub struct SessionStore {
     max_age: Duration,
 }
 
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionStore {
     pub fn new() -> Self {
         Self::with_max_age(SESSION_MAX_AGE)
