@@ -1777,10 +1777,18 @@ mod tests {
         let session_store = state.session_store.clone();
         let server = server_for(state);
 
-        let first = login(&server).await.cookie(SESSION_COOKIE).value().to_string();
+        let first = login(&server)
+            .await
+            .cookie(SESSION_COOKIE)
+            .value()
+            .to_string();
         assert!(session_store.get_session(&first).is_some());
 
-        let second = login(&server).await.cookie(SESSION_COOKIE).value().to_string();
+        let second = login(&server)
+            .await
+            .cookie(SESSION_COOKIE)
+            .value()
+            .to_string();
         assert_ne!(first, second);
         assert!(session_store.get_session(&first).is_none());
         assert!(session_store.get_session(&second).is_some());
