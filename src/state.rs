@@ -17,6 +17,10 @@ pub struct AppState {
     /// the ingest write endpoints without reusing a user account — for the
     /// non-interactive loader. `None` disables bearer auth.
     pub ingest_token: Option<String>,
+    /// Whether the session cookie carries the `Secure` attribute (see
+    /// `server.secure_cookies` in `concon.toml`). `true` everywhere except
+    /// local plain-HTTP development.
+    pub secure_cookies: bool,
 }
 
 /// Read the optional write-only ingest token from the environment.
@@ -41,6 +45,7 @@ impl AppState {
             files_dir: PathBuf::new(),
             grobid_url: String::new(),
             ingest_token: ingest_token_from_env(),
+            secure_cookies: true,
         })
     }
 
@@ -49,6 +54,7 @@ impl AppState {
         data_dir: &str,
         files_dir: &str,
         grobid_url: &str,
+        secure_cookies: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let store_manager = StoreManager::new_persistent(data_dir)?;
 
@@ -65,6 +71,7 @@ impl AppState {
             files_dir: files_path,
             grobid_url: grobid_url.to_string(),
             ingest_token: ingest_token_from_env(),
+            secure_cookies,
         })
     }
 }

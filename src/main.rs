@@ -13,9 +13,18 @@ async fn main() {
 
     config::ensure_system_data(&cfg.store.system_data).expect("Failed to ensure system data file");
 
-    let app_state =
-        state::AppState::new_persistent(&cfg.store.data_dir, &cfg.store.files_dir, &cfg.grobid.url)
-            .expect("Failed to initialize application state");
+    let app_state = state::AppState::new_persistent(
+        &cfg.store.data_dir,
+        &cfg.store.files_dir,
+        &cfg.grobid.url,
+        cfg.server.secure_cookies,
+    )
+    .expect("Failed to initialize application state");
+    if !cfg.server.secure_cookies {
+        tracing::warn!(
+            "server.secure_cookies = false: session cookie is not marked Secure (development only)"
+        );
+    }
 
     if app_state.store_manager.is_system_empty() {
         app_state

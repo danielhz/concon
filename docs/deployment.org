@@ -37,6 +37,7 @@ The shipped =concon.example.toml= omits =store.data_dir= and =store.files_dir=, 
 [server]
 host = "127.0.0.1"   # bind locally; nginx terminates TLS and proxies in
 port = 3000
+# secure_cookies = true   # default; the session cookie is HttpOnly, SameSite=Lax, Secure, 12 h
 
 [store]
 system_data = "system.ttl"   # seed users/teams/datasets; created on first run
@@ -46,6 +47,8 @@ files_dir   = "data/files"   # uploaded file blobs
 [grobid]
 url = ""                     # empty disables PDF metadata extraction
 #+end_src
+
+The login session cookie is set =HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200= and the server rejects sessions older than 12 hours regardless of the cookie. =Secure= means the browser only returns the cookie over HTTPS, which is why the nginx TLS front is part of the deployment and not optional; for local development over plain =http://= set =server.secure_cookies = false= (the server logs a warning).
 
 First-run admin: if =system.ttl= does not exist, the server creates it with a root-team admin from =MLIPE_ADMIN_USER= / =MLIPE_ADMIN_PASS= (default =admin=/=admin=). *Set these to real credentials on first launch* (see the unit below).
 

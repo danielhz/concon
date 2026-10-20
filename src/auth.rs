@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
@@ -29,35 +30,76 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
+/// How long a login session stays valid, counted from login. The server
+/// enforces this in [`SessionStore::get_session`]; the login handler sets the
+/// same value as the cookie's `Max-Age` so browser and server agree.
+pub const SESSION_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
+
 #[derive(Clone)]
 pub struct Session {
     pub username: String,
     pub user_iri: String,
+    /// When the session was created; sessions older than the store's max age
+    /// are rejected and dropped.
+    pub created_at: Instant,
 }
 
 pub struct SessionStore {
     sessions: RwLock<HashMap<String, Session>>,
+    max_age: Duration,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionStore {
     pub fn new() -> Self {
+        Self::with_max_age(SESSION_MAX_AGE)
+    }
+
+    /// A store whose sessions expire `max_age` after creation.
+    pub fn with_max_age(max_age: Duration) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            max_age,
         }
+    }
+
+    /// The configured session lifetime.
+    pub fn max_age(&self) -> Duration {
+        self.max_age
+    }
+
+    fn is_expired(&self, session: &Session) -> bool {
+        session.created_at.elapsed() >= self.max_age
     }
 
     pub fn create_session(&self, username: String, user_iri: String) -> String {
         let session_id = uuid::Uuid::new_v4().to_string();
-        let session = Session { username, user_iri };
-        self.sessions
-            .write()
-            .unwrap()
-            .insert(session_id.clone(), session);
+        let session = Session {
+            username,
+            user_iri,
+            created_at: Instant::now(),
+        };
+        let mut sessions = self.sessions.write().unwrap();
+        // Sweep expired sessions so ids that were never presented again do not
+        // accumulate for the life of the process.
+        sessions.retain(|_, s| !self.is_expired(s));
+        sessions.insert(session_id.clone(), session);
         session_id
     }
 
+    /// Look up a session; an expired session is treated as absent and removed.
     pub fn get_session(&self, session_id: &str) -> Option<Session> {
-        self.sessions.read().unwrap().get(session_id).cloned()
+        let session = self.sessions.read().unwrap().get(session_id).cloned()?;
+        if self.is_expired(&session) {
+            self.sessions.write().unwrap().remove(session_id);
+            return None;
+        }
+        Some(session)
     }
 
     pub fn remove_session(&self, session_id: &str) {
@@ -837,6 +879,31 @@ mod tests {
         assert_eq!(session.username, "alice");
         store.remove_session(&sid);
         assert!(store.get_session(&sid).is_none());
+    }
+
+    /// A session older than the store's max age is rejected server-side, even
+    /// if the client still presents its id.
+    #[test]
+    fn test_session_expires_after_max_age() {
+        let store = SessionStore::with_max_age(std::time::Duration::from_millis(20));
+        let sid = store.create_session("alice".into(), "http://example.org/alice".into());
+        assert!(store.get_session(&sid).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert!(store.get_session(&sid).is_none());
+        // Still absent on a second lookup (it was dropped, not just hidden).
+        assert!(store.get_session(&sid).is_none());
+    }
+
+    /// Creating a session sweeps expired ones from the store.
+    #[test]
+    fn test_create_session_sweeps_expired() {
+        let store = SessionStore::with_max_age(std::time::Duration::from_millis(20));
+        let old = store.create_session("alice".into(), "http://example.org/alice".into());
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let fresh = store.create_session("bob".into(), "http://example.org/bob".into());
+        assert_eq!(store.sessions.read().unwrap().len(), 1);
+        assert!(store.get_session(&old).is_none());
+        assert_eq!(store.get_session(&fresh).unwrap().username, "bob");
     }
 
     #[test]
