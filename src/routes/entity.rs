@@ -1071,6 +1071,26 @@ mlips:usesFramework a owl:ObjectProperty .
         assert!(html.contains("&lt;script&gt;alert(1)"), "{html}");
     }
 
+    /// The add-note POST refuses a note over `MAX_NOTE_BYTES` with 413 and
+    /// stores nothing; a note exactly at the cap is accepted.
+    #[tokio::test]
+    async fn oversized_note_is_rejected_before_storing() {
+        use crate::markdown::MAX_NOTE_BYTES;
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("t/d").unwrap();
+        let subject = "https://w3id.org/mlips#Method";
+        let too_long = "x".repeat(MAX_NOTE_BYTES + 1);
+        let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &too_long).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        assert!(annotations_of(&store, subject).is_empty(), "nothing stored");
+
+        let at_cap = "y".repeat(MAX_NOTE_BYTES);
+        let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &at_cap).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(annotations_of(&store, subject).len(), 1);
+    }
+
     #[test]
     fn annotation_anchor_is_fragment_safe() {
         assert_eq!(

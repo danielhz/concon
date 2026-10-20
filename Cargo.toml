@@ -32,3 +32,6 @@ pulldown-cmark-escape = "0.11"
 
 [dev-dependencies]
 axum-test = "19"
+# Test oracle only: the note renderer must be a fixed point of an HTML
+# sanitiser (see src/markdown.rs tests). Never a runtime dependency.
+ammonia = "4"

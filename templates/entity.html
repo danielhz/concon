@@ -39,10 +39,6 @@
   .annotation-body pre code { background: none; padding: 0; }
   .annotation-body blockquote { margin: 0.4em 0; padding-left: 0.8em; border-left: 3px solid #ddd; color: #555; }
   .annotation-body ul, .annotation-body ol { margin: 0.3em 0; padding-left: 1.5em; }
-  .annotation-body table { border-collapse: collapse; margin: 0.4em 0; }
-  .annotation-body th, .annotation-body td { border: 1px solid #ddd; padding: 0.2em 0.5em; }
-  .annotation-body h1, .annotation-body h2, .annotation-body h3,
-  .annotation-body h4, .annotation-body h5, .annotation-body h6 { font-size: 1.05em; margin: 0.6em 0 0.2em; }
   .annotate-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 0.4em; }
   .annotate-hint { font-size: 0.85em; color: #767676; margin: 0 0 0.4em; }
   .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
@@ -151,7 +147,7 @@
   {% for a in annotations %}
   <li class="annotation" id="{{ a.anchor }}">
     <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}<a class="annotation-link" href="#{{ a.anchor }}" title="Link to this note (paste as [text](#{{ a.anchor }}) to cite it)">#</a></div>
-    {# body_html is Markdown rendered and sanitised server-side (src/markdown.rs); the raw source never reaches the page unescaped. #}
+    {# body_html is Markdown rendered server-side by src/markdown.rs (allow-listed tags only); the raw source never reaches the page unescaped. #}
     <div class="annotation-body">{{ a.body_html | safe }}</div>
   </li>
   {% endfor %}
@@ -160,7 +156,7 @@
 {% if can_annotate %}
 <form class="annotate-form" method="post" action="{{ self_href }}">
   <textarea name="note" rows="4" placeholder="Add a note… (Markdown)" required="" maxlength="32768"></textarea>
-  <p class="annotate-hint">Markdown: <code>**bold**</code>, <code>`code`</code>, fenced code blocks, <code>[text](url)</code>; cite a note above with its <code>#</code> link.</p>
+  <p class="annotate-hint">Markdown: <code>**bold**</code>, <code>*italics*</code>, <code>`code`</code>, fenced code blocks, <code>[text](url)</code>, <code>&gt; quote</code>, <code>- list</code> (no headings, tables, images or HTML); cite a note above with its <code>#</code> link.</p>
   <div><button type="submit">Add note</button></div>
 </form>
 {% elif not username %}
