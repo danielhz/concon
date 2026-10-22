@@ -44,6 +44,13 @@
   .annotation-body pre code { background: none; padding: 0; }
   .annotation-body blockquote { margin: 0.4em 0; padding-left: 0.8em; border-left: 3px solid #ddd; color: #555; }
   .annotation-body ul, .annotation-body ol { margin: 0.3em 0; padding-left: 1.5em; }
+  .annotation-edited { font-style: italic; }
+  .annotation-actions { font-size: 0.85em; margin-top: 0.4em; }
+  .annotation-actions details { display: inline-block; vertical-align: top; margin-right: 1em; }
+  .annotation-actions details[open] { display: block; margin: 0.4em 0 0; }
+  .annotation-actions summary { cursor: pointer; color: #767676; }
+  .annotation-actions summary:hover { color: #333; }
+  .annotation-actions form { margin: 0.4em 0 0; }
   .annotate-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 0.4em; }
   .annotate-hint { font-size: 0.85em; color: #767676; margin: 0 0 0.4em; }
   .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
@@ -157,9 +164,32 @@
 <ul class="annotations">
   {% for a in annotations %}
   <li class="annotation" id="{{ a.anchor }}">
-    <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}<a class="annotation-link" href="#{{ a.anchor }}" title="Link to this note (paste as [text](#{{ a.anchor }}) to cite it)">#</a></div>
+    <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}{% if a.modified %} · <span class="annotation-edited" title="Last edited {{ a.modified }}">edited {{ a.modified }}</span>{% endif %}<a class="annotation-link" href="#{{ a.anchor }}" title="Link to this note (paste as [text](#{{ a.anchor }}) to cite it)">#</a></div>
     {# body_html is Markdown rendered server-side by src/markdown.rs (allow-listed tags only); the raw source never reaches the page unescaped. #}
     <div class="annotation-body">{{ a.body_html | safe }}</div>
+    {# Issue #2: the author's own notes carry inline edit/delete forms (no script; a <details> per action so a delete takes two clicks). Hiding them for non-authors is UI only — the POST handler re-checks authorship against the stored dcterms:creator. #}
+    {% if a.editable %}
+    <div class="annotation-actions">
+      <details class="annotation-action">
+        <summary>Edit</summary>
+        <form class="annotate-form" method="post" action="{{ self_href }}">
+          <input type="hidden" name="action" value="edit">
+          <input type="hidden" name="annotation" value="{{ a.id }}">
+          <textarea name="note" rows="4" required="" maxlength="32768">{{ a.body }}</textarea>
+          <div><button type="submit">Save changes</button></div>
+        </form>
+      </details>
+      <details class="annotation-action">
+        <summary>Delete</summary>
+        <form method="post" action="{{ self_href }}">
+          <input type="hidden" name="action" value="delete">
+          <input type="hidden" name="annotation" value="{{ a.id }}">
+          <p class="annotate-hint">This removes the note permanently.</p>
+          <div><button type="submit">Delete this note</button></div>
+        </form>
+      </details>
+    </div>
+    {% endif %}
   </li>
   {% endfor %}
 </ul>

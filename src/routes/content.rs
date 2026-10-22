@@ -20,11 +20,75 @@ pub struct GraphParams {
     pub iri: Option<String>,
 }
 
-/// The add-note form body (`note=…`) shared by the `_entity` and `_view`
-/// annotation POST routes (Epic H).
-#[derive(serde::Deserialize)]
+/// The note form body shared by the `_entity` and `_view` annotation POST
+/// routes (Epic H). `note=…` alone adds a note; with `action=edit` or
+/// `action=delete` plus `annotation=<uuid>` (the note's id) it edits or
+/// deletes that note (issue #2).
+#[derive(Default, serde::Deserialize)]
 struct NoteForm {
     note: Option<String>,
+    action: Option<String>,
+    annotation: Option<String>,
+}
+
+impl NoteForm {
+    fn parse(body: &str) -> Self {
+        serde_urlencoded::from_str(body).unwrap_or_default()
+    }
+
+    /// Whether the form asks to edit or delete an existing note (as opposed
+    /// to adding one).
+    fn is_mutation(&self) -> bool {
+        matches!(self.action.as_deref(), Some("edit") | Some("delete"))
+    }
+}
+
+/// Dispatch a note form POSTed to a resource view (`subject_iri`): add a note
+/// (Epic H), or edit/delete one of the session user's notes (issue #2).
+/// `username` is `None` only for the edit/delete carve-out in [`content_post`]
+/// (an add by an anonymous caller was already redirected to login there).
+async fn note_form_post(
+    state: &AppState,
+    qualified: &str,
+    url_prefix: &str,
+    subject_iri: &str,
+    username: Option<&str>,
+    body_str: &str,
+) -> Response {
+    let form = NoteForm::parse(body_str);
+    let note = form.note.as_deref().unwrap_or_default();
+    let note_id = form.annotation.as_deref().unwrap_or_default();
+    let action = match form.action.as_deref() {
+        None | Some("") | Some("add") => {
+            let Some(username) = username else {
+                return axum::response::Redirect::to("/_login").into_response();
+            };
+            return entity::add_annotation_iri(
+                state,
+                qualified,
+                url_prefix,
+                subject_iri,
+                username,
+                note,
+            )
+            .await;
+        }
+        Some("edit") => entity::NoteAction::Edit { text: note },
+        Some("delete") => entity::NoteAction::Delete,
+        Some(_) => {
+            return (StatusCode::BAD_REQUEST, "Unknown note action").into_response();
+        }
+    };
+    entity::mutate_annotation(
+        state,
+        qualified,
+        url_prefix,
+        subject_iri,
+        username,
+        note_id,
+        action,
+    )
+    .await
 }
 
 /// Query parameters for `GET` dataset views: `?query=` (the `_sparql`/`_query`
@@ -586,6 +650,15 @@ async fn content_post(
     let session = web::get_username(&cookies, &state);
 
     if needs_login && session.is_none() {
+        // Issue #2: an anonymous edit/delete of a discussion note is an
+        // unauthorized state change, answered 401 (the add-note form keeps
+        // the login redirect — a visitor can still log in and post).
+        let note_mutation = matches!(&parsed, ParsedPath::DatasetView { view, .. }
+            if matches!(view.as_deref(), Some("_entity") | Some("_view")))
+            && NoteForm::parse(&String::from_utf8_lossy(&body)).is_mutation();
+        if note_mutation {
+            return (StatusCode::UNAUTHORIZED, "Log in to edit or delete notes").into_response();
+        }
         return axum::response::Redirect::to("/_login").into_response();
     }
 
@@ -610,47 +683,39 @@ async fn content_post(
             let qualified = parsed.qualified_dataset_name().unwrap();
             let body_str = String::from_utf8_lossy(&body).to_string();
             match view.as_deref() {
-                // Epic H: add a note to an entity. `_entity` is not in the POST
+                // Epic H: the note form of an entity view — add a note, or
+                // edit/delete one (issue #2). `_entity` is not in the POST
                 // write-exempt list, so `needs_login` above already redirected
-                // anonymous users to login — reaching here means a valid
-                // session, whose username is the note's author.
+                // (add) or 401'd (edit/delete) anonymous callers — a session
+                // here is the note's author.
                 Some("_entity") => {
                     let Some(id) = view_arg.as_deref() else {
                         return (StatusCode::NOT_FOUND, "Missing entity id".to_string())
                             .into_response();
                     };
-                    let Some(sess) = session else {
-                        return axum::response::Redirect::to("/_login").into_response();
-                    };
-                    let form: NoteForm = serde_urlencoded::from_str(&body_str)
-                        .unwrap_or(NoteForm { note: None });
-                    let note = form.note.unwrap_or_default();
                     let url_prefix = build_dataset_url_prefix(&parsed);
-                    entity::add_annotation(
-                        &state, &qualified, &url_prefix, id, &sess.username, &note,
+                    let username = session.as_ref().map(|s| s.username.as_str());
+                    note_form_post(
+                        &state,
+                        &qualified,
+                        &url_prefix,
+                        &entity::entity_iri(id),
+                        username,
+                        &body_str,
                     )
                     .await
                 }
-                // Epic H (generalised): add a note to an arbitrary resource
-                // addressed by full IRI. Like `_entity`, `_view` is not in the
-                // POST write-exempt list, so anonymous POSTers were already
-                // redirected to login; author = the session user.
+                // Epic H (generalised): the same note form on an arbitrary
+                // resource addressed by full IRI; same login handling as
+                // `_entity`.
                 Some("_view") => {
-                    let Some(sess) = session else {
-                        return axum::response::Redirect::to("/_login").into_response();
-                    };
                     let Some(iri) = gparams.iri.as_deref().filter(|s| !s.is_empty()) else {
                         return (StatusCode::BAD_REQUEST, "Missing ?iri= parameter".to_string())
                             .into_response();
                     };
-                    let form: NoteForm = serde_urlencoded::from_str(&body_str)
-                        .unwrap_or(NoteForm { note: None });
-                    let note = form.note.unwrap_or_default();
                     let url_prefix = build_dataset_url_prefix(&parsed);
-                    entity::add_annotation_iri(
-                        &state, &qualified, &url_prefix, iri, &sess.username, &note,
-                    )
-                    .await
+                    let username = session.as_ref().map(|s| s.username.as_str());
+                    note_form_post(&state, &qualified, &url_prefix, iri, username, &body_str).await
                 }
                 Some("_sparql") | Some("_query") => {
                     match sparql::sparql_query_post(&state, &qualified, &headers, &body_str).await {
@@ -1289,5 +1354,281 @@ mod tests {
                 view_arg: None,
             }
         );
+    }
+
+    /// Issue #2, end to end over HTTP: the author sees edit/delete controls
+    /// and can edit (text replaced, "edited" marker shown, anchor kept) and
+    /// delete their note; another user gets 403, anonymous 401, an unknown
+    /// note 404; the same form works on `_entity/{id}` views.
+    #[tokio::test]
+    async fn test_note_edit_and_delete_over_http() {
+        use crate::routes::create_router;
+        use crate::state::AppState;
+        use crate::store::sparql_update;
+        use axum_test::TestServer;
+        use tower_cookies::Cookie;
+
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("root/pub").unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata("root/pub")
+            .unwrap();
+        let store = state.store_manager.get_dataset("root/pub").unwrap();
+        sparql_update(
+            &store,
+            r#"INSERT DATA {
+                <https://w3id.org/mlips#Method> a <http://www.w3.org/2002/07/owl#Class> .
+                <https://w3id.org/mlips/entity/kumar2025> a <https://w3id.org/mlips#Method> .
+            }"#,
+        )
+        .unwrap();
+        let cookie = |user: &str| {
+            let id = state.session_store.create_session(
+                user.to_string(),
+                format!("<https://mlipe.2mia.org/users/{user}>"),
+            );
+            Cookie::new("mlipe_session", id)
+        };
+        let alice = cookie("alice");
+        let bob = cookie("bob");
+        let server = TestServer::new(create_router(state.clone()));
+        let view = "/_ds/pub/_view";
+        let iri = "https://w3id.org/mlips#Method";
+        let note_id = |html: &str| -> String {
+            let marker = r#"name="annotation" value=""#;
+            let start = html
+                .find(marker)
+                .expect("hidden note id in the author's view")
+                + marker.len();
+            html[start..].split('"').next().unwrap().to_string()
+        };
+
+        // alice adds a note (the existing add form).
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[("note", "original text")])
+            .await;
+        r.assert_status(StatusCode::SEE_OTHER);
+
+        // The author sees the controls (and the note id); others do not.
+        let html = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .await
+            .text();
+        assert!(html.contains("original text"));
+        assert!(
+            html.contains(r#"name="action" value="edit""#),
+            "edit form for the author"
+        );
+        assert!(
+            html.contains(r#"name="action" value="delete""#),
+            "delete form for the author"
+        );
+        assert!(
+            !html.contains(r#"<span class="annotation-edited""#),
+            "no marker before any edit"
+        );
+        let id = note_id(&html);
+        assert!(
+            html.contains(&format!(r#"id="note-{id}""#)),
+            "anchor from the note id"
+        );
+        let as_bob = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(bob.clone())
+            .await
+            .text();
+        assert!(as_bob.contains("original text"));
+        assert!(
+            !as_bob.contains(r#"name="action""#),
+            "no edit/delete controls for bob"
+        );
+        let as_anon = server.get(view).add_query_param("iri", iri).await.text();
+        assert!(as_anon.contains("original text") && !as_anon.contains(r#"name="action""#));
+
+        // bob (403) and anonymous (401) cannot edit or delete alice's note.
+        for action in ["edit", "delete"] {
+            let r = server
+                .post(view)
+                .add_query_param("iri", iri)
+                .add_cookie(bob.clone())
+                .form(&[
+                    ("action", action),
+                    ("annotation", &id),
+                    ("note", "hijacked"),
+                ])
+                .await;
+            r.assert_status(StatusCode::FORBIDDEN);
+            let r = server
+                .post(view)
+                .add_query_param("iri", iri)
+                .form(&[
+                    ("action", action),
+                    ("annotation", &id),
+                    ("note", "hijacked"),
+                ])
+                .await;
+            r.assert_status(StatusCode::UNAUTHORIZED);
+        }
+        // An anonymous *add* still bounces to login, as before.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .form(&[("note", "anon")])
+            .await;
+        r.assert_status(StatusCode::SEE_OTHER);
+        assert_eq!(r.headers()[axum::http::header::LOCATION], "/_login");
+
+        // Unknown note → 404; unknown action → 400; oversized edit → 413.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[
+                ("action", "edit"),
+                ("annotation", "0b1c2d3e-4f50-4617-8899-aabbccddeeff"),
+                ("note", "x"),
+            ])
+            .await;
+        r.assert_status(StatusCode::NOT_FOUND);
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[("action", "archive"), ("annotation", &id)])
+            .await;
+        r.assert_status(StatusCode::BAD_REQUEST);
+        let too_long = "x".repeat(crate::markdown::MAX_NOTE_BYTES + 1);
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[
+                ("action", "edit"),
+                ("annotation", id.as_str()),
+                ("note", too_long.as_str()),
+            ])
+            .await;
+        r.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+
+        // alice edits: redirected onto the note's anchor; the page shows the
+        // new text, the "edited" marker, and the same anchor.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[
+                ("action", "edit"),
+                ("annotation", &id),
+                ("note", "revised **text**"),
+            ])
+            .await;
+        r.assert_status(StatusCode::SEE_OTHER);
+        let location = r.headers()[axum::http::header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(location.ends_with(&format!("#note-{id}")), "{location}");
+        let html = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .await
+            .text();
+        assert!(html.contains("revised <strong>text</strong>"), "{html}");
+        assert!(!html.contains("original text"));
+        assert!(
+            html.contains(r#"<span class="annotation-edited""#),
+            "edited marker"
+        );
+        assert!(html.contains(">edited 20"), "edited <date>");
+        assert!(
+            html.contains(&format!(r#"id="note-{id}""#)),
+            "anchor unchanged"
+        );
+        assert!(
+            html.contains(">revised **text**</textarea>"),
+            "edit form prefilled with the Markdown source"
+        );
+        assert!(html.contains("Discussion (1)"), "edit did not add a note");
+
+        // alice deletes: the note is gone from the view.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[("action", "delete"), ("annotation", &id)])
+            .await;
+        r.assert_status(StatusCode::SEE_OTHER);
+        let html = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .await
+            .text();
+        assert!(!html.contains("revised"), "note removed");
+        assert!(html.contains("Discussion (0)"), "{html}");
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[("action", "delete"), ("annotation", &id)])
+            .await;
+        r.assert_status(StatusCode::NOT_FOUND);
+
+        // The same form on an `_entity/{id}` view.
+        let entity = "/_ds/pub/_entity/kumar2025";
+        server
+            .post(entity)
+            .add_cookie(alice.clone())
+            .form(&[("note", "entity note")])
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+        let html = server.get(entity).add_cookie(alice.clone()).await.text();
+        let eid = note_id(&html);
+        let r = server
+            .post(entity)
+            .add_cookie(bob.clone())
+            .form(&[("action", "edit"), ("annotation", &eid), ("note", "no")])
+            .await;
+        r.assert_status(StatusCode::FORBIDDEN);
+        let r = server
+            .post(entity)
+            .add_cookie(alice.clone())
+            .form(&[
+                ("action", "edit"),
+                ("annotation", &eid),
+                ("note", "entity note, edited"),
+            ])
+            .await;
+        r.assert_status(StatusCode::SEE_OTHER);
+        assert_eq!(
+            r.headers()[axum::http::header::LOCATION],
+            format!("/_ds/pub/_entity/kumar2025#note-{eid}")
+        );
+        let html = server.get(entity).add_cookie(alice.clone()).await.text();
+        assert!(html.contains("entity note, edited") && html.contains("annotation-edited"));
+        // A note of the entity cannot be reached through the class view.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[("action", "delete"), ("annotation", &eid)])
+            .await;
+        r.assert_status(StatusCode::NOT_FOUND);
+        server
+            .post(entity)
+            .add_cookie(alice)
+            .form(&[("action", "delete"), ("annotation", &eid)])
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+        let html = server.get(entity).add_cookie(bob).await.text();
+        assert!(html.contains("Discussion (0)"));
     }
 }

@@ -34,7 +34,14 @@ const OA_HAS_TARGET: &str = "http://www.w3.org/ns/oa#hasTarget";
 const OA_HAS_BODY: &str = "http://www.w3.org/ns/oa#hasBody";
 const DCTERMS_CREATOR: &str = "http://purl.org/dc/terms/creator";
 const DCTERMS_CREATED: &str = "http://purl.org/dc/terms/created";
+/// Stamped on a note when its author edits it (issue #2); `dcterms:created`
+/// and `dcterms:creator` are never touched after creation.
+const DCTERMS_MODIFIED: &str = "http://purl.org/dc/terms/modified";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+/// Namespace of the note IRIs minted by [`build_annotation_insert`]
+/// (`<ANNOTATION_BASE><uuid>`). A note's identity — and its `#note-<uuid>`
+/// anchor — is this IRI, which never changes across edits.
+const ANNOTATION_BASE: &str = "https://w3id.org/mlips/annotation/";
 
 /// Canonical namespace for per-paper instance data. This is the published
 /// (citable) identity of the individuals; concon serves them but never mints
@@ -432,9 +439,29 @@ fn build_annotation_insert(subject_iri: &str, note: &str, username: &str) -> Str
                  <{DCTERMS_CREATED}> ?now .
         }} }} WHERE {{
             BIND(NOW() AS ?now)
-            BIND(IRI(CONCAT("https://w3id.org/mlips/annotation/", STRUUID())) AS ?ann)
+            BIND(IRI(CONCAT("{ANNOTATION_BASE}", STRUUID())) AS ?ann)
         }}"#
     )
+}
+
+/// Whether `s` has the shape of the UUID that SPARQL `STRUUID()` mints
+/// (`8-4-4-4-12` hex digits). Every note the application created has such a
+/// local part; it is the only client-supplied value that may name a note.
+fn is_uuid(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8usize, 4, 4, 4, 12])
+            .all(|(g, len)| g.len() == len && g.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The note IRI for a client-supplied note id (the `<uuid>` of
+/// `#note-<uuid>`), or `None` unless the id is strictly UUID-shaped. Only the
+/// result of this function is ever interpolated into an IRI position, so a
+/// crafted id cannot reach the SPARQL text.
+fn annotation_iri_from_id(id: &str) -> Option<String> {
+    is_uuid(id).then(|| format!("{ANNOTATION_BASE}{id}"))
 }
 
 /// One annotation note on a resource (Epic H): author, timestamp, text.
@@ -443,8 +470,20 @@ struct AnnotationRow {
     /// Fragment id for citing this note from another one (`#note-<uuid>`),
     /// derived from the annotation IRI minted by [`build_annotation_insert`].
     anchor: String,
+    /// The note's UUID (the IRI's local part), the handle the edit/delete
+    /// forms send back (issue #2); empty when the IRI is not UUID-shaped
+    /// (a note written outside the application), which also makes the note
+    /// non-editable from the UI.
+    id: String,
     creator: String,
     created: String,
+    /// `dcterms:modified` of the last edit, if the note was ever edited; the
+    /// template shows it as "edited <date>" next to the timestamp.
+    modified: Option<String>,
+    /// Whether the viewer may edit/delete this note from the UI: they are
+    /// logged in as its author and the note has a usable `id`. UI only —
+    /// the POST handlers re-check authorship against the store.
+    editable: bool,
     /// The note as written — Markdown source.
     body: String,
     /// `body` rendered through [`crate::markdown::render_note_html`]:
@@ -464,14 +503,16 @@ fn annotation_anchor(annotation_iri: &str, position: usize) -> String {
 }
 
 /// Notes targeting `subject_iri`, oldest first (Epic H). Read from the
-/// dedicated annotations graph only.
-fn annotations_of(store: &Store, subject_iri: &str) -> Vec<AnnotationRow> {
+/// dedicated annotations graph only. `viewer` is the logged-in username, if
+/// any; it only decides the UI-level `editable` flag of each row.
+fn annotations_of(store: &Store, subject_iri: &str, viewer: Option<&str>) -> Vec<AnnotationRow> {
     let q = format!(
-        r#"SELECT ?a ?body ?creator ?created WHERE {{
+        r#"SELECT ?a ?body ?creator ?created ?modified WHERE {{
             GRAPH <{ANNOTATIONS_GRAPH}> {{
                 ?a <{OA_HAS_TARGET}> <{subject_iri}> ; <{OA_HAS_BODY}> ?body .
                 OPTIONAL {{ ?a <{DCTERMS_CREATOR}> ?creator }}
                 OPTIONAL {{ ?a <{DCTERMS_CREATED}> ?created }}
+                OPTIONAL {{ ?a <{DCTERMS_MODIFIED}> ?modified }}
             }}
         }} ORDER BY ?created"#
     );
@@ -485,10 +526,20 @@ fn annotations_of(store: &Store, subject_iri: &str) -> Vec<AnnotationRow> {
                 Some(Term::NamedNode(n)) => n.as_str(),
                 _ => "",
             };
+            let id = ann_iri
+                .strip_prefix(ANNOTATION_BASE)
+                .filter(|local| is_uuid(local))
+                .unwrap_or("")
+                .to_string();
+            let creator = literal_value(sol.get("creator"));
+            let editable = !id.is_empty() && viewer.is_some() && creator.as_deref() == viewer;
             rows.push(AnnotationRow {
                 anchor: annotation_anchor(ann_iri, rows.len() + 1),
-                creator: literal_value(sol.get("creator")).unwrap_or_else(|| "anonymous".into()),
+                id,
+                creator: creator.unwrap_or_else(|| "anonymous".into()),
                 created: literal_value(sol.get("created")).unwrap_or_default(),
+                modified: literal_value(sol.get("modified")),
+                editable,
                 body_html: crate::markdown::render_note_html(&body),
                 body,
             });
@@ -497,19 +548,164 @@ fn annotations_of(store: &Store, subject_iri: &str) -> Vec<AnnotationRow> {
     rows
 }
 
-/// Add a note to the entity `<ENTITY_BASE>{id}` (the `_entity/{id}` POST). A
-/// thin wrapper over [`add_annotation_iri`] that expands the id to the entity
-/// IRI.
-pub async fn add_annotation(
+/// The canonical IRI of the entity `_entity/{id}` addresses.
+pub fn entity_iri(id: &str) -> String {
+    format!("{ENTITY_BASE}{id}")
+}
+
+/// What an author does to one of their notes (issue #2).
+#[derive(Clone, Copy)]
+pub enum NoteAction<'a> {
+    /// Replace the text; stamps `dcterms:modified`.
+    Edit { text: &'a str },
+    /// Remove the note's triples (no tombstone, no history).
+    Delete,
+}
+
+/// The author recorded on a note attached to `subject_iri`: `None` when no
+/// such note targets that resource (unknown note, or a note of another
+/// resource — both 404 to the caller), `Some(None)` when the note carries no
+/// `dcterms:creator` (then nobody is its author).
+fn annotation_author(store: &Store, ann_iri: &str, subject_iri: &str) -> Option<Option<String>> {
+    let q = format!(
+        r#"SELECT ?creator WHERE {{
+            GRAPH <{ANNOTATIONS_GRAPH}> {{
+                <{ann_iri}> <{OA_HAS_TARGET}> <{subject_iri}> ; <{OA_HAS_BODY}> ?body .
+                OPTIONAL {{ <{ann_iri}> <{DCTERMS_CREATOR}> ?creator }}
+            }}
+        }} LIMIT 1"#
+    );
+    match sparql_query_union(store, &q) {
+        Ok(QueryResults::Solutions(sols)) => sols
+            .flatten()
+            .next()
+            .map(|sol| literal_value(sol.get("creator"))),
+        _ => None,
+    }
+}
+
+/// SPARQL Update that replaces the text of one note and stamps
+/// `dcterms:modified` (replacing any earlier stamp). `ann_iri`/`subject_iri`
+/// are pre-validated IRIs, `text`/`username` are escaped as literals. The
+/// WHERE restates target and author, so even in a race the update can only
+/// touch a note that is attached to `subject_iri` and owned by `username`.
+fn build_annotation_edit(ann_iri: &str, subject_iri: &str, text: &str, username: &str) -> String {
+    let body = escape_sparql_literal(text);
+    let creator = escape_sparql_literal(username);
+    format!(
+        r#"DELETE {{ GRAPH <{ANNOTATIONS_GRAPH}> {{
+            <{ann_iri}> <{OA_HAS_BODY}> ?old ; <{DCTERMS_MODIFIED}> ?oldmod .
+        }} }}
+        INSERT {{ GRAPH <{ANNOTATIONS_GRAPH}> {{
+            <{ann_iri}> <{OA_HAS_BODY}> "{body}" ; <{DCTERMS_MODIFIED}> ?now .
+        }} }}
+        WHERE {{
+            GRAPH <{ANNOTATIONS_GRAPH}> {{
+                <{ann_iri}> <{OA_HAS_TARGET}> <{subject_iri}> ;
+                            <{DCTERMS_CREATOR}> "{creator}" ;
+                            <{OA_HAS_BODY}> ?old .
+                OPTIONAL {{ <{ann_iri}> <{DCTERMS_MODIFIED}> ?oldmod }}
+            }}
+            BIND(NOW() AS ?now)
+        }}"#
+    )
+}
+
+/// SPARQL Update that removes every triple of one note (the note as subject,
+/// in the annotations graph only), guarded by target and author like
+/// [`build_annotation_edit`].
+fn build_annotation_delete(ann_iri: &str, subject_iri: &str, username: &str) -> String {
+    let creator = escape_sparql_literal(username);
+    format!(
+        r#"DELETE {{ GRAPH <{ANNOTATIONS_GRAPH}> {{ <{ann_iri}> ?p ?o }} }}
+        WHERE {{
+            GRAPH <{ANNOTATIONS_GRAPH}> {{
+                <{ann_iri}> <{OA_HAS_TARGET}> <{subject_iri}> ;
+                            <{DCTERMS_CREATOR}> "{creator}" ;
+                            ?p ?o .
+            }}
+        }}"#
+    )
+}
+
+/// Edit or delete one note on `subject_iri` (issue #2) — the `action=edit` /
+/// `action=delete` branch of the `_entity/{id}` and `_view?iri=` POSTs.
+/// `note_id` is the client-supplied `<uuid>` of the note. Authorization is
+/// decided here, against the store: 401 without a session, 404 when no note
+/// with that id is attached to `subject_iri` (malformed, unknown, or another
+/// resource's note — indistinguishable on purpose), 403 unless the session
+/// user is the stored `dcterms:creator`. Only that note's triples in the
+/// annotations graph are touched. Redirects (PRG) back to the view, onto the
+/// edited note's anchor.
+pub async fn mutate_annotation(
     state: &AppState,
     dataset_name: &str,
     url_prefix: &str,
-    id: &str,
-    username: &str,
-    note: &str,
+    subject_iri: &str,
+    username: Option<&str>,
+    note_id: &str,
+    action: NoteAction<'_>,
 ) -> Response {
-    let subject_iri = format!("{ENTITY_BASE}{id}");
-    add_annotation_iri(state, dataset_name, url_prefix, &subject_iri, username, note).await
+    if NamedNode::new(subject_iri).is_err() {
+        return (StatusCode::BAD_REQUEST, "Malformed resource IRI").into_response();
+    }
+    let Some(username) = username else {
+        return (StatusCode::UNAUTHORIZED, "Log in to edit or delete notes").into_response();
+    };
+    let Some(store) = state.store_manager.get_dataset(dataset_name) else {
+        return (StatusCode::NOT_FOUND, "Dataset not found").into_response();
+    };
+    let Some(ann_iri) = annotation_iri_from_id(note_id) else {
+        return (StatusCode::NOT_FOUND, "Unknown note").into_response();
+    };
+    let Some(author) = annotation_author(&store, &ann_iri, subject_iri) else {
+        return (StatusCode::NOT_FOUND, "Unknown note").into_response();
+    };
+    if author.as_deref() != Some(username) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Only the author of a note can edit or delete it",
+        )
+            .into_response();
+    }
+    let view_href = native_href(subject_iri, url_prefix);
+    let update = match action {
+        NoteAction::Edit { text } => {
+            let text = text.trim();
+            if text.is_empty() {
+                // Nothing to save — keep the note as it is (deleting is a
+                // separate, explicit action).
+                return Redirect::to(&format!("{view_href}#note-{note_id}")).into_response();
+            }
+            if text.len() > crate::markdown::MAX_NOTE_BYTES {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "Note too long: {} bytes, maximum {} bytes",
+                        text.len(),
+                        crate::markdown::MAX_NOTE_BYTES
+                    ),
+                )
+                    .into_response();
+            }
+            build_annotation_edit(&ann_iri, subject_iri, text, username)
+        }
+        NoteAction::Delete => build_annotation_delete(&ann_iri, subject_iri, username),
+    };
+    match sparql_update(&store, &update) {
+        Ok(()) => {
+            let back = match action {
+                NoteAction::Edit { .. } => format!("{view_href}#note-{note_id}"),
+                NoteAction::Delete => view_href,
+            };
+            Redirect::to(&back).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Update error: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 /// Add a note to an arbitrary resource `subject_iri` (Epic H, generalised to
@@ -971,7 +1167,7 @@ pub async fn serve_resource(
             // the view; the add-note form is shown to any logged-in user, on
             // every resource/term view (the POST routes handle both
             // `_entity/{id}` and `_view?iri=`). The form posts to `self_href`.
-            let annotations = annotations_of(&store, &subject_iri);
+            let annotations = annotations_of(&store, &subject_iri, username.as_deref());
             let can_annotate = username.is_some();
 
             // Breadcrumb (Home / <team> / <dataset> / <entity>), same parts as
@@ -1252,7 +1448,7 @@ mlips:usesFramework a owl:ObjectProperty .
         let upd = build_annotation_insert(entity, note, "alice");
         sparql_update(&store, &upd).expect("annotation insert");
 
-        let rows = annotations_of(&store, entity);
+        let rows = annotations_of(&store, entity, None);
         assert_eq!(rows.len(), 1, "one note should be stored and read back");
         assert_eq!(rows[0].body, note, "note text preserved through escape/store");
         assert_eq!(rows[0].creator, "alice");
@@ -1267,7 +1463,7 @@ mlips:usesFramework a owl:ObjectProperty .
         assert!(html.contains("says \"me\""), "{html}");
 
         // Targets are isolated: a different entity has no notes.
-        assert!(annotations_of(&store, "https://w3id.org/mlips/entity/other").is_empty());
+        assert!(annotations_of(&store, "https://w3id.org/mlips/entity/other", None).is_empty());
     }
 
     /// Epic H-ext: annotations round-trip for a non-entity (term/class) IRI
@@ -1279,7 +1475,7 @@ mlips:usesFramework a owl:ObjectProperty .
         let term = "https://w3id.org/mlips#Hyperparameter";
         sparql_update(&store, &build_annotation_insert(term, "a note on a class", "bob"))
             .expect("insert on term");
-        let rows = annotations_of(&store, term);
+        let rows = annotations_of(&store, term, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].body, "a note on a class");
         assert_eq!(rows[0].creator, "bob");
@@ -1293,7 +1489,7 @@ mlips:usesFramework a owl:ObjectProperty .
         let term = "https://w3id.org/mlips#Method";
         let note = "see [the paper](https://example.org/p) and `run()` <script>alert(1)</script>";
         sparql_update(&store, &build_annotation_insert(term, note, "bob")).expect("insert");
-        let rows = annotations_of(&store, term);
+        let rows = annotations_of(&store, term, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].body, note, "raw Markdown source is stored untouched");
         let html = &rows[0].body_html;
@@ -1315,12 +1511,15 @@ mlips:usesFramework a owl:ObjectProperty .
         let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &too_long).await;
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let store = state.store_manager.get_dataset("t/d").unwrap();
-        assert!(annotations_of(&store, subject).is_empty(), "nothing stored");
+        assert!(
+            annotations_of(&store, subject, None).is_empty(),
+            "nothing stored"
+        );
 
         let at_cap = "y".repeat(MAX_NOTE_BYTES);
         let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &at_cap).await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-        assert_eq!(annotations_of(&store, subject).len(), 1);
+        assert_eq!(annotations_of(&store, subject, None).len(), 1);
     }
 
     #[test]
@@ -1704,5 +1903,370 @@ mlips:usesFramework a owl:ObjectProperty .
             "no instance/usage list on an individual"
         );
         assert!(body.contains("Inst 000"));
+    }
+
+    // ---- Issue #2: editing and deleting one's own notes ----
+
+    /// A dataset `t/d` holding one note by `author` on `subject`; returns
+    /// the state and the note's id.
+    fn state_with_note(subject: &str, author: &str, text: &str) -> (AppState, String) {
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("t/d").unwrap();
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        sparql_update(&store, &build_annotation_insert(subject, text, author)).expect("insert");
+        let rows = annotations_of(&store, subject, None);
+        assert_eq!(rows.len(), 1);
+        let id = rows[0].id.clone();
+        assert!(is_uuid(&id), "STRUUID-minted id: {id}");
+        (state, id)
+    }
+
+    /// Number of quads in the annotations graph whose subject is the note
+    /// `id` (0 once it is deleted).
+    fn note_quad_count(store: &Store, id: &str) -> usize {
+        let iri = NamedNode::new(format!("{ANNOTATION_BASE}{id}")).unwrap();
+        let graph = NamedNode::new(ANNOTATIONS_GRAPH).unwrap();
+        store
+            .quads_for_pattern(
+                Some(iri.as_ref().into()),
+                None,
+                None,
+                Some(graph.as_ref().into()),
+            )
+            .count()
+    }
+
+    #[test]
+    fn uuid_shape_is_checked_strictly() {
+        assert!(is_uuid("0b1c2d3e-4f50-4617-8899-aabbccddeeff"));
+        assert!(is_uuid("0B1C2D3E-4F50-4617-8899-AABBCCDDEEFF"));
+        assert!(!is_uuid(""));
+        assert!(!is_uuid("0b1c2d3e-4f50-4617-8899-aabbccddeef")); // short
+        assert!(!is_uuid("0b1c2d3e-4f50-4617-8899-aabbccddeefg")); // non-hex
+        assert!(!is_uuid("0b1c2d3e4f5046178899aabbccddeeff")); // no dashes
+        assert!(!is_uuid("../x>")); // nothing IRI-breaking gets through
+        assert_eq!(
+            annotation_iri_from_id("0b1c2d3e-4f50-4617-8899-aabbccddeeff").as_deref(),
+            Some("https://w3id.org/mlips/annotation/0b1c2d3e-4f50-4617-8899-aabbccddeeff")
+        );
+        assert!(annotation_iri_from_id("x> . <y").is_none());
+    }
+
+    /// The author edits: the text and its rendering change, `dcterms:modified`
+    /// appears, and created/creator/IRI/anchor stay as they were. The viewer
+    /// flag `editable` is true only for the author.
+    #[tokio::test]
+    async fn author_edits_own_note() {
+        let subject = "https://w3id.org/mlips#Method";
+        let (state, id) = state_with_note(subject, "alice", "first *draft*");
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        let before = annotations_of(&store, subject, Some("alice")).remove(0);
+        assert!(before.editable);
+        assert!(before.modified.is_none());
+        assert!(!annotations_of(&store, subject, Some("bob"))[0].editable);
+        assert!(!annotations_of(&store, subject, None)[0].editable);
+
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Edit {
+                text: "  final \"text\" with `code`\n",
+            },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(location.ends_with(&format!("#note-{id}")), "{location}");
+
+        let rows = annotations_of(&store, subject, Some("alice"));
+        assert_eq!(rows.len(), 1, "edit replaced the note, did not add one");
+        let after = &rows[0];
+        assert_eq!(
+            after.body, "final \"text\" with `code`",
+            "trimmed new text stored"
+        );
+        assert!(
+            after.body_html.contains("<code>code</code>"),
+            "{}",
+            after.body_html
+        );
+        assert_eq!(after.anchor, before.anchor, "anchor is stable across edits");
+        assert_eq!(after.id, id);
+        assert_eq!(after.creator, "alice");
+        assert_eq!(after.created, before.created, "dcterms:created untouched");
+        let modified = after.modified.as_deref().expect("dcterms:modified stamped");
+        assert!(
+            modified.starts_with("20"),
+            "xsd:dateTime from NOW(): {modified}"
+        );
+        // Exactly the five original triples plus one modified stamp.
+        assert_eq!(note_quad_count(&store, &id), 6);
+
+        // A second edit replaces the stamp instead of accumulating stamps.
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Edit { text: "third" },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(note_quad_count(&store, &id), 6);
+        assert_eq!(annotations_of(&store, subject, None)[0].body, "third");
+    }
+
+    /// Only the stored `dcterms:creator` may edit or delete: another user is
+    /// refused (403) and the note is left exactly as it was; anonymous is 401.
+    #[tokio::test]
+    async fn non_author_and_anonymous_are_refused() {
+        let subject = "https://w3id.org/mlips#Method";
+        let (state, id) = state_with_note(subject, "alice", "alice's note");
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        for (user, action, expected) in [
+            (
+                Some("bob"),
+                NoteAction::Edit { text: "hijacked" },
+                StatusCode::FORBIDDEN,
+            ),
+            (Some("bob"), NoteAction::Delete, StatusCode::FORBIDDEN),
+            (
+                None,
+                NoteAction::Edit { text: "hijacked" },
+                StatusCode::UNAUTHORIZED,
+            ),
+            (None, NoteAction::Delete, StatusCode::UNAUTHORIZED),
+        ] {
+            let resp =
+                mutate_annotation(&state, "t/d", "/t/_ds/d", subject, user, &id, action).await;
+            assert_eq!(resp.status(), expected, "{user:?}");
+            let rows = annotations_of(&store, subject, None);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].body, "alice's note");
+            assert!(rows[0].modified.is_none());
+            assert_eq!(note_quad_count(&store, &id), 5);
+        }
+    }
+
+    /// A note that is not attached to the POSTed resource is 404 for its own
+    /// author too: an unknown uuid, a malformed id, or a note of another
+    /// resource (so the subject in the URL cannot be used to reach a note
+    /// elsewhere). A note without a creator has no author (403 for everyone).
+    #[tokio::test]
+    async fn unknown_or_foreign_note_is_404() {
+        let subject = "https://w3id.org/mlips#Method";
+        let other = "https://w3id.org/mlips#Other";
+        let (state, id) = state_with_note(subject, "alice", "on Method");
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        for bad in [
+            "0b1c2d3e-4f50-4617-8899-aabbccddeeff",
+            "",
+            "not-a-uuid",
+            "0b1c2d3e-4f50-4617-8899-aabbccddeeff> . <x",
+        ] {
+            let resp = mutate_annotation(
+                &state,
+                "t/d",
+                "/t/_ds/d",
+                subject,
+                Some("alice"),
+                bad,
+                NoteAction::Delete,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{bad:?}");
+        }
+        // The real note, addressed through another resource's view.
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            other,
+            Some("alice"),
+            &id,
+            NoteAction::Edit { text: "moved?" },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            other,
+            Some("alice"),
+            &id,
+            NoteAction::Delete,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(note_quad_count(&store, &id), 5, "nothing touched");
+        // Unknown dataset.
+        let resp = mutate_annotation(
+            &state,
+            "t/nope",
+            "/t/_ds/nope",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Delete,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // A creator-less note (written outside the application) belongs to
+        // nobody.
+        let orphan = format!("{ANNOTATION_BASE}0b1c2d3e-4f50-4617-8899-aabbccddeeff");
+        sparql_update(
+            &store,
+            &format!(
+                r#"INSERT DATA {{ GRAPH <{ANNOTATIONS_GRAPH}> {{
+                    <{orphan}> <{OA_HAS_TARGET}> <{subject}> ; <{OA_HAS_BODY}> "orphan" }} }}"#
+            ),
+        )
+        .unwrap();
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("anonymous"),
+            "0b1c2d3e-4f50-4617-8899-aabbccddeeff",
+            NoteAction::Delete,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Deleting removes every triple of that note and nothing else: the
+    /// author's other note and another user's note on the same resource stay.
+    #[tokio::test]
+    async fn delete_removes_only_that_note() {
+        let subject = "https://w3id.org/mlips#Method";
+        let (state, id) = state_with_note(subject, "alice", "to delete");
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        sparql_update(
+            &store,
+            &build_annotation_insert(subject, "alice keeps", "alice"),
+        )
+        .unwrap();
+        sparql_update(
+            &store,
+            &build_annotation_insert(subject, "bob keeps", "bob"),
+        )
+        .unwrap();
+        let total_before = store.len().unwrap();
+        assert_eq!(annotations_of(&store, subject, None).len(), 3);
+
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Delete,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp.headers()[header::LOCATION].to_str().unwrap();
+        assert_eq!(
+            location,
+            "/t/_ds/d/_view?iri=https%3A%2F%2Fw3id.org%2Fmlips%23Method"
+        );
+
+        assert_eq!(
+            note_quad_count(&store, &id),
+            0,
+            "no tombstone, no leftovers"
+        );
+        assert_eq!(
+            store.len().unwrap(),
+            total_before - 5,
+            "exactly the note's five triples went"
+        );
+        let rest: Vec<String> = annotations_of(&store, subject, None)
+            .into_iter()
+            .map(|r| r.body)
+            .collect();
+        assert_eq!(rest, ["alice keeps", "bob keeps"]);
+
+        // Deleting it again is 404.
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Delete,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The 32 KiB cap applies to edits (413, note unchanged); an edit at the
+    /// cap is accepted; an empty edit changes nothing and bounces back.
+    #[tokio::test]
+    async fn edit_size_limit_and_empty_edit() {
+        use crate::markdown::MAX_NOTE_BYTES;
+        let subject = "https://w3id.org/mlips#Method";
+        let (state, id) = state_with_note(subject, "alice", "short");
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+
+        let too_long = "x".repeat(MAX_NOTE_BYTES + 1);
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Edit { text: &too_long },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let row = annotations_of(&store, subject, None).remove(0);
+        assert_eq!(row.body, "short");
+        assert!(row.modified.is_none());
+
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Edit { text: "   \n\t " },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let row = annotations_of(&store, subject, None).remove(0);
+        assert_eq!(row.body, "short", "empty edit is a no-op");
+        assert!(row.modified.is_none());
+
+        let at_cap = "y".repeat(MAX_NOTE_BYTES);
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Edit { text: &at_cap },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let row = annotations_of(&store, subject, None).remove(0);
+        assert_eq!(row.body.len(), MAX_NOTE_BYTES);
+        assert!(row.modified.is_some());
     }
 }
