@@ -67,12 +67,11 @@
   }
 
   // The server answers note errors with a short plain-text reason; anything
-  // else (an HTML error page, an empty body) gets a generic message.
+  // else (an HTML error page, an empty body) gets a generic message. A 401
+  // is an expired session: fixed wording, followed by the login link.
   function messageFor(status, text) {
+    if (status === 401) return "Your session has expired.";
     var reason = text && text.length < 400 && text.charAt(0) !== "<" ? text.trim() : "";
-    if (status === 401) {
-      return reason || "Your session has expired.";
-    }
     return reason || "The server answered with status " + status + ".";
   }
 
