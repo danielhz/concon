@@ -500,12 +500,14 @@ pub fn apply_teams_import(
         // Link members/admins (present users only) — created teams only.
         for (pred, names) in [("hasMember", &row.linked_members), ("hasAdmin", &row.linked_admins)] {
             for u in names {
-                // Present users only (checked by the plan); a legacy username
-                // that cannot form a well-formed IRI is skipped.
-                let Ok(user_iri) = auth::user_iri_for(u) else {
+                // Present users only (checked by the plan). The link targets
+                // the user's stored node, looked up by username, so a legacy
+                // account whose IRI is not `<USER_IRI_PREFIX><username>` is
+                // linked correctly rather than left dangling.
+                let Some(user_iri) = auth::find_user_iri(store, u) else {
                     continue;
                 };
-                let user_iri = user_iri.as_str();
+                let user_iri = user_iri.trim_matches(|c| c == '<' || c == '>');
                 let insert = format!(
                     r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
                     INSERT DATA {{ <{team_iri}> mlipe:{pred} <{user_iri}> }}"#

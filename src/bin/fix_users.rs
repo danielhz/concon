@@ -60,15 +60,18 @@ fn main() {
     let new_user = "xiang.xu@imw.uni-stuttgart.de";
 
     if let Some((old_iri, hash)) = auth::find_user_by_username(&store, old_user) {
-        // Delete the old user (profile + memberships/roles), then re-create it
-        // under the new name with the same password hash.
+        // Delete the old user (profile + memberships/roles — `delete_user`
+        // also drops any `hasAdmin` role, which is not re-granted below), then
+        // re-create it under the new name with the same password hash.
         auth::delete_user(&store, &old_iri).expect("delete old user");
         let new_iri = auth::create_user(&store, new_user, &hash, None).expect("insert new user");
         enrol(new_iri.as_str());
         println!("Renamed {} -> {}", old_user, new_user);
     }
 
-    // 2. Add wenchuan.liu@imw.uni-stuttgart.de
+    // 2. Add wenchuan.liu@imw.uni-stuttgart.de. Not idempotent: `create_user`
+    // refuses an existing username, so a second run of this script panics here
+    // (the script ran once; it is kept as the worked example).
     let new_username = "wenchuan.liu@imw.uni-stuttgart.de";
     let password_hash = auth::hash_password("1234");
     let new_iri =

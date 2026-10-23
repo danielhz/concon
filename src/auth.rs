@@ -183,6 +183,16 @@ fn user_nodes(store: &Store, username: &str) -> Vec<NamedOrBlankNode> {
         .collect()
 }
 
+/// The lexical value of a literal term (any other term: its display form).
+/// Unlike `strip_literal(term.to_string())`, this returns the stored value
+/// itself, so a legacy username holding `"` or `\` comes back unescaped.
+fn literal_value(term: &Term) -> String {
+    match term {
+        Term::Literal(l) => l.value().to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// The first literal object of `(subject, predicate, ?)`, as its lexical value.
 fn literal_object(
     store: &Store,
@@ -196,6 +206,17 @@ fn literal_object(
             Term::Literal(l) => Some(l.value().to_string()),
             _ => None,
         })
+}
+
+/// The stored node carrying `mlipe:username = username`, in its `<…>` display
+/// form, whether or not the user has a password hash (an account with no
+/// hash exists but cannot log in). Model-API literal match, like
+/// [`find_user_by_username`].
+pub fn find_user_iri(store: &Store, username: &str) -> Option<String> {
+    user_nodes(store, username)
+        .into_iter()
+        .next()
+        .map(|u| u.to_string())
 }
 
 /// Find a user by username in the system store.
@@ -217,7 +238,9 @@ pub fn update_password_hash(store: &Store, user_iri: &str, new_hash: &str) -> Re
     let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
     let user = NamedNode::new(iri).map_err(|e| format!("Invalid user IRI: {e}"))?;
     let p_hash = mlipe("passwordHash");
-    let old: Vec<Quad> = store
+    // One transaction: the old hash(es) and the new one swap atomically.
+    let mut tx = store.start_transaction().map_err(|e| e.to_string())?;
+    let old: Vec<Quad> = tx
         .quads_for_pattern(
             Some(user.as_ref().into()),
             Some(p_hash.as_ref()),
@@ -227,17 +250,16 @@ pub fn update_password_hash(store: &Store, user_iri: &str, new_hash: &str) -> Re
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
     for q in &old {
-        store.remove(q).map_err(|e| e.to_string())?;
+        tx.remove(q);
     }
     let hash = Literal::new_simple_literal(new_hash);
-    store
-        .insert(QuadRef::new(
-            &user,
-            &p_hash,
-            &hash,
-            GraphNameRef::DefaultGraph,
-        ))
-        .map_err(|e| e.to_string())
+    tx.insert(QuadRef::new(
+        &user,
+        &p_hash,
+        &hash,
+        GraphNameRef::DefaultGraph,
+    ));
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Create a user: `<user> a mlipe:User ; mlipe:username ; mlipe:passwordHash`
@@ -245,8 +267,9 @@ pub fn update_password_hash(store: &Store, user_iri: &str, new_hash: &str) -> Re
 /// given (normally the root team). The one creation path shared by the admin
 /// form, the users import and the maintenance binaries. Validates the
 /// username ([`is_valid_username`]), refuses a username already in use, and
-/// writes through the model API, so neither the username nor the hash ever
-/// reaches SPARQL text. Returns the new user's IRI.
+/// writes through the model API in one transaction, so neither the username
+/// nor the hash ever reaches SPARQL text and a user is never half-written.
+/// Returns the new user's IRI.
 pub fn create_user(
     store: &Store,
     username: &str,
@@ -254,9 +277,6 @@ pub fn create_user(
     member_of: Option<&str>,
 ) -> Result<NamedNode, String> {
     let user = user_iri_for(username)?;
-    if !user_nodes(store, username).is_empty() {
-        return Err(format!("User '{username}' already exists"));
-    }
     let team = member_of
         .map(|t| {
             NamedNode::new(t.trim_matches(|c| c == '<' || c == '>'))
@@ -273,35 +293,48 @@ pub fn create_user(
     let name = Literal::new_simple_literal(username);
     let hash = Literal::new_simple_literal(password_hash);
     let g = GraphNameRef::DefaultGraph;
-    let mut quads = vec![
-        QuadRef::new(&user, rdf_type, &c_user, g),
-        QuadRef::new(&user, &p_username, &name, g),
-        QuadRef::new(&user, &p_hash, &hash, g),
-    ];
+    let mut tx = store.start_transaction().map_err(|e| e.to_string())?;
+    // The existence check runs inside the transaction, on the same snapshot
+    // the writes land on.
+    let taken = tx
+        .quads_for_pattern(
+            None,
+            Some(p_username.as_ref()),
+            Some(TermRef::from(name.as_ref())),
+            None,
+        )
+        .next()
+        .is_some();
+    if taken {
+        return Err(format!("User '{username}' already exists"));
+    }
+    tx.insert(QuadRef::new(&user, rdf_type, &c_user, g));
+    tx.insert(QuadRef::new(&user, &p_username, &name, g));
+    tx.insert(QuadRef::new(&user, &p_hash, &hash, g));
     if let Some(team) = &team {
-        quads.push(QuadRef::new(team, &p_member, &user, g));
+        tx.insert(QuadRef::new(team, &p_member, &user, g));
     }
-    for q in quads {
-        store.insert(q).map_err(|e| e.to_string())?;
-    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(user)
 }
 
 /// Delete a user: every system-store quad with the user as subject (its
-/// profile) or as object (team memberships and admin roles). Model API only.
+/// profile) or as object (team memberships and admin roles), in one
+/// transaction. Model API only.
 pub fn delete_user(store: &Store, user_iri: &str) -> Result<(), String> {
     let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
     let user = NamedNode::new(iri).map_err(|e| format!("Invalid user IRI: {e}"))?;
-    let as_subject = store.quads_for_pattern(Some(user.as_ref().into()), None, None, None);
-    let as_object = store.quads_for_pattern(None, None, Some(user.as_ref().into()), None);
+    let mut tx = store.start_transaction().map_err(|e| e.to_string())?;
+    let as_subject = tx.quads_for_pattern(Some(user.as_ref().into()), None, None, None);
+    let as_object = tx.quads_for_pattern(None, None, Some(user.as_ref().into()), None);
     let quads: Vec<Quad> = as_subject
         .chain(as_object)
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
     for q in &quads {
-        store.remove(q).map_err(|e| e.to_string())?;
+        tx.remove(q);
     }
-    Ok(())
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Stored usernames that do not pass [`is_valid_username`] — accounts created
@@ -569,7 +602,7 @@ pub fn list_all_users(store: &Store) -> Vec<UserInfo> {
         for solution in solutions.flatten() {
             if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
                 let iri = user.to_string();
-                let username = strip_literal(&username.to_string());
+                let username = literal_value(username);
                 let teams = get_user_member_teams(store, &iri);
                 users.push(UserInfo {
                     username,
@@ -846,7 +879,7 @@ pub fn get_team_members_recursive(store: &Store, team_iri: &str) -> Vec<UserInfo
         for solution in solutions.flatten() {
             if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
                 users.push(UserInfo {
-                    username: strip_literal(&username.to_string()),
+                    username: literal_value(username),
                     iri: user.to_string(),
                     teams: Vec::new(),
                 });
@@ -874,7 +907,7 @@ pub fn get_team_members(store: &Store, team_iri: &str) -> Vec<UserInfo> {
         for solution in solutions.flatten() {
             if let (Some(user), Some(username)) = (solution.get("user"), solution.get("username")) {
                 users.push(UserInfo {
-                    username: strip_literal(&username.to_string()),
+                    username: literal_value(username),
                     iri: user.to_string(),
                     teams: Vec::new(),
                 });
@@ -1088,6 +1121,10 @@ mod tests {
         let hash = Literal::new_simple_literal(hash_password(password));
         let (p_name, p_hash) = (mlipe("username"), mlipe("passwordHash"));
         let g = GraphNameRef::DefaultGraph;
+        let rdf_type = NamedNodeRef::new_unchecked(RDF_TYPE);
+        store
+            .insert(QuadRef::new(&user, rdf_type, &mlipe("User"), g))
+            .unwrap();
         store
             .insert(QuadRef::new(&user, &p_name, &name, g))
             .unwrap();
@@ -1175,6 +1212,15 @@ mod tests {
         assert!(find_user_by_username(&store, "o'hara").is_none());
 
         assert_eq!(invalid_usernames(&store), vec![weird.to_string()]);
+
+        // Listings hand the UI the stored value, not its SPARQL serialisation,
+        // so the profile link and the delete form work for legacy names too.
+        let listed: Vec<String> = list_all_users(&store)
+            .into_iter()
+            .map(|u| u.username)
+            .collect();
+        assert!(listed.contains(&weird.to_string()), "{listed:?}");
+        assert!(listed.contains(&"alice".to_string()));
     }
 
     #[test]
