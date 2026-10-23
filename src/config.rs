@@ -105,6 +105,17 @@ pub fn ensure_system_data(path: &str) -> Result<(), Box<dyn std::error::Error>> 
 
     let admin_user = std::env::var("MLIPE_ADMIN_USER").unwrap_or_else(|_| "admin".into());
     let admin_pass = std::env::var("MLIPE_ADMIN_PASS").unwrap_or_else(|_| "admin".into());
+    // The admin username is interpolated into the Turtle seed below, as an IRI
+    // path tail and as a literal: `is_valid_username` admits only characters
+    // that need no escaping in either position.
+    if !auth::is_valid_username(&admin_user) {
+        return Err(format!(
+            "MLIPE_ADMIN_USER '{admin_user}' is not a valid username \
+             (ASCII letters, digits, '_', '-', '.', '@'; no leading '.'; at most {} bytes)",
+            auth::MAX_USERNAME_LEN
+        )
+        .into());
+    }
     let password_hash = auth::hash_password(&admin_pass);
     // Stamp the current schema version so a fresh store starts at it; a seed
     // without this defaults to v1 and the startup version check would panic.

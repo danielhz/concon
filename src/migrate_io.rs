@@ -20,15 +20,13 @@ use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::{self, ROOT_TEAM_IRI, is_valid_username};
 use crate::migration;
 use crate::store::{sparql_query, sparql_update};
 
 /// The concon package version, stamped into every bundle alongside the schema
 /// version.
 pub const CONCON_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-const USER_IRI_PREFIX: &str = "https://mlipe.2mia.org/users/";
-const ROOT_TEAM_IRI: &str = "https://mlipe.2mia.org/teams/root";
 
 /// One exported user: its IRI, username, and argon2 password hash (PHC string).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,16 +80,6 @@ pub struct UsersImportReport {
     pub applied: bool,
 }
 
-/// Whether a username is a safe, well-formed local name (it becomes the last
-/// path segment of the user IRI). Conservative on purpose — a migration should
-/// not be able to inject odd IRIs.
-pub fn is_valid_username(u: &str) -> bool {
-    !u.is_empty()
-        && u.len() <= 128
-        && u.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-}
-
 /// Plan a users import: decide, per bundle entry, add vs skip (already present)
 /// vs reject (malformed), and flag a schema-version mismatch. Pure — no store
 /// mutation — so a dry-run and the real apply share exactly this decision.
@@ -133,6 +121,7 @@ pub fn plan_users_import(
 
 /// Escape a string for a SPARQL double-quoted literal (see also the annotation
 /// path in `routes::entity`). Kept local to avoid a cross-module dependency.
+/// Used for team names; users are written through `auth::create_user`.
 fn escape_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
@@ -192,6 +181,8 @@ fn lit(term_display: &str) -> String {
 /// (reconciled into the target's user-IRI scheme, keyed on username), preserving
 /// its argon2 hash, and enrol it in the root team. Returns the report with
 /// `applied = true`. Never touches an existing user (merge-not-replace).
+/// Users are written through `auth::create_user` (model API, validated
+/// username); a user the store refuses is moved from `to_add` to `rejected`.
 pub fn apply_users_import(
     store: &Store,
     bundle: &UsersBundle,
@@ -199,27 +190,20 @@ pub fn apply_users_import(
     target_schema_version: u32,
 ) -> UsersImportReport {
     let mut report = plan_users_import(bundle, existing_usernames, target_schema_version);
-    for name in &report.to_add {
+    let mut added = Vec::with_capacity(report.to_add.len());
+    for name in std::mem::take(&mut report.to_add) {
         // The record is guaranteed present + valid by the plan.
         let rec = bundle
             .users
             .iter()
             .find(|u| u.username.trim() == name.as_str());
         let Some(rec) = rec else { continue };
-        let iri = format!("{USER_IRI_PREFIX}{name}");
-        let hash = escape_literal(rec.password_hash.trim());
-        let uname = escape_literal(name);
-        let insert = format!(
-            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            INSERT DATA {{
-                <{iri}> a mlipe:User ;
-                        mlipe:username "{uname}" ;
-                        mlipe:passwordHash "{hash}" .
-                <{ROOT_TEAM_IRI}> mlipe:hasMember <{iri}> .
-            }}"#
-        );
-        let _ = sparql_update(store, &insert);
+        match auth::create_user(store, &name, rec.password_hash.trim(), Some(ROOT_TEAM_IRI)) {
+            Ok(_) => added.push(name),
+            Err(_) => report.rejected.push(name),
+        }
     }
+    report.to_add = added;
     report.applied = true;
     report
 }
@@ -516,7 +500,14 @@ pub fn apply_teams_import(
         // Link members/admins (present users only) — created teams only.
         for (pred, names) in [("hasMember", &row.linked_members), ("hasAdmin", &row.linked_admins)] {
             for u in names {
-                let user_iri = format!("{USER_IRI_PREFIX}{u}");
+                // Present users only (checked by the plan). The link targets
+                // the user's stored node, looked up by username, so a legacy
+                // account whose IRI is not `<USER_IRI_PREFIX><username>` is
+                // linked correctly rather than left dangling.
+                let Some(user_iri) = auth::find_user_iri(store, u) else {
+                    continue;
+                };
+                let user_iri = user_iri.trim_matches(|c| c == '<' || c == '>');
                 let insert = format!(
                     r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
                     INSERT DATA {{ <{team_iri}> mlipe:{pred} <{user_iri}> }}"#
@@ -532,6 +523,7 @@ pub fn apply_teams_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::USER_IRI_PREFIX;
 
     fn bundle(names: &[&str], version: u32) -> UsersBundle {
         UsersBundle::new(
@@ -586,6 +578,7 @@ mod tests {
     fn is_valid_username_guards_iri_safety() {
         assert!(is_valid_username("alice"));
         assert!(is_valid_username("a.b-c_1"));
+        assert!(is_valid_username("first.last@example.org"));
         assert!(!is_valid_username(""));
         assert!(!is_valid_username("a/b"));
         assert!(!is_valid_username("a b"));

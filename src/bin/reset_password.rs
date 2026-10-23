@@ -1,10 +1,9 @@
 //! Reset a user's password.
 //! Usage: ./target/release/reset_password <username> <new_password>
 
-use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
-use concon::store::{sparql_query, sparql_update};
+use concon::auth;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -16,32 +15,14 @@ fn main() {
     let new_password = &args[2];
 
     let store = Store::open("data/system").expect("Failed to open system store");
-    let hash = concon::auth::hash_password(new_password);
 
-    let query = format!(
-        r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-        SELECT ?user WHERE {{ ?user mlipe:username "{username}" }} LIMIT 1"#
-    );
-
-    let mut found = false;
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(&store, &query) {
-        for solution in solutions.flatten() {
-            let iri = solution.get("user").unwrap().to_string();
-            let iri = iri.trim_matches(|c| c == '<' || c == '>');
-            let update = format!(
-                r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-                DELETE {{ <{iri}> mlipe:passwordHash ?old }}
-                INSERT {{ <{iri}> mlipe:passwordHash "{hash}" }}
-                WHERE {{ <{iri}> mlipe:passwordHash ?old }}"#
-            );
-            sparql_update(&store, &update).expect("update password");
-            println!("Password reset for {}", username);
-            found = true;
-        }
-    }
-
-    if !found {
+    // The username is matched as a literal value through the model API, so
+    // an account whose name predates the username rule can still be reset.
+    let Some((user_iri, _)) = auth::find_user_by_username(&store, username) else {
         eprintln!("User '{}' not found", username);
         std::process::exit(1);
-    }
+    };
+    let hash = auth::hash_password(new_password);
+    auth::update_password_hash(&store, &user_iri, &hash).expect("update password");
+    println!("Password reset for {}", username);
 }

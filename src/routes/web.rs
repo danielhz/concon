@@ -813,9 +813,26 @@ async fn admin_create_user(
         return Redirect::to("/").into_response();
     }
 
+    let admin = session.map(|s| s.username);
     let username = form.username.trim().to_string();
-    if username.is_empty() || form.password.is_empty() {
-        return Redirect::to("/_admin/users").into_response();
+    // A malformed username (or an empty password) is a client error: the users
+    // page is re-rendered with the reason, with status 400.
+    let reject = |msg: String| {
+        let mut response = render_admin_users(&state, admin.clone(), Some(msg), None);
+        if response.status() == StatusCode::OK {
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+        }
+        response
+    };
+    if !auth::is_valid_username(&username) {
+        return reject(format!(
+            "Invalid username '{username}': use ASCII letters, digits, '_', '-', '.' or '@' \
+             (no leading '.'), at most {} characters.",
+            auth::MAX_USERNAME_LEN
+        ));
+    }
+    if form.password.is_empty() {
+        return reject("The password must not be empty.".to_string());
     }
 
     // Check if user already exists
@@ -824,25 +841,20 @@ async fn admin_create_user(
     }
 
     let password_hash = auth::hash_password(&form.password);
-    let user_iri = format!("https://mlipe.2mia.org/users/{}", username);
 
     // Find root team IRI
     let root_iri = auth::resolve_team_path(&state.store_manager.system, &[])
-        .unwrap_or_else(|| "<https://mlipe.2mia.org/teams/root>".to_string());
-    let root_clean = root_iri.trim_matches(|c| c == '<' || c == '>');
+        .unwrap_or_else(|| format!("<{}>", auth::ROOT_TEAM_IRI));
 
-    let insert = format!(
-        r#"
-        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-        INSERT DATA {{
-            <{user_iri}> a mlipe:User ;
-                mlipe:username "{username}" ;
-                mlipe:passwordHash "{password_hash}" .
-            <{root_clean}> mlipe:hasMember <{user_iri}> .
-        }}
-        "#,
-    );
-    let _ = sparql_update(&state.store_manager.system, &insert);
+    // Model-API write: the username and hash are literal values only.
+    if let Err(e) = auth::create_user(
+        &state.store_manager.system,
+        &username,
+        &password_hash,
+        Some(&root_iri),
+    ) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
 
     Redirect::to("/_admin/users").into_response()
 }
@@ -869,34 +881,14 @@ async fn admin_delete_user(
         }
     }
 
+    // The username is resolved to the stored user node (literal match, no
+    // query text); the delete then removes the user's profile and every team
+    // membership / admin role that points at it.
     if let Some((user_iri, _)) =
         auth::find_user_by_username(&state.store_manager.system, &form.username)
+        && let Err(e) = auth::delete_user(&state.store_manager.system, &user_iri)
     {
-        let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
-        let delete = format!(
-            r#"
-            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            DELETE WHERE {{ <{iri}> ?p ?o }}
-            "#,
-        );
-        let _ = sparql_update(&state.store_manager.system, &delete);
-
-        // Also remove team memberships pointing to this user
-        let delete_refs = format!(
-            r#"
-            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            DELETE WHERE {{ ?team mlipe:hasMember <{iri}> }}
-            "#,
-        );
-        let _ = sparql_update(&state.store_manager.system, &delete_refs);
-
-        let delete_admin = format!(
-            r#"
-            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            DELETE WHERE {{ ?team mlipe:hasAdmin <{iri}> }}
-            "#,
-        );
-        let _ = sparql_update(&state.store_manager.system, &delete_admin);
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
     Redirect::to("/_admin/users").into_response()
@@ -1853,5 +1845,163 @@ mod tests {
         let page = server.get("/_change-password").await;
         page.assert_status(StatusCode::SEE_OTHER);
         assert_eq!(page.headers()["location"], "/_login");
+    }
+
+    /// Login must treat a query-shaped username as data: a failed login, not
+    /// a parse error.
+    #[tokio::test]
+    async fn login_with_hostile_username_is_just_a_failed_login() {
+        let server = server_for(setup_state());
+        for hostile in [
+            "admin\"",
+            "admin\" } LIMIT 1 #",
+            "\" } UNION { ?user mlipe:username ?any . ?user mlipe:passwordHash ?hash } #",
+        ] {
+            let response = server
+                .post("/_login")
+                .form(&[("username", hostile), ("password", "secret")])
+                .await;
+            response.assert_status_ok();
+            assert!(
+                response.text().contains("Invalid username or password."),
+                "{hostile:?}"
+            );
+            assert!(
+                !response.headers().get_all("set-cookie").iter().any(|v| v
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!("{SESSION_COOKIE}="))),
+                "no session for {hostile:?}"
+            );
+        }
+    }
+
+    /// Existing accounts keep logging in whatever their username looks like:
+    /// the deployed email-style names, and even a name that predates the rule.
+    #[tokio::test]
+    async fn login_works_for_email_style_and_legacy_usernames() {
+        let state = setup_state();
+        let sys = &state.store_manager.system;
+        crate::auth::create_user(
+            sys,
+            "first.last@example.org",
+            &crate::auth::hash_password("pw1"),
+            None,
+        )
+        .unwrap();
+        {
+            use oxigraph::model::{GraphNameRef, Literal, NamedNode, QuadRef};
+            let user = NamedNode::new("https://mlipe.2mia.org/users/legacy").unwrap();
+            let p_name = NamedNode::new("https://mlipe.2mia.org/ontology#username").unwrap();
+            let p_hash = NamedNode::new("https://mlipe.2mia.org/ontology#passwordHash").unwrap();
+            let name = Literal::new_simple_literal("we\"ird name");
+            let hash = Literal::new_simple_literal(crate::auth::hash_password("pw2"));
+            sys.insert(QuadRef::new(
+                &user,
+                &p_name,
+                &name,
+                GraphNameRef::DefaultGraph,
+            ))
+            .unwrap();
+            sys.insert(QuadRef::new(
+                &user,
+                &p_hash,
+                &hash,
+                GraphNameRef::DefaultGraph,
+            ))
+            .unwrap();
+        }
+        let server = server_for(state);
+        for (user, pw) in [("first.last@example.org", "pw1"), ("we\"ird name", "pw2")] {
+            let response = server
+                .post("/_login")
+                .form(&[("username", user), ("password", pw)])
+                .await;
+            response.assert_status(StatusCode::SEE_OTHER);
+            session_set_cookie(&response);
+            let wrong = server
+                .post("/_login")
+                .form(&[("username", user), ("password", "nope")])
+                .await;
+            wrong.assert_status_ok();
+        }
+        // The profile page resolves the name as data too.
+        let page = server.get("/_users/first.last@example.org").await;
+        page.assert_status_ok();
+    }
+
+    /// The admin form validates the username (400 with the reason on the users
+    /// page), accepts the deployed email-style names, and the created user can
+    /// log in.
+    #[tokio::test]
+    async fn admin_create_user_validates_username() {
+        let state = setup_state();
+        let server = server_for(state.clone());
+        login(&server).await.assert_status(StatusCode::SEE_OTHER);
+
+        for bad in ["bad\"name", "a b", "a/b", ".hidden", "", "x\" } #"] {
+            let response = server
+                .post("/_admin/users/new")
+                .form(&[("username", bad), ("password", "pw")])
+                .await;
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert!(response.text().contains("Invalid username"), "{bad:?}");
+            assert!(crate::auth::find_user_by_username(&state.store_manager.system, bad).is_none());
+        }
+        let response = server
+            .post("/_admin/users/new")
+            .form(&[("username", "first.last@example.org"), ("password", "")])
+            .await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert!(response.text().contains("password must not be empty"));
+
+        let response = server
+            .post("/_admin/users/new")
+            .form(&[("username", "first.last@example.org"), ("password", "pw")])
+            .await;
+        response.assert_status(StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], "/_admin/users");
+        let (iri, _) = crate::auth::find_user_by_username(
+            &state.store_manager.system,
+            "first.last@example.org",
+        )
+        .unwrap();
+        assert_eq!(iri, "<https://mlipe.2mia.org/users/first.last@example.org>");
+        assert!(crate::auth::invalid_usernames(&state.store_manager.system).is_empty());
+
+        // The new user logs in (replacing the admin session on this client).
+        let response = server
+            .post("/_login")
+            .form(&[("username", "first.last@example.org"), ("password", "pw")])
+            .await;
+        response.assert_status(StatusCode::SEE_OTHER);
+
+        // Deleting by a query-shaped username is a no-op redirect, not an error.
+        let server = server_for(state.clone());
+        login(&server).await.assert_status(StatusCode::SEE_OTHER);
+        let response = server
+            .post("/_admin/users/delete")
+            .form(&[("username", "first.last@example.org\" } #")])
+            .await;
+        response.assert_status(StatusCode::SEE_OTHER);
+        assert!(
+            crate::auth::find_user_by_username(
+                &state.store_manager.system,
+                "first.last@example.org"
+            )
+            .is_some()
+        );
+        let response = server
+            .post("/_admin/users/delete")
+            .form(&[("username", "first.last@example.org")])
+            .await;
+        response.assert_status(StatusCode::SEE_OTHER);
+        assert!(
+            crate::auth::find_user_by_username(
+                &state.store_manager.system,
+                "first.last@example.org"
+            )
+            .is_none()
+        );
     }
 }
