@@ -33,6 +33,8 @@ Example:
 ./target/release/reset_password yuji.ikeda@imw.uni-stuttgart.de 1234
 #+end_example
 
+The username is matched as a stored literal value (no query text is built from it), so any existing account can be reset, including one whose name predates the username rule (see =deployment.org=, "Usernames").
+
 ** migrate
 
 Run schema migrations.  Creates a backup of the data directory before

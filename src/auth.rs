@@ -5,11 +5,13 @@ use std::time::{Duration, Instant};
 use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use oxigraph::model::NamedNode;
+use oxigraph::model::{
+    GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, QuadRef, Term, TermRef,
+};
 use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
-use crate::store::{MLIPE_NS, sparql_query, sparql_update};
+use crate::store::{MLIPE_NS, sparql_query};
 
 pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
@@ -118,45 +120,208 @@ pub struct TeamInfo {
     pub name: String,
 }
 
-/// Find a user by username in the system store.
-/// Returns (user_iri, password_hash) if found.
-pub fn find_user_by_username(store: &Store, username: &str) -> Option<(String, String)> {
-    let query = format!(
-        r#"
-        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-        SELECT ?user ?hash WHERE {{
-            ?user mlipe:username "{}" ;
-                  mlipe:passwordHash ?hash .
-        }}
-        LIMIT 1
-        "#,
-        username.replace('"', r#"\""#)
-    );
+/// IRI prefix under which user IRIs are minted: `<USER_IRI_PREFIX><username>`.
+pub const USER_IRI_PREFIX: &str = "https://mlipe.2mia.org/users/";
+/// Upper bound on a username's length, in bytes.
+pub const MAX_USERNAME_LEN: usize = 128;
+/// Well-known root team IRI (created by the first-run seed).
+pub const ROOT_TEAM_IRI: &str = "https://mlipe.2mia.org/teams/root";
 
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store, &query) {
-        if let Some(solution) = solutions.flatten().next() {
-            let user_iri = solution.get("user")?.to_string();
-            let hash = solution.get("hash")?.to_string();
-            // Strip surrounding quotes and datatype from literal
-            let hash = strip_literal(&hash);
-            return Some((user_iri, hash));
-        }
-    }
-    None
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+/// Whether `u` is a well-formed username. A username becomes the last path
+/// segment of the user IRI, a literal value in the system store, a URL path
+/// segment (`/_users/{username}`) and a Turtle literal in the first-run seed,
+/// so the allow-list is deliberately small — the username counterpart of
+/// `store::is_valid_name_segment` for dataset names: ASCII letters, digits,
+/// `_`, `-`, `.` and `@` (the deployed accounts are email-style, e.g.
+/// `first.last@example.org`); no leading `.`; at most `MAX_USERNAME_LEN`
+/// bytes. None of these characters needs escaping in an IRI path, a SPARQL or
+/// Turtle literal, or a URL path.
+///
+/// Enforced on every path that *creates* a user (admin form, first-run seed,
+/// users import, maintenance binaries). Lookups deliberately do not enforce
+/// it: they match the username as a literal *value* through the model API, so
+/// an account that predates the rule keeps logging in. [`invalid_usernames`]
+/// reports such accounts.
+pub fn is_valid_username(u: &str) -> bool {
+    !u.is_empty()
+        && u.len() <= MAX_USERNAME_LEN
+        && !u.starts_with('.')
+        && u.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '@'))
 }
 
-/// Update the password hash for a user in the system store.
+/// The user IRI for `username`, minted under [`USER_IRI_PREFIX`]. Fails unless
+/// the username passes [`is_valid_username`], so the IRI is always well-formed.
+pub fn user_iri_for(username: &str) -> Result<NamedNode, String> {
+    if !is_valid_username(username) {
+        return Err(format!("Invalid username '{username}'"));
+    }
+    NamedNode::new(format!("{USER_IRI_PREFIX}{username}")).map_err(|e| e.to_string())
+}
+
+/// A `mlipe:` vocabulary term. The namespace is a constant valid IRI, so the
+/// result is always well-formed.
+fn mlipe(local: &str) -> NamedNode {
+    NamedNode::new_unchecked(format!("{MLIPE_NS}{local}"))
+}
+
+/// Every node whose `mlipe:username` is exactly `username`. Model-API lookup:
+/// the username is matched as a literal value and never reaches query text.
+fn user_nodes(store: &Store, username: &str) -> Vec<NamedOrBlankNode> {
+    let p_username = mlipe("username");
+    let name = Literal::new_simple_literal(username);
+    store
+        .quads_for_pattern(
+            None,
+            Some(p_username.as_ref()),
+            Some(TermRef::from(name.as_ref())),
+            None,
+        )
+        .filter_map(|q| q.ok().map(|q| q.subject))
+        .collect()
+}
+
+/// The first literal object of `(subject, predicate, ?)`, as its lexical value.
+fn literal_object(
+    store: &Store,
+    subject: &NamedOrBlankNode,
+    predicate: &NamedNode,
+) -> Option<String> {
+    store
+        .quads_for_pattern(Some(subject.as_ref()), Some(predicate.as_ref()), None, None)
+        .filter_map(Result::ok)
+        .find_map(|q| match q.object {
+            Term::Literal(l) => Some(l.value().to_string()),
+            _ => None,
+        })
+}
+
+/// Find a user by username in the system store.
+/// Returns (user_iri, password_hash) if found — the IRI in its `<…>` display
+/// form. The username is only ever a literal value here (no SPARQL text is
+/// built), so any string is safe to look up; it either matches a stored
+/// `mlipe:username` exactly or finds nothing.
+pub fn find_user_by_username(store: &Store, username: &str) -> Option<(String, String)> {
+    let p_hash = mlipe("passwordHash");
+    user_nodes(store, username).into_iter().find_map(|user| {
+        let hash = literal_object(store, &user, &p_hash)?;
+        Some((user.to_string(), hash))
+    })
+}
+
+/// Update the password hash for a user in the system store (model API; the
+/// hash replaces any existing `mlipe:passwordHash` of the user).
 pub fn update_password_hash(store: &Store, user_iri: &str, new_hash: &str) -> Result<(), String> {
     let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
-    let update = format!(
-        r#"
-        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-        DELETE {{ <{iri}> mlipe:passwordHash ?old }}
-        INSERT {{ <{iri}> mlipe:passwordHash "{new_hash}" }}
-        WHERE {{ <{iri}> mlipe:passwordHash ?old }}
-        "#,
+    let user = NamedNode::new(iri).map_err(|e| format!("Invalid user IRI: {e}"))?;
+    let p_hash = mlipe("passwordHash");
+    let old: Vec<Quad> = store
+        .quads_for_pattern(
+            Some(user.as_ref().into()),
+            Some(p_hash.as_ref()),
+            None,
+            None,
+        )
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for q in &old {
+        store.remove(q).map_err(|e| e.to_string())?;
+    }
+    let hash = Literal::new_simple_literal(new_hash);
+    store
+        .insert(QuadRef::new(
+            &user,
+            &p_hash,
+            &hash,
+            GraphNameRef::DefaultGraph,
+        ))
+        .map_err(|e| e.to_string())
+}
+
+/// Create a user: `<user> a mlipe:User ; mlipe:username ; mlipe:passwordHash`
+/// (an argon2 PHC string), enrolled as `mlipe:hasMember` of `member_of` when
+/// given (normally the root team). The one creation path shared by the admin
+/// form, the users import and the maintenance binaries. Validates the
+/// username ([`is_valid_username`]), refuses a username already in use, and
+/// writes through the model API, so neither the username nor the hash ever
+/// reaches SPARQL text. Returns the new user's IRI.
+pub fn create_user(
+    store: &Store,
+    username: &str,
+    password_hash: &str,
+    member_of: Option<&str>,
+) -> Result<NamedNode, String> {
+    let user = user_iri_for(username)?;
+    if !user_nodes(store, username).is_empty() {
+        return Err(format!("User '{username}' already exists"));
+    }
+    let team = member_of
+        .map(|t| {
+            NamedNode::new(t.trim_matches(|c| c == '<' || c == '>'))
+                .map_err(|e| format!("Invalid team IRI: {e}"))
+        })
+        .transpose()?;
+    let rdf_type = NamedNodeRef::new_unchecked(RDF_TYPE);
+    let (c_user, p_username, p_hash, p_member) = (
+        mlipe("User"),
+        mlipe("username"),
+        mlipe("passwordHash"),
+        mlipe("hasMember"),
     );
-    sparql_update(store, &update).map_err(|e| e.to_string())
+    let name = Literal::new_simple_literal(username);
+    let hash = Literal::new_simple_literal(password_hash);
+    let g = GraphNameRef::DefaultGraph;
+    let mut quads = vec![
+        QuadRef::new(&user, rdf_type, &c_user, g),
+        QuadRef::new(&user, &p_username, &name, g),
+        QuadRef::new(&user, &p_hash, &hash, g),
+    ];
+    if let Some(team) = &team {
+        quads.push(QuadRef::new(team, &p_member, &user, g));
+    }
+    for q in quads {
+        store.insert(q).map_err(|e| e.to_string())?;
+    }
+    Ok(user)
+}
+
+/// Delete a user: every system-store quad with the user as subject (its
+/// profile) or as object (team memberships and admin roles). Model API only.
+pub fn delete_user(store: &Store, user_iri: &str) -> Result<(), String> {
+    let iri = user_iri.trim_matches(|c| c == '<' || c == '>');
+    let user = NamedNode::new(iri).map_err(|e| format!("Invalid user IRI: {e}"))?;
+    let as_subject = store.quads_for_pattern(Some(user.as_ref().into()), None, None, None);
+    let as_object = store.quads_for_pattern(None, None, Some(user.as_ref().into()), None);
+    let quads: Vec<Quad> = as_subject
+        .chain(as_object)
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for q in &quads {
+        store.remove(q).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Stored usernames that do not pass [`is_valid_username`] — accounts created
+/// before the rule existed. They can still log in (lookups treat the username
+/// as data), but cannot be re-created or imported as they are; the operator
+/// should rename them. Sorted, deduplicated. Reported at startup.
+pub fn invalid_usernames(store: &Store) -> Vec<String> {
+    let p_username = mlipe("username");
+    let mut names: Vec<String> = store
+        .quads_for_pattern(None, Some(p_username.as_ref()), None, None)
+        .filter_map(Result::ok)
+        .filter_map(|q| match q.object {
+            Term::Literal(l) => Some(l.value().to_string()),
+            _ => None,
+        })
+        .filter(|n| !is_valid_username(n))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Get all public datasets from the system store.
@@ -912,6 +1077,231 @@ mod tests {
         assert_eq!(
             strip_literal(r#""hello"^^<http://www.w3.org/2001/XMLSchema#string>"#),
             "hello"
+        );
+    }
+
+    /// Insert a user straight through the model API, bypassing validation —
+    /// stands in for an account created before the username rule existed.
+    fn insert_legacy_user(store: &Store, iri: &str, username: &str, password: &str) {
+        let user = NamedNode::new(iri).unwrap();
+        let name = Literal::new_simple_literal(username);
+        let hash = Literal::new_simple_literal(hash_password(password));
+        let (p_name, p_hash) = (mlipe("username"), mlipe("passwordHash"));
+        let g = GraphNameRef::DefaultGraph;
+        store
+            .insert(QuadRef::new(&user, &p_name, &name, g))
+            .unwrap();
+        store
+            .insert(QuadRef::new(&user, &p_hash, &hash, g))
+            .unwrap();
+    }
+
+    fn basic(username: &str, password: &str) -> String {
+        use base64::Engine;
+        let creds =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        format!("Basic {creds}")
+    }
+
+    #[test]
+    fn username_rule_allow_list() {
+        for ok in [
+            "alice",
+            "a.b-c_1",
+            "first.last@example.org",
+            "st154713@stud.uni-stuttgart.de",
+            "A1",
+        ] {
+            assert!(is_valid_username(ok), "{ok} should be valid");
+        }
+        for bad in [
+            "",
+            ".hidden",
+            "a/b",
+            "a b",
+            "a\"b",
+            "a\\b",
+            "a'b",
+            "a}b",
+            "a<b",
+            "a\nb",
+            "ä",
+            "a:b",
+            "\"} ?u mlipe:username ?n . {\"",
+        ] {
+            assert!(!is_valid_username(bad), "{bad:?} should be invalid");
+        }
+        let max = "a".repeat(MAX_USERNAME_LEN);
+        assert!(is_valid_username(&max));
+        assert!(!is_valid_username(&format!("{max}a")));
+        assert!(user_iri_for("a/b").is_err());
+        assert_eq!(
+            user_iri_for("first.last@example.org").unwrap().as_str(),
+            "https://mlipe.2mia.org/users/first.last@example.org"
+        );
+    }
+
+    #[test]
+    fn lookup_treats_the_username_as_data() {
+        let store = Store::new().unwrap();
+        create_user(&store, "alice", &hash_password("pw-a"), None).unwrap();
+        // A legacy account whose name would break a quoted SPARQL literal.
+        let weird = "o'hara \"quoted\" \\ back } . ?x ?y ?z";
+        insert_legacy_user(&store, "https://mlipe.2mia.org/users/legacy", weird, "pw-w");
+
+        let (iri, hash) = find_user_by_username(&store, "alice").unwrap();
+        assert_eq!(iri, "<https://mlipe.2mia.org/users/alice>");
+        assert!(verify_password("pw-a", &hash));
+
+        // Query-shaped input finds nothing (and does not error).
+        for hostile in [
+            "alice\"",
+            "alice\" } LIMIT 1 #",
+            "\" } UNION { ?user mlipe:username ?any . ?user mlipe:passwordHash ?hash } #",
+            "alice\\",
+            "*",
+            "",
+        ] {
+            assert!(
+                find_user_by_username(&store, hostile).is_none(),
+                "{hostile:?}"
+            );
+        }
+
+        // The legacy account is found by its exact name only.
+        let (iri, hash) = find_user_by_username(&store, weird).unwrap();
+        assert_eq!(iri, "<https://mlipe.2mia.org/users/legacy>");
+        assert!(verify_password("pw-w", &hash));
+        assert!(find_user_by_username(&store, "o'hara").is_none());
+
+        assert_eq!(invalid_usernames(&store), vec![weird.to_string()]);
+    }
+
+    #[test]
+    fn basic_auth_with_unusual_usernames() {
+        let store = Store::new().unwrap();
+        create_user(
+            &store,
+            "first.last@example.org",
+            &hash_password("s3cret"),
+            None,
+        )
+        .unwrap();
+        insert_legacy_user(
+            &store,
+            "https://mlipe.2mia.org/users/legacy",
+            "we\"ird",
+            "pw",
+        );
+
+        assert_eq!(
+            authenticate_basic(&store, Some(&basic("first.last@example.org", "s3cret"))).as_deref(),
+            Some("<https://mlipe.2mia.org/users/first.last@example.org>")
+        );
+        assert_eq!(
+            authenticate_basic(&store, Some(&basic("we\"ird", "pw"))).as_deref(),
+            Some("<https://mlipe.2mia.org/users/legacy>")
+        );
+        assert!(authenticate_basic(&store, Some(&basic("we\"ird", "wrong"))).is_none());
+        assert!(
+            authenticate_basic(
+                &store,
+                Some(&basic("first.last@example.org\" } #", "s3cret"))
+            )
+            .is_none()
+        );
+        assert!(authenticate_basic(&store, Some(&basic("", "s3cret"))).is_none());
+    }
+
+    #[test]
+    fn create_user_validates_and_enrols() {
+        let store = Store::new().unwrap();
+        let root = format!("<{ROOT_TEAM_IRI}>");
+        let hash = hash_password("pw");
+
+        for bad in ["", "a b", "a\"b", "a/b", ".x"] {
+            assert!(
+                create_user(&store, bad, &hash, Some(&root)).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(find_user_by_username(&store, "a b").is_none());
+
+        let user = create_user(&store, "first.last@example.org", &hash, Some(&root)).unwrap();
+        assert_eq!(
+            user.as_str(),
+            "https://mlipe.2mia.org/users/first.last@example.org"
+        );
+        assert!(
+            create_user(&store, "first.last@example.org", &hash, None).is_err(),
+            "duplicate"
+        );
+        let has_member = mlipe("hasMember");
+        let root_node = NamedNode::new(ROOT_TEAM_IRI).unwrap();
+        assert!(
+            store
+                .quads_for_pattern(
+                    Some(root_node.as_ref().into()),
+                    Some(has_member.as_ref()),
+                    Some(user.as_ref().into()),
+                    None
+                )
+                .next()
+                .is_some(),
+            "enrolled in root"
+        );
+        let (_, stored) = find_user_by_username(&store, "first.last@example.org").unwrap();
+        assert_eq!(stored, hash);
+        assert!(invalid_usernames(&store).is_empty());
+    }
+
+    #[test]
+    fn update_and_delete_user() {
+        let store = Store::new().unwrap();
+        let root = format!("<{ROOT_TEAM_IRI}>");
+        let user = create_user(&store, "alice", &hash_password("one"), Some(&root)).unwrap();
+        // Also an admin role pointing at the user.
+        let has_admin = mlipe("hasAdmin");
+        let root_node = NamedNode::new(ROOT_TEAM_IRI).unwrap();
+        store
+            .insert(QuadRef::new(
+                &root_node,
+                &has_admin,
+                &user,
+                GraphNameRef::DefaultGraph,
+            ))
+            .unwrap();
+
+        update_password_hash(&store, user.as_str(), &hash_password("two")).unwrap();
+        let (_, hash) = find_user_by_username(&store, "alice").unwrap();
+        assert!(verify_password("two", &hash) && !verify_password("one", &hash));
+        let p_hash = mlipe("passwordHash");
+        assert_eq!(
+            store
+                .quads_for_pattern(
+                    Some(user.as_ref().into()),
+                    Some(p_hash.as_ref()),
+                    None,
+                    None
+                )
+                .count(),
+            1,
+            "exactly one hash after an update"
+        );
+
+        delete_user(&store, &format!("<{}>", user.as_str())).unwrap();
+        assert!(find_user_by_username(&store, "alice").is_none());
+        assert_eq!(
+            store
+                .quads_for_pattern(Some(user.as_ref().into()), None, None, None)
+                .count(),
+            0
+        );
+        assert_eq!(
+            store
+                .quads_for_pattern(None, None, Some(user.as_ref().into()), None)
+                .count(),
+            0
         );
     }
 }
