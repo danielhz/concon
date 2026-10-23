@@ -45,9 +45,10 @@ impl NoteForm {
 
 /// Dispatch a note form POSTed to a resource view (`subject_iri`): add a note
 /// (Epic H), or edit/delete one of the session user's notes (issue #2).
-/// `username` is `None` only for the edit/delete carve-out in [`content_post`]
-/// (an add by an anonymous caller was already redirected to login there).
-/// `reply` is the redirect for a plain form POST, or the in-place fragment
+/// `username` is the session user: both POST routes require a login before
+/// dispatch (an anonymous caller is redirected or answered 401 in
+/// [`content_post`]), so it is always `Some` here — the `None` arms are
+/// defensive. `reply` is the redirect for a plain form POST, or the in-place fragment
 /// when the request carries `X-Concon-Fragment: note` (issue #9) — same
 /// authorization, limits and error statuses either way.
 async fn note_form_post(
@@ -1749,6 +1750,10 @@ mod tests {
         assert!(html.contains(r#"Discussion (<span class="annotation-count">1</span>)"#));
         assert!(
             html.contains(r#"data-note-form="add""#) && html.contains("/static/concon-notes.js")
+        );
+        assert!(
+            html.contains(r#"<p class="annotate-status" role="status""#),
+            "{html}"
         );
 
         // Background add: the rendered note comes back as a fragment — one

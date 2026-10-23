@@ -36,6 +36,13 @@
     return form.querySelector("button[type=submit]");
   }
 
+  // The polite status line under the Discussion heading (role="status"), so
+  // assistive tech hears what happened without a focus change doing it.
+  function announce(text) {
+    var status = document.querySelector(".annotate-status");
+    if (status) status.textContent = text;
+  }
+
   function clearError(form) {
     var box = form.querySelector(".annotate-error");
     if (box) box.parentNode.removeChild(box);
@@ -105,7 +112,13 @@
     clearError(form);
     if (button) button.disabled = true;
 
-    fetch(form.action, {
+    // Not `form.action`: the edit/delete forms have a control named "action"
+    // (the hidden action=edit|delete field), which shadows the form's IDL
+    // attribute (LegacyOverrideBuiltIns) — `form.action` would be that
+    // <input>. Read the attribute; it is an absolute path that fetch resolves
+    // against the page. Nothing else is read off the form object by property.
+    var url = form.getAttribute("action") || location.href;
+    fetch(url, {
       method: "POST",
       credentials: "same-origin",
       redirect: "manual",
@@ -134,6 +147,10 @@
           var gone = form.closest("li.annotation");
           if (gone) gone.parentNode.removeChild(gone);
           updateCount();
+          // The focused button went with the note: land on the heading.
+          var heading = document.getElementById("discussion");
+          if (heading) heading.focus();
+          announce("Note deleted.");
           return;
         }
         var note = res.html ? parseNote(res.text) : null;
@@ -148,6 +165,11 @@
             return;
           }
           old.replaceWith(note);
+          // The focused "Save changes" went with the old <li>: move to the
+          // new note's own "#" link so keyboard users stay on the note.
+          var link = note.querySelector(".annotation-link");
+          if (link) link.focus();
+          announce("Note saved.");
         } else {
           var list = document.querySelector("ul.annotations");
           if (!list) {
@@ -156,7 +178,11 @@
           }
           list.appendChild(note);
           var field = form.querySelector("textarea");
-          if (field) field.value = "";
+          if (field) {
+            field.value = "";
+            field.focus();
+          }
+          announce("Note added.");
         }
         updateCount();
       })

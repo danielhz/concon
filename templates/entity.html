@@ -54,6 +54,8 @@
   .annotation-actions .btn-small-danger { margin-left: 0; }
   .annotate-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 0.4em; }
   ul.annotations[hidden], .annotations-empty[hidden] { display: none; }
+  .annotate-status { font-size: 0.85em; color: #767676; margin: 0 0 0.4em; }
+  .annotate-status:empty { display: none; }
   .annotate-hint { font-size: 0.85em; color: #767676; margin: 0 0 0.4em; }
   .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
   .formats code { background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 0.2em; }
@@ -162,7 +164,8 @@
 </div>
 
 {# Discussion (Epic H). The list, the count and the "No notes yet." line are all always present (one of the last two hidden) so concon-notes.js (issue #9) can update them in place; each note is templates/entity_note.html, which the server also returns alone as the in-place fragment. #}
-<h2 id="discussion">Discussion (<span class="annotation-count">{{ annotation_count }}</span>)</h2>
+<h2 id="discussion" tabindex="-1">Discussion (<span class="annotation-count">{{ annotation_count }}</span>)</h2>
+<p class="annotate-status" role="status" aria-live="polite"></p>
 <ul class="annotations"{% if not annotations %} hidden=""{% endif %}>
   {% for a in annotations %}
   {% include "entity_note.html" %}
