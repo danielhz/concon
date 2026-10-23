@@ -1,0 +1,29 @@
+{# One discussion note, as the resource view renders it. Included by entity.html in its discussion loop, and rendered alone by the server as the fragment that static/concon-notes.js inserts after an add or edit (issue #9) — one template, so the page and the fragment cannot drift. Context: `a` (the note row) and `self_href` (the view URL the forms post to). #}
+<li class="annotation" id="{{ a.anchor }}">
+  <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}{% if a.modified %} · <span class="annotation-edited" title="Last edited {{ a.modified }}">edited {{ a.modified }}</span>{% endif %}<a class="annotation-link" href="#{{ a.anchor }}" title="Link to this note (paste as [text](#{{ a.anchor }}) to cite it)">#</a></div>
+  {# body_html is Markdown rendered server-side by src/markdown.rs (allow-listed tags only); the raw source never reaches the page unescaped. #}
+  <div class="annotation-body">{{ a.body_html | safe }}</div>
+  {# Issue #2: the author's own notes carry inline edit/delete forms (plain POSTs; a <details> per action so a delete takes two clicks). Hiding them for non-authors is UI only — the POST handler re-checks authorship against the stored dcterms:creator. `data-note-form` marks a form for concon-notes.js (issue #9). #}
+  {% if a.editable %}
+  <div class="annotation-actions">
+    <details class="annotation-action">
+      <summary>Edit</summary>
+      <form class="annotate-form" method="post" action="{{ self_href }}" data-note-form="edit">
+        <input type="hidden" name="action" value="edit">
+        <input type="hidden" name="annotation" value="{{ a.id }}">
+        <textarea name="note" rows="4" required="" maxlength="32768">{{ a.body }}</textarea>
+        <div><button type="submit" class="btn">Save changes</button></div>
+      </form>
+    </details>
+    <details class="annotation-action">
+      <summary>Delete</summary>
+      <form method="post" action="{{ self_href }}" data-note-form="delete">
+        <input type="hidden" name="action" value="delete">
+        <input type="hidden" name="annotation" value="{{ a.id }}">
+        <p class="annotate-hint">This removes the note permanently.</p>
+        <div><button type="submit" class="btn-small-danger">Delete this note</button></div>
+      </form>
+    </details>
+  </div>
+  {% endif %}
+</li>

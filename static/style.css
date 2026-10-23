@@ -59,13 +59,39 @@
 .dataset-list { list-style: none; margin-left: 0; }
 .dataset-list li { padding: 0.5rem 0; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; }
 
-/* Inline forms and danger buttons */
+/* Inline forms and buttons. Foundation resets a bare <button> to plain text
+ * (no background, border or padding), so a form's main action needs a class
+ * to read as a button. `.btn` is the shared primary button (issue #7):
+ * filled in the site blue, white text (4.7:1 on #1779ba, WCAG AA), with a
+ * hover shade and a visible keyboard focus ring. Opt-in only — nothing
+ * changes for forms that do not use it. `.btn-small-danger` is the small
+ * outlined red button for destructive actions. */
 .inline-form { display: inline; }
+.btn {
+    display: inline-block; padding: 0.45em 1em; margin: 0;
+    font: inherit; font-size: 0.9rem; font-weight: 600; line-height: 1.3;
+    color: #fff; background: var(--c-primary);
+    border: 1px solid var(--c-primary); border-radius: 4px; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+}
+.btn:hover, .btn:focus { color: #fff; background: var(--c-primary-hover); border-color: var(--c-primary-hover); }
+.btn:focus-visible, .btn-small-danger:focus-visible {
+    outline: 2px solid var(--c-primary-hover); outline-offset: 3px;
+}
+.btn:disabled { opacity: 0.6; cursor: wait; }
 .btn-small-danger {
     font-size: 0.75rem; padding: 0.1rem 0.4rem; background: transparent; color: #c00;
     border: 1px solid #c00; border-radius: 3px; cursor: pointer; margin-left: 0.5rem;
 }
 .btn-small-danger:hover { background: #c00; color: #fff; }
+.btn-small-danger:disabled { opacity: 0.6; cursor: wait; }
+
+/* Error shown next to a note form when a background submit fails (issue #9,
+ * static/concon-notes.js); same tones as .update-result.error. */
+.annotate-error {
+    margin: 0 0 0.4rem; padding: 0.4rem 0.6rem; border-radius: 4px; font-size: 0.9rem;
+    color: #922; background: #fde8e8;
+}
 
 /* Admin dashboard cards */
 .admin-cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
@@ -173,4 +199,11 @@ a.admin-card:hover { border-color: #1779ba; text-decoration: none; }
   /* Semantic result banners keep their meaning but darken to fit. */
   .update-result.success { color: #7ee2a8; background: #14271a; }
   .update-result.error   { color: #f4a6a6; background: #2c1717; }
+  .annotate-error        { color: #f4a6a6; background: #2c1717; }
+
+  /* Buttons: the filled blue .btn keeps its colours (like the top bar); the
+   * outlined danger button lightens its red so it stays readable (6.3:1). */
+  .btn:focus-visible, .btn-small-danger:focus-visible { outline-color: var(--c-link); }
+  .btn-small-danger { color: #ff6b6b; border-color: #ff6b6b; }
+  .btn-small-danger:hover { color: #fff; background: #c00; border-color: #c00; }
 }

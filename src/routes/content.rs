@@ -47,6 +47,9 @@ impl NoteForm {
 /// (Epic H), or edit/delete one of the session user's notes (issue #2).
 /// `username` is `None` only for the edit/delete carve-out in [`content_post`]
 /// (an add by an anonymous caller was already redirected to login there).
+/// `reply` is the redirect for a plain form POST, or the in-place fragment
+/// when the request carries `X-Concon-Fragment: note` (issue #9) — same
+/// authorization, limits and error statuses either way.
 async fn note_form_post(
     state: &AppState,
     qualified: &str,
@@ -54,6 +57,7 @@ async fn note_form_post(
     subject_iri: &str,
     username: Option<&str>,
     body_str: &str,
+    reply: entity::NoteReply,
 ) -> Response {
     let form = NoteForm::parse(body_str);
     let note = form.note.as_deref().unwrap_or_default();
@@ -70,6 +74,7 @@ async fn note_form_post(
                 subject_iri,
                 username,
                 note,
+                reply,
             )
             .await;
         }
@@ -87,6 +92,7 @@ async fn note_form_post(
         username,
         note_id,
         action,
+        reply,
     )
     .await
 }
@@ -649,13 +655,26 @@ async fn content_post(
 
     let session = web::get_username(&cookies, &state);
 
+    let note_reply = entity::NoteReply::from_headers(&headers);
+
     if needs_login && session.is_none() {
         // Issue #2: an anonymous edit/delete of a discussion note is an
         // unauthorized state change, answered 401 (the add-note form keeps
-        // the login redirect — a visitor can still log in and post).
-        let note_mutation = matches!(&parsed, ParsedPath::DatasetView { view, .. }
-            if matches!(view.as_deref(), Some("_entity") | Some("_view")))
-            && NoteForm::parse(&String::from_utf8_lossy(&body)).is_mutation();
+        // the login redirect — a visitor can still log in and post). Issue
+        // #9: a background note request (any action) gets 401 too — its
+        // session has expired, and following a redirect to the login page
+        // would be useless to the script, which shows the message instead.
+        let note_view = matches!(&parsed, ParsedPath::DatasetView { view, .. }
+            if matches!(view.as_deref(), Some("_entity") | Some("_view")));
+        let note_mutation =
+            note_view && NoteForm::parse(&String::from_utf8_lossy(&body)).is_mutation();
+        if note_view && note_reply == entity::NoteReply::Fragment {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Your session has expired: log in again, then resend the note",
+            )
+                .into_response();
+        }
         if note_mutation {
             return (StatusCode::UNAUTHORIZED, "Log in to edit or delete notes").into_response();
         }
@@ -702,6 +721,7 @@ async fn content_post(
                         &entity::entity_iri(id),
                         username,
                         &body_str,
+                        note_reply,
                     )
                     .await
                 }
@@ -715,7 +735,16 @@ async fn content_post(
                     };
                     let url_prefix = build_dataset_url_prefix(&parsed);
                     let username = session.as_ref().map(|s| s.username.as_str());
-                    note_form_post(&state, &qualified, &url_prefix, iri, username, &body_str).await
+                    note_form_post(
+                        &state,
+                        &qualified,
+                        &url_prefix,
+                        iri,
+                        username,
+                        &body_str,
+                        note_reply,
+                    )
+                    .await
                 }
                 Some("_sparql") | Some("_query") => {
                     match sparql::sparql_query_post(&state, &qualified, &headers, &body_str).await {
@@ -1556,7 +1585,7 @@ mod tests {
             html.contains(">revised **text**</textarea>"),
             "edit form prefilled with the Markdown source"
         );
-        assert!(html.contains("Discussion (1)"), "edit did not add a note");
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">1</span>)"#), "edit did not add a note");
 
         // alice deletes: the note is gone from the view.
         let r = server
@@ -1573,7 +1602,7 @@ mod tests {
             .await
             .text();
         assert!(!html.contains("revised"), "note removed");
-        assert!(html.contains("Discussion (0)"), "{html}");
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">0</span>)"#), "{html}");
         let r = server
             .post(view)
             .add_query_param("iri", iri)
@@ -1629,6 +1658,6 @@ mod tests {
             .await
             .assert_status(StatusCode::SEE_OTHER);
         let html = server.get(entity).add_cookie(bob).await.text();
-        assert!(html.contains("Discussion (0)"));
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">0</span>)"#));
     }
 }
