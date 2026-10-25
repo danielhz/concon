@@ -423,30 +423,40 @@ fn escape_sparql_literal(s: &str) -> String {
     out
 }
 
-/// Build the SPARQL Update that INSERTs one annotation. `subject_iri` must be
-/// pre-validated (a real IRI); `note`/`username` are escaped as string literals
-/// here. A fresh annotation IRI (STRUUID) and the timestamp (NOW) are minted
+/// A fresh note id: the `<uuid>` of `…/annotation/<uuid>` and of the
+/// `#note-<uuid>` anchor. Minted in Rust rather than by SPARQL `STRUUID()`
+/// (issue #9) so the add handler knows the id before the insert and can
+/// redirect onto the new note, or return it as a fragment.
+fn mint_note_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Build the SPARQL Update that INSERTs one annotation with the IRI
+/// `…/annotation/<note_id>`. `subject_iri` must be pre-validated (a real IRI)
+/// and `note_id` server-minted by [`mint_note_id`]; `note`/`username` are
+/// escaped as string literals here and the timestamp (NOW) is taken
 /// server-side, so no client value reaches an IRI position.
-fn build_annotation_insert(subject_iri: &str, note: &str, username: &str) -> String {
+fn build_annotation_insert(subject_iri: &str, note: &str, username: &str, note_id: &str) -> String {
+    debug_assert!(is_uuid(note_id), "note ids are minted by mint_note_id");
     let body = escape_sparql_literal(note);
     let creator = escape_sparql_literal(username);
     format!(
         r#"INSERT {{ GRAPH <{ANNOTATIONS_GRAPH}> {{
-            ?ann <{RDF_TYPE}> <{OA_ANNOTATION}> ;
+            <{ANNOTATION_BASE}{note_id}> <{RDF_TYPE}> <{OA_ANNOTATION}> ;
                  <{OA_HAS_TARGET}> <{subject_iri}> ;
                  <{OA_HAS_BODY}> "{body}" ;
                  <{DCTERMS_CREATOR}> "{creator}" ;
                  <{DCTERMS_CREATED}> ?now .
         }} }} WHERE {{
             BIND(NOW() AS ?now)
-            BIND(IRI(CONCAT("{ANNOTATION_BASE}", STRUUID())) AS ?ann)
         }}"#
     )
 }
 
-/// Whether `s` has the shape of the UUID that SPARQL `STRUUID()` mints
-/// (`8-4-4-4-12` hex digits). Every note the application created has such a
-/// local part; it is the only client-supplied value that may name a note.
+/// Whether `s` has the shape of a UUID (`8-4-4-4-12` hex digits), as minted
+/// by [`mint_note_id`] (and, before issue #9, by SPARQL `STRUUID()`). Every
+/// note the application created has such a local part; it is the only
+/// client-supplied value that may name a note.
 fn is_uuid(s: &str) -> bool {
     let groups: Vec<&str> = s.split('-').collect();
     groups.len() == 5
@@ -553,6 +563,87 @@ pub fn entity_iri(id: &str) -> String {
     format!("{ENTITY_BASE}{id}")
 }
 
+/// Request header that asks a note POST for an in-place fragment instead of
+/// the redirect (issue #9): `X-Concon-Fragment: note`. Sent only by
+/// `static/concon-notes.js`; a plain form POST never carries it, so the
+/// no-script path is unchanged. (As a custom header it also cannot be sent by
+/// a cross-origin HTML form.)
+pub const NOTE_FRAGMENT_HEADER: &str = "x-concon-fragment";
+
+/// How a note POST answers (issue #9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteReply {
+    /// The plain form POST: 303 back to the view (onto the note's anchor
+    /// after an add or edit).
+    Redirect,
+    /// The background request from `concon-notes.js`: 200 with the note
+    /// rendered as the page renders it (`templates/entity_note.html`) after
+    /// an add or edit, 204 after a delete; errors keep their status codes but
+    /// are never redirects, so the script can show them next to the form.
+    Fragment,
+}
+
+impl NoteReply {
+    /// [`NoteReply::Fragment`] when the request carries
+    /// `X-Concon-Fragment: note`, else [`NoteReply::Redirect`].
+    pub fn from_headers(headers: &HeaderMap) -> Self {
+        match headers
+            .get(NOTE_FRAGMENT_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            Some("note") => NoteReply::Fragment,
+            _ => NoteReply::Redirect,
+        }
+    }
+}
+
+/// Render one note as the entity page renders it — the `<li class="annotation">`
+/// of `templates/entity_note.html`, the same template the page includes in
+/// its discussion loop, so the fragment cannot drift from the page. `viewer`
+/// is the session user (the note's author here), so the fragment carries the
+/// edit/delete controls like the page would.
+fn render_note_fragment(
+    state: &AppState,
+    store: &Store,
+    subject_iri: &str,
+    note_id: &str,
+    viewer: &str,
+    url_prefix: &str,
+) -> Response {
+    let Some(row) = annotations_of(store, subject_iri, Some(viewer))
+        .into_iter()
+        .find(|a| a.id == note_id)
+    else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Note not found after saving",
+        )
+            .into_response();
+    };
+    let tmpl = match state.templates.get_template("entity_note.html") {
+        Ok(t) => t,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Template missing").into_response();
+        }
+    };
+    match tmpl.render(minijinja::context! {
+        a => &row,
+        self_href => native_href(subject_iri, url_prefix),
+    }) {
+        Ok(html) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Render error: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 /// What an author does to one of their notes (issue #2).
 #[derive(Clone, Copy)]
 pub enum NoteAction<'a> {
@@ -635,8 +726,13 @@ fn build_annotation_delete(ann_iri: &str, subject_iri: &str, username: &str) -> 
 /// with that id is attached to `subject_iri` (malformed, unknown, or another
 /// resource's note — indistinguishable on purpose), 403 unless the session
 /// user is the stored `dcterms:creator`. Only that note's triples in the
-/// annotations graph are touched. Redirects (PRG) back to the view, onto the
-/// edited note's anchor.
+/// annotations graph are touched. With [`NoteReply::Redirect`] this redirects
+/// (PRG) back to the view, onto the edited note's anchor; with
+/// [`NoteReply::Fragment`] (issue #9) it returns the edited note rendered, or
+/// 204 after a delete.
+// Eight parameters: the seven of issue #2 plus the reply mode. Bundling them
+// into a request struct would only move the same names one level down.
+#[allow(clippy::too_many_arguments)]
 pub async fn mutate_annotation(
     state: &AppState,
     dataset_name: &str,
@@ -645,6 +741,7 @@ pub async fn mutate_annotation(
     username: Option<&str>,
     note_id: &str,
     action: NoteAction<'_>,
+    reply: NoteReply,
 ) -> Response {
     if NamedNode::new(subject_iri).is_err() {
         return (StatusCode::BAD_REQUEST, "Malformed resource IRI").into_response();
@@ -675,7 +772,14 @@ pub async fn mutate_annotation(
             if text.is_empty() {
                 // Nothing to save — keep the note as it is (deleting is a
                 // separate, explicit action).
-                return Redirect::to(&format!("{view_href}#note-{note_id}")).into_response();
+                return match reply {
+                    NoteReply::Redirect => {
+                        Redirect::to(&format!("{view_href}#note-{note_id}")).into_response()
+                    }
+                    NoteReply::Fragment => {
+                        (StatusCode::BAD_REQUEST, "Note is empty").into_response()
+                    }
+                };
             }
             if text.len() > crate::markdown::MAX_NOTE_BYTES {
                 return (
@@ -693,13 +797,16 @@ pub async fn mutate_annotation(
         NoteAction::Delete => build_annotation_delete(&ann_iri, subject_iri, username),
     };
     match sparql_update(&store, &update) {
-        Ok(()) => {
-            let back = match action {
-                NoteAction::Edit { .. } => format!("{view_href}#note-{note_id}"),
-                NoteAction::Delete => view_href,
-            };
-            Redirect::to(&back).into_response()
-        }
+        Ok(()) => match (reply, action) {
+            (NoteReply::Redirect, NoteAction::Edit { .. }) => {
+                Redirect::to(&format!("{view_href}#note-{note_id}")).into_response()
+            }
+            (NoteReply::Redirect, NoteAction::Delete) => Redirect::to(&view_href).into_response(),
+            (NoteReply::Fragment, NoteAction::Edit { .. }) => {
+                render_note_fragment(state, &store, subject_iri, note_id, username, url_prefix)
+            }
+            (NoteReply::Fragment, NoteAction::Delete) => StatusCode::NO_CONTENT.into_response(),
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Update error: {e}"),
@@ -714,7 +821,10 @@ pub async fn mutate_annotation(
 /// in the write-exempt list, so anonymous is redirected to login); `username`
 /// is that user. INSERTs an `oa:Annotation` into the annotations graph with the
 /// text/creator escaped and the timestamp taken server-side via SPARQL `NOW()`.
-/// Redirects (PRG) back to the resource's native view.
+/// The note id is minted here ([`mint_note_id`]), so with
+/// [`NoteReply::Redirect`] the PRG redirect lands on the new note's anchor
+/// (`#note-<uuid>`), and with [`NoteReply::Fragment`] (issue #9) the new note
+/// is returned rendered.
 pub async fn add_annotation_iri(
     state: &AppState,
     dataset_name: &str,
@@ -722,15 +832,19 @@ pub async fn add_annotation_iri(
     subject_iri: &str,
     username: &str,
     note: &str,
+    reply: NoteReply,
 ) -> Response {
     if NamedNode::new(subject_iri).is_err() {
         return (StatusCode::BAD_REQUEST, "Malformed resource IRI").into_response();
     }
     let note = note.trim();
-    let redirect_to = native_href(subject_iri, url_prefix);
+    let view_href = native_href(subject_iri, url_prefix);
     if note.is_empty() {
         // Nothing to add — just bounce back to the view.
-        return Redirect::to(&redirect_to).into_response();
+        return match reply {
+            NoteReply::Redirect => Redirect::to(&view_href).into_response(),
+            NoteReply::Fragment => (StatusCode::BAD_REQUEST, "Note is empty").into_response(),
+        };
     }
     if note.len() > crate::markdown::MAX_NOTE_BYTES {
         return (
@@ -746,9 +860,17 @@ pub async fn add_annotation_iri(
     let Some(store) = state.store_manager.get_dataset(dataset_name) else {
         return (StatusCode::NOT_FOUND, "Dataset not found").into_response();
     };
-    let update = build_annotation_insert(subject_iri, note, username);
+    let note_id = mint_note_id();
+    let update = build_annotation_insert(subject_iri, note, username, &note_id);
     match sparql_update(&store, &update) {
-        Ok(()) => Redirect::to(&redirect_to).into_response(),
+        Ok(()) => match reply {
+            NoteReply::Redirect => {
+                Redirect::to(&format!("{view_href}#note-{note_id}")).into_response()
+            }
+            NoteReply::Fragment => {
+                render_note_fragment(state, &store, subject_iri, &note_id, username, url_prefix)
+            }
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Insert error: {e}")).into_response(),
     }
 }
@@ -1445,7 +1567,7 @@ mlips:usesFramework a owl:ObjectProperty .
         let store = Store::new().unwrap();
         let entity = "https://w3id.org/mlips/entity/kumar2025";
         let note = "great work!\nsays \"me\" — needs \\escaping";
-        let upd = build_annotation_insert(entity, note, "alice");
+        let upd = build_annotation_insert(entity, note, "alice", &mint_note_id());
         sparql_update(&store, &upd).expect("annotation insert");
 
         let rows = annotations_of(&store, entity, None);
@@ -1473,8 +1595,11 @@ mlips:usesFramework a owl:ObjectProperty .
     fn annotation_roundtrip_on_a_term_iri() {
         let store = Store::new().unwrap();
         let term = "https://w3id.org/mlips#Hyperparameter";
-        sparql_update(&store, &build_annotation_insert(term, "a note on a class", "bob"))
-            .expect("insert on term");
+        sparql_update(
+            &store,
+            &build_annotation_insert(term, "a note on a class", "bob", &mint_note_id()),
+        )
+        .expect("insert on term");
         let rows = annotations_of(&store, term, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].body, "a note on a class");
@@ -1488,7 +1613,11 @@ mlips:usesFramework a owl:ObjectProperty .
         let store = Store::new().unwrap();
         let term = "https://w3id.org/mlips#Method";
         let note = "see [the paper](https://example.org/p) and `run()` <script>alert(1)</script>";
-        sparql_update(&store, &build_annotation_insert(term, note, "bob")).expect("insert");
+        sparql_update(
+            &store,
+            &build_annotation_insert(term, note, "bob", &mint_note_id()),
+        )
+        .expect("insert");
         let rows = annotations_of(&store, term, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].body, note, "raw Markdown source is stored untouched");
@@ -1508,7 +1637,16 @@ mlips:usesFramework a owl:ObjectProperty .
         state.store_manager.create_dataset("t/d").unwrap();
         let subject = "https://w3id.org/mlips#Method";
         let too_long = "x".repeat(MAX_NOTE_BYTES + 1);
-        let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &too_long).await;
+        let resp = add_annotation_iri(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            "alice",
+            &too_long,
+            NoteReply::Redirect,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let store = state.store_manager.get_dataset("t/d").unwrap();
         assert!(
@@ -1517,7 +1655,16 @@ mlips:usesFramework a owl:ObjectProperty .
         );
 
         let at_cap = "y".repeat(MAX_NOTE_BYTES);
-        let resp = add_annotation_iri(&state, "t/d", "/t/_ds/d", subject, "alice", &at_cap).await;
+        let resp = add_annotation_iri(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            "alice",
+            &at_cap,
+            NoteReply::Redirect,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(annotations_of(&store, subject, None).len(), 1);
     }
@@ -1913,7 +2060,11 @@ mlips:usesFramework a owl:ObjectProperty .
         let state = AppState::new().unwrap();
         state.store_manager.create_dataset("t/d").unwrap();
         let store = state.store_manager.get_dataset("t/d").unwrap();
-        sparql_update(&store, &build_annotation_insert(subject, text, author)).expect("insert");
+        sparql_update(
+            &store,
+            &build_annotation_insert(subject, text, author, &mint_note_id()),
+        )
+        .expect("insert");
         let rows = annotations_of(&store, subject, None);
         assert_eq!(rows.len(), 1);
         let id = rows[0].id.clone();
@@ -1976,6 +2127,7 @@ mlips:usesFramework a owl:ObjectProperty .
             NoteAction::Edit {
                 text: "  final \"text\" with `code`\n",
             },
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -2018,6 +2170,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Edit { text: "third" },
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -2046,8 +2199,17 @@ mlips:usesFramework a owl:ObjectProperty .
             ),
             (None, NoteAction::Delete, StatusCode::UNAUTHORIZED),
         ] {
-            let resp =
-                mutate_annotation(&state, "t/d", "/t/_ds/d", subject, user, &id, action).await;
+            let resp = mutate_annotation(
+                &state,
+                "t/d",
+                "/t/_ds/d",
+                subject,
+                user,
+                &id,
+                action,
+                NoteReply::Redirect,
+            )
+            .await;
             assert_eq!(resp.status(), expected, "{user:?}");
             let rows = annotations_of(&store, subject, None);
             assert_eq!(rows.len(), 1);
@@ -2081,6 +2243,7 @@ mlips:usesFramework a owl:ObjectProperty .
                 Some("alice"),
                 bad,
                 NoteAction::Delete,
+                NoteReply::Redirect,
             )
             .await;
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{bad:?}");
@@ -2094,6 +2257,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Edit { text: "moved?" },
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -2105,6 +2269,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Delete,
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -2118,6 +2283,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Delete,
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -2141,6 +2307,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("anonymous"),
             "0b1c2d3e-4f50-4617-8899-aabbccddeeff",
             NoteAction::Delete,
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -2155,12 +2322,12 @@ mlips:usesFramework a owl:ObjectProperty .
         let store = state.store_manager.get_dataset("t/d").unwrap();
         sparql_update(
             &store,
-            &build_annotation_insert(subject, "alice keeps", "alice"),
+            &build_annotation_insert(subject, "alice keeps", "alice", &mint_note_id()),
         )
         .unwrap();
         sparql_update(
             &store,
-            &build_annotation_insert(subject, "bob keeps", "bob"),
+            &build_annotation_insert(subject, "bob keeps", "bob", &mint_note_id()),
         )
         .unwrap();
         let total_before = store.len().unwrap();
@@ -2174,6 +2341,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Delete,
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -2208,6 +2376,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Delete,
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -2231,6 +2400,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Edit { text: &too_long },
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -2246,6 +2416,7 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Edit { text: "   \n\t " },
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -2262,11 +2433,159 @@ mlips:usesFramework a owl:ObjectProperty .
             Some("alice"),
             &id,
             NoteAction::Edit { text: &at_cap },
+            NoteReply::Redirect,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         let row = annotations_of(&store, subject, None).remove(0);
         assert_eq!(row.body.len(), MAX_NOTE_BYTES);
         assert!(row.modified.is_some());
+    }
+
+    // ---- Issue #9: ids minted in Rust; redirect onto the anchor; fragments ----
+
+    /// The note id is minted before the INSERT, is UUID-shaped (so it passes
+    /// `is_uuid` on the way back in), and names the stored note's IRI and
+    /// anchor.
+    #[test]
+    fn note_id_is_minted_before_insert() {
+        let store = Store::new().unwrap();
+        let subject = "https://w3id.org/mlips/entity/kumar2025";
+        let id = mint_note_id();
+        assert!(is_uuid(&id), "{id}");
+        assert_ne!(id, mint_note_id(), "fresh per note");
+        sparql_update(
+            &store,
+            &build_annotation_insert(subject, "hi", "alice", &id),
+        )
+        .unwrap();
+        assert_eq!(note_quad_count(&store, &id), 5, "the note's five triples");
+        let rows = annotations_of(&store, subject, Some("alice"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].anchor, format!("note-{id}"));
+        assert!(rows[0].editable);
+    }
+
+    /// `X-Concon-Fragment: note` selects the fragment reply; anything else
+    /// (absent, another value) is the plain redirect.
+    #[test]
+    fn note_reply_is_chosen_by_the_fragment_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(NoteReply::from_headers(&headers), NoteReply::Redirect);
+        headers.insert(NOTE_FRAGMENT_HEADER, "page".parse().unwrap());
+        assert_eq!(NoteReply::from_headers(&headers), NoteReply::Redirect);
+        headers.insert(NOTE_FRAGMENT_HEADER, "note".parse().unwrap());
+        assert_eq!(NoteReply::from_headers(&headers), NoteReply::Fragment);
+    }
+
+    /// The plain add redirects onto the new note's anchor, which is the id
+    /// of the note that was stored.
+    #[tokio::test]
+    async fn add_redirects_onto_the_new_note() {
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("t/d").unwrap();
+        let subject = "https://w3id.org/mlips/entity/kumar2025";
+        let resp = add_annotation_iri(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            "alice",
+            "a note",
+            NoteReply::Redirect,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let (back, id) = location.split_once("#note-").expect("anchor");
+        assert_eq!(back, "/t/_ds/d/_entity/kumar2025");
+        assert!(is_uuid(id), "{id}");
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        let rows = annotations_of(&store, subject, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+    }
+
+    /// The fragment reply of an add/edit is the note's `<li>` rendered by
+    /// `entity_note.html`, and of a delete an empty 204.
+    #[tokio::test]
+    async fn fragment_reply_is_the_rendered_note() {
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("t/d").unwrap();
+        let subject = "https://w3id.org/mlips/entity/kumar2025";
+        let resp = add_annotation_iri(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            "alice",
+            "a *note*",
+            NoteReply::Fragment,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        // minijinja escapes `/` as `&#x2f;` in attribute values.
+        let li = String::from_utf8(body.to_vec())
+            .unwrap()
+            .replace("&#x2f;", "/");
+        assert!(
+            li.trim_start()
+                .starts_with(r#"<li class="annotation" id="note-"#),
+            "{li}"
+        );
+        assert!(li.contains("a <em>note</em>"), "{li}");
+        assert!(
+            li.contains(r#"action="/t/_ds/d/_entity/kumar2025""#),
+            "{li}"
+        );
+        let store = state.store_manager.get_dataset("t/d").unwrap();
+        let id = annotations_of(&store, subject, None)[0].id.clone();
+        assert!(li.contains(&format!(r#"id="note-{id}""#)));
+
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Edit { text: "edited" },
+            NoteReply::Fragment,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let li = String::from_utf8(body.to_vec()).unwrap();
+        assert!(li.contains(&format!(r#"id="note-{id}""#)) && li.contains("edited"));
+        assert!(li.contains(r#"class="annotation-edited""#), "{li}");
+
+        let resp = mutate_annotation(
+            &state,
+            "t/d",
+            "/t/_ds/d",
+            subject,
+            Some("alice"),
+            &id,
+            NoteAction::Delete,
+            NoteReply::Fragment,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(note_quad_count(&store, &id), 0);
     }
 }

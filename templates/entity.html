@@ -51,7 +51,11 @@
   .annotation-actions summary { cursor: pointer; color: #767676; }
   .annotation-actions summary:hover { color: #333; }
   .annotation-actions form { margin: 0.4em 0 0; }
+  .annotation-actions .btn-small-danger { margin-left: 0; }
   .annotate-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 0.4em; }
+  ul.annotations[hidden], .annotations-empty[hidden] { display: none; }
+  .annotate-status { font-size: 0.85em; color: #767676; margin: 0 0 0.4em; }
+  .annotate-status:empty { display: none; }
   .annotate-hint { font-size: 0.85em; color: #767676; margin: 0 0 0.4em; }
   .formats { font-size: 0.9em; margin-top: 1.5em; color: #555; }
   .formats code { background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 0.2em; }
@@ -159,46 +163,20 @@
   <aside id="cy-attrs" class="cy-attrs"></aside>
 </div>
 
-<h2>Discussion ({{ annotation_count }})</h2>
-{% if annotations %}
-<ul class="annotations">
+{# Discussion (Epic H). The list, the count and the "No notes yet." line are all always present (one of the last two hidden) so concon-notes.js (issue #9) can update them in place; each note is templates/entity_note.html, which the server also returns alone as the in-place fragment. #}
+<h2 id="discussion" tabindex="-1">Discussion (<span class="annotation-count">{{ annotation_count }}</span>)</h2>
+<p class="annotate-status" role="status" aria-live="polite"></p>
+<ul class="annotations"{% if not annotations %} hidden=""{% endif %}>
   {% for a in annotations %}
-  <li class="annotation" id="{{ a.anchor }}">
-    <div class="annotation-meta"><span class="annotation-author">{{ a.creator }}</span>{% if a.created %} · <span class="annotation-time">{{ a.created }}</span>{% endif %}{% if a.modified %} · <span class="annotation-edited" title="Last edited {{ a.modified }}">edited {{ a.modified }}</span>{% endif %}<a class="annotation-link" href="#{{ a.anchor }}" title="Link to this note (paste as [text](#{{ a.anchor }}) to cite it)">#</a></div>
-    {# body_html is Markdown rendered server-side by src/markdown.rs (allow-listed tags only); the raw source never reaches the page unescaped. #}
-    <div class="annotation-body">{{ a.body_html | safe }}</div>
-    {# Issue #2: the author's own notes carry inline edit/delete forms (no script; a <details> per action so a delete takes two clicks). Hiding them for non-authors is UI only — the POST handler re-checks authorship against the stored dcterms:creator. #}
-    {% if a.editable %}
-    <div class="annotation-actions">
-      <details class="annotation-action">
-        <summary>Edit</summary>
-        <form class="annotate-form" method="post" action="{{ self_href }}">
-          <input type="hidden" name="action" value="edit">
-          <input type="hidden" name="annotation" value="{{ a.id }}">
-          <textarea name="note" rows="4" required="" maxlength="32768">{{ a.body }}</textarea>
-          <div><button type="submit">Save changes</button></div>
-        </form>
-      </details>
-      <details class="annotation-action">
-        <summary>Delete</summary>
-        <form method="post" action="{{ self_href }}">
-          <input type="hidden" name="action" value="delete">
-          <input type="hidden" name="annotation" value="{{ a.id }}">
-          <p class="annotate-hint">This removes the note permanently.</p>
-          <div><button type="submit">Delete this note</button></div>
-        </form>
-      </details>
-    </div>
-    {% endif %}
-  </li>
+  {% include "entity_note.html" %}
   {% endfor %}
 </ul>
-{% else %}<p class="empty">No notes yet.</p>{% endif %}
+<p class="empty annotations-empty"{% if annotations %} hidden=""{% endif %}>No notes yet.</p>
 {% if can_annotate %}
-<form class="annotate-form" method="post" action="{{ self_href }}">
+<form class="annotate-form" method="post" action="{{ self_href }}" data-note-form="add">
   <textarea name="note" rows="4" placeholder="Add a note… (Markdown)" required="" maxlength="32768"></textarea>
   <p class="annotate-hint">Markdown: <code>**bold**</code>, <code>*italics*</code>, <code>`code`</code>, fenced code blocks, <code>[text](url)</code>, <code>&gt; quote</code>, <code>- list</code> (no headings, tables, images or HTML); cite a note above with its <code>#</code> link.</p>
-  <div><button type="submit">Add note</button></div>
+  <div><button type="submit" class="btn">Add note</button></div>
 </form>
 {% elif not username %}
 <p class="empty"><a href="/_login">Log in</a> to add a note.</p>
@@ -217,4 +195,6 @@
 <script src="/static/concon-graph.js" defer="defer"
         data-base="{{ dataset_base }}" data-sparql="{{ dataset_base }}/_sparql"
         data-graph-iri="{{ subject_iri }}"></script>
+{# Issue #9: in-place add/edit/delete of discussion notes; the forms work without it. #}
+<script src="/static/concon-notes.js" defer="defer"></script>
 {% endblock %}

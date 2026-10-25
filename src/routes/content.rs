@@ -45,8 +45,12 @@ impl NoteForm {
 
 /// Dispatch a note form POSTed to a resource view (`subject_iri`): add a note
 /// (Epic H), or edit/delete one of the session user's notes (issue #2).
-/// `username` is `None` only for the edit/delete carve-out in [`content_post`]
-/// (an add by an anonymous caller was already redirected to login there).
+/// `username` is the session user: both POST routes require a login before
+/// dispatch (an anonymous caller is redirected or answered 401 in
+/// [`content_post`]), so it is always `Some` here — the `None` arms are
+/// defensive. `reply` is the redirect for a plain form POST, or the in-place fragment
+/// when the request carries `X-Concon-Fragment: note` (issue #9) — same
+/// authorization, limits and error statuses either way.
 async fn note_form_post(
     state: &AppState,
     qualified: &str,
@@ -54,6 +58,7 @@ async fn note_form_post(
     subject_iri: &str,
     username: Option<&str>,
     body_str: &str,
+    reply: entity::NoteReply,
 ) -> Response {
     let form = NoteForm::parse(body_str);
     let note = form.note.as_deref().unwrap_or_default();
@@ -70,6 +75,7 @@ async fn note_form_post(
                 subject_iri,
                 username,
                 note,
+                reply,
             )
             .await;
         }
@@ -87,6 +93,7 @@ async fn note_form_post(
         username,
         note_id,
         action,
+        reply,
     )
     .await
 }
@@ -649,13 +656,26 @@ async fn content_post(
 
     let session = web::get_username(&cookies, &state);
 
+    let note_reply = entity::NoteReply::from_headers(&headers);
+
     if needs_login && session.is_none() {
         // Issue #2: an anonymous edit/delete of a discussion note is an
         // unauthorized state change, answered 401 (the add-note form keeps
-        // the login redirect — a visitor can still log in and post).
-        let note_mutation = matches!(&parsed, ParsedPath::DatasetView { view, .. }
-            if matches!(view.as_deref(), Some("_entity") | Some("_view")))
-            && NoteForm::parse(&String::from_utf8_lossy(&body)).is_mutation();
+        // the login redirect — a visitor can still log in and post). Issue
+        // #9: a background note request (any action) gets 401 too — its
+        // session has expired, and following a redirect to the login page
+        // would be useless to the script, which shows the message instead.
+        let note_view = matches!(&parsed, ParsedPath::DatasetView { view, .. }
+            if matches!(view.as_deref(), Some("_entity") | Some("_view")));
+        let note_mutation =
+            note_view && NoteForm::parse(&String::from_utf8_lossy(&body)).is_mutation();
+        if note_view && note_reply == entity::NoteReply::Fragment {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Your session has expired: log in again, then resend the note",
+            )
+                .into_response();
+        }
         if note_mutation {
             return (StatusCode::UNAUTHORIZED, "Log in to edit or delete notes").into_response();
         }
@@ -702,6 +722,7 @@ async fn content_post(
                         &entity::entity_iri(id),
                         username,
                         &body_str,
+                        note_reply,
                     )
                     .await
                 }
@@ -715,7 +736,16 @@ async fn content_post(
                     };
                     let url_prefix = build_dataset_url_prefix(&parsed);
                     let username = session.as_ref().map(|s| s.username.as_str());
-                    note_form_post(&state, &qualified, &url_prefix, iri, username, &body_str).await
+                    note_form_post(
+                        &state,
+                        &qualified,
+                        &url_prefix,
+                        iri,
+                        username,
+                        &body_str,
+                        note_reply,
+                    )
+                    .await
                 }
                 Some("_sparql") | Some("_query") => {
                     match sparql::sparql_query_post(&state, &qualified, &headers, &body_str).await {
@@ -1556,7 +1586,10 @@ mod tests {
             html.contains(">revised **text**</textarea>"),
             "edit form prefilled with the Markdown source"
         );
-        assert!(html.contains("Discussion (1)"), "edit did not add a note");
+        assert!(
+            html.contains(r#"Discussion (<span class="annotation-count">1</span>)"#),
+            "edit did not add a note"
+        );
 
         // alice deletes: the note is gone from the view.
         let r = server
@@ -1573,7 +1606,10 @@ mod tests {
             .await
             .text();
         assert!(!html.contains("revised"), "note removed");
-        assert!(html.contains("Discussion (0)"), "{html}");
+        assert!(
+            html.contains(r#"Discussion (<span class="annotation-count">0</span>)"#),
+            "{html}"
+        );
         let r = server
             .post(view)
             .add_query_param("iri", iri)
@@ -1629,6 +1665,350 @@ mod tests {
             .await
             .assert_status(StatusCode::SEE_OTHER);
         let html = server.get(entity).add_cookie(bob).await.text();
-        assert!(html.contains("Discussion (0)"));
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">0</span>)"#));
+    }
+
+    /// Issue #9, over HTTP. The plain add form redirects onto the new note's
+    /// anchor (`#note-<uuid>`, the id minted server-side). A note POST that
+    /// carries `X-Concon-Fragment: note` is answered in place instead: the
+    /// rendered note (`<li class="annotation">`, with the author's controls)
+    /// after an add or edit, 204 after a delete, and the same error statuses
+    /// as the form — never a redirect, so an expired session is 401.
+    #[tokio::test]
+    async fn test_notes_in_place_over_http() {
+        use crate::markdown::MAX_NOTE_BYTES;
+        use crate::routes::create_router;
+        use crate::routes::entity::NOTE_FRAGMENT_HEADER;
+        use crate::state::AppState;
+        use crate::store::sparql_update;
+        use axum::http::header;
+        use axum_test::TestServer;
+        use tower_cookies::Cookie;
+
+        let state = AppState::new().unwrap();
+        state.store_manager.create_dataset("root/pub").unwrap();
+        state
+            .store_manager
+            .insert_dataset_metadata("root/pub")
+            .unwrap();
+        let store = state.store_manager.get_dataset("root/pub").unwrap();
+        sparql_update(
+            &store,
+            r#"INSERT DATA {
+                <https://w3id.org/mlips#Method> a <http://www.w3.org/2002/07/owl#Class> .
+                <https://w3id.org/mlips/entity/kumar2025> a <https://w3id.org/mlips#Method> .
+            }"#,
+        )
+        .unwrap();
+        let cookie = |user: &str| {
+            let id = state.session_store.create_session(
+                user.to_string(),
+                format!("<https://mlipe.2mia.org/users/{user}>"),
+            );
+            Cookie::new("mlipe_session", id)
+        };
+        let alice = cookie("alice");
+        let bob = cookie("bob");
+        let server = TestServer::new(create_router(state.clone()));
+        let view = "/_ds/pub/_view";
+        let iri = "https://w3id.org/mlips#Method";
+        let uuid_like = |s: &str| s.len() == 36 && s.split('-').count() == 5;
+        // The note id of a rendered note (page or fragment): the first hidden
+        // `annotation` field after `from`.
+        let id_after = |html: &str, from: usize| -> String {
+            let marker = r#"name="annotation" value=""#;
+            let start = html[from..].find(marker).expect("hidden note id") + from + marker.len();
+            html[start..].split('"').next().unwrap().to_string()
+        };
+
+        // No script: the add form redirects onto the new note's anchor, and
+        // the page carries that anchor.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .form(&[("note", "first note")])
+            .await;
+        r.assert_status(StatusCode::SEE_OTHER);
+        let location = r.headers()[header::LOCATION].to_str().unwrap().to_string();
+        let (back, id1) = location.split_once("#note-").expect("anchor in {location}");
+        assert_eq!(
+            back,
+            "/_ds/pub/_view?iri=https%3A%2F%2Fw3id.org%2Fmlips%23Method"
+        );
+        assert!(uuid_like(id1), "{id1}");
+        let html = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .await
+            .text();
+        assert!(
+            html.contains(&format!(r#"<li class="annotation" id="note-{id1}""#)),
+            "{html}"
+        );
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">1</span>)"#));
+        assert!(
+            html.contains(r#"data-note-form="add""#) && html.contains("/static/concon-notes.js")
+        );
+        assert!(
+            html.contains(r#"<p class="annotate-status" role="status""#),
+            "{html}"
+        );
+
+        // Background add: the rendered note comes back as a fragment — one
+        // `<li>`, Markdown rendered, with the author's edit/delete forms and
+        // no page chrome.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_header(NOTE_FRAGMENT_HEADER, "note")
+            .add_cookie(alice.clone())
+            .form(&[("note", "second **note**")])
+            .await;
+        r.assert_status(StatusCode::OK);
+        assert!(
+            r.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html"),
+            "fragment is HTML"
+        );
+        let li = r.text();
+        assert!(
+            li.trim_start()
+                .starts_with(r#"<li class="annotation" id="note-"#),
+            "{li}"
+        );
+        assert!(li.trim_end().ends_with("</li>"), "{li}");
+        assert!(
+            !li.contains("<html") && !li.contains("<h2"),
+            "a fragment, not a page"
+        );
+        assert!(li.contains("second <strong>note</strong>"), "{li}");
+        assert!(
+            li.contains(r#"data-note-form="edit""#) && li.contains(r#"data-note-form="delete""#)
+        );
+        assert!(!li.contains(r#"class="annotation-edited""#));
+        let id2 = id_after(&li, 0);
+        assert!(uuid_like(&id2) && id2 != id1, "{id2}");
+        assert!(li.contains(&format!(r#"id="note-{id2}""#)));
+        // The page lists both, so the fragment and the page agree.
+        let html = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(bob.clone())
+            .await
+            .text();
+        assert!(
+            html.contains(&format!(r#"id="note-{id2}""#))
+                && html.contains("second <strong>note</strong>")
+        );
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">2</span>)"#));
+        assert!(
+            !html.contains(r#"data-note-form="edit""#),
+            "bob sees no controls"
+        );
+
+        // Background edit: the edited note comes back, same anchor, with the
+        // "edited" marker.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_header(NOTE_FRAGMENT_HEADER, "note")
+            .add_cookie(alice.clone())
+            .form(&[
+                ("action", "edit"),
+                ("annotation", &id2),
+                ("note", "second, revised"),
+            ])
+            .await;
+        r.assert_status(StatusCode::OK);
+        let li = r.text();
+        assert!(
+            li.trim_start()
+                .starts_with(&format!(r#"<li class="annotation" id="note-{id2}""#)),
+            "{li}"
+        );
+        assert!(
+            li.contains("second, revised") && !li.contains("<strong>"),
+            "{li}"
+        );
+        assert!(li.contains(r#"<span class="annotation-edited""#), "{li}");
+        assert!(
+            li.contains(">second, revised</textarea>"),
+            "edit form prefilled"
+        );
+
+        // The error matrix on the background path: the form's statuses, and
+        // 401 (not a login redirect) without a session; 400 for nothing to
+        // save (the form would just redirect back).
+        let anon_add = {
+            server
+                .post(view)
+                .add_query_param("iri", iri)
+                .add_header(NOTE_FRAGMENT_HEADER, "note")
+                .form(&[("note", "anon")])
+                .await
+        };
+        anon_add.assert_status(StatusCode::UNAUTHORIZED);
+        assert!(
+            anon_add.text().contains("log in again"),
+            "{}",
+            anon_add.text()
+        );
+        let too_long = "x".repeat(MAX_NOTE_BYTES + 1);
+        // (session cookie, form fields, expected status)
+        type Case<'a> = (Option<Cookie<'a>>, Vec<(&'a str, &'a str)>, StatusCode);
+        let cases: Vec<Case> = vec![
+            (
+                None,
+                vec![("action", "edit"), ("annotation", &id2), ("note", "x")],
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                None,
+                vec![("action", "delete"), ("annotation", &id2)],
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some(bob.clone()),
+                vec![("action", "edit"), ("annotation", &id2), ("note", "x")],
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some(bob.clone()),
+                vec![("action", "delete"), ("annotation", &id2)],
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some(alice.clone()),
+                vec![
+                    ("action", "edit"),
+                    ("annotation", "0b1c2d3e-4f50-4617-8899-aabbccddeeff"),
+                    ("note", "x"),
+                ],
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Some(alice.clone()),
+                vec![("action", "archive"), ("annotation", &id2)],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Some(alice.clone()),
+                vec![("note", &too_long)],
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                Some(alice.clone()),
+                vec![
+                    ("action", "edit"),
+                    ("annotation", &id2),
+                    ("note", &too_long),
+                ],
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                Some(alice.clone()),
+                vec![("note", "  \n ")],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Some(alice.clone()),
+                vec![("action", "edit"), ("annotation", &id2), ("note", " ")],
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+        for (cookie, form, status) in cases {
+            let mut req = server
+                .post(view)
+                .add_query_param("iri", iri)
+                .add_header(NOTE_FRAGMENT_HEADER, "note");
+            if let Some(c) = cookie {
+                req = req.add_cookie(c);
+            }
+            let r = req.form(&form).await;
+            assert_eq!(r.status_code(), status, "{form:?}: {}", r.text());
+            assert!(
+                !r.headers().contains_key(header::LOCATION),
+                "{form:?}: no redirect"
+            );
+        }
+        // Nothing above changed the note.
+        let html = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .await
+            .text();
+        assert!(
+            html.contains("second, revised") && !html.contains(">x<"),
+            "{html}"
+        );
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">2</span>)"#));
+
+        // Background delete: 204, and the note is gone; a second delete is 404.
+        let r = server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_header(NOTE_FRAGMENT_HEADER, "note")
+            .add_cookie(alice.clone())
+            .form(&[("action", "delete"), ("annotation", &id2)])
+            .await;
+        r.assert_status(StatusCode::NO_CONTENT);
+        assert!(r.text().is_empty());
+        let html = server
+            .get(view)
+            .add_query_param("iri", iri)
+            .add_cookie(alice.clone())
+            .await
+            .text();
+        assert!(!html.contains(&format!("note-{id2}")) && !html.contains("second, revised"));
+        assert!(html.contains(&format!(r#"id="note-{id1}""#)));
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">1</span>)"#));
+        server
+            .post(view)
+            .add_query_param("iri", iri)
+            .add_header(NOTE_FRAGMENT_HEADER, "note")
+            .add_cookie(alice.clone())
+            .form(&[("action", "delete"), ("annotation", &id2)])
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        // The same on an `_entity/{id}` view: fragment add, and the no-script
+        // redirect onto the anchor.
+        let entity = "/_ds/pub/_entity/kumar2025";
+        let r = server
+            .post(entity)
+            .add_header(NOTE_FRAGMENT_HEADER, "note")
+            .add_cookie(alice.clone())
+            .form(&[("note", "entity note")])
+            .await;
+        r.assert_status(StatusCode::OK);
+        let li = r.text().replace("&#x2f;", "/"); // minijinja's attribute escaping
+        assert!(
+            li.trim_start()
+                .starts_with(r#"<li class="annotation" id="note-"#)
+                && li.contains("entity note"),
+            "{li}"
+        );
+        assert!(
+            li.contains(r#"action="/_ds/pub/_entity/kumar2025""#),
+            "forms post to the entity view: {li}"
+        );
+        let r = server
+            .post(entity)
+            .add_cookie(alice.clone())
+            .form(&[("note", "another")])
+            .await;
+        r.assert_status(StatusCode::SEE_OTHER);
+        let location = r.headers()[header::LOCATION].to_str().unwrap().to_string();
+        let (back, id3) = location.split_once("#note-").expect("anchor in {location}");
+        assert_eq!(back, "/_ds/pub/_entity/kumar2025");
+        assert!(uuid_like(id3), "{id3}");
+        let html = server.get(entity).add_cookie(alice).await.text();
+        assert!(html.contains(&format!(r#"id="note-{id3}""#)));
+        assert!(html.contains(r#"Discussion (<span class="annotation-count">2</span>)"#));
     }
 }
