@@ -134,12 +134,15 @@ This yields the team =mlips= and a =PublicVisibility= dataset served at =<HOST>/
 BASE=https://<HOST>/mlips/_ds/mlips
 CURL="curl -fsS -H \"Authorization: Bearer $CONCON_INGEST_TOKEN\""   # secret from env
 
-$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @schema.ttl   "$BASE/_graph?graph=https://w3id.org/mlips/graph/schema"
-$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @vocab.ttl    "$BASE/_graph?graph=https://w3id.org/mlips/graph/vocab"
-$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @kg.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/kg"
-$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @cq.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/cq"
+# Several graphs in a row: defer the derived-graph rebuild on each write
+# (`?recompute=false`), then rebuild once at the end with `POST _recompute`.
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @schema.ttl   "$BASE/_graph?graph=https://w3id.org/mlips/graph/schema&recompute=false"
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @vocab.ttl    "$BASE/_graph?graph=https://w3id.org/mlips/graph/vocab&recompute=false"
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @kg.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/kg&recompute=false"
+$CURL -X PUT -H 'Content-Type: text/turtle' --data-binary @cq.ttl       "$BASE/_graph?graph=https://w3id.org/mlips/graph/cq&recompute=false"
+$CURL -X POST "$BASE/_recompute"    # the one rebuild; returns a JSON summary incl. duration_ms
 # NOTE: do NOT PUT `…/graph/computed` — it is concon-derived (Epic M) and read-only;
-# a PUT to it returns 409. concon auto-recomputes it after each source-graph PUT above.
+# a PUT to it returns 409.
 
 # Curated document + its stylesheet (served at the dataset base, augmented later).
 $CURL -X PUT -H 'Content-Type: application/xhtml+xml' --data-binary @mlips.source.xhtml "$BASE/_doc"
@@ -148,7 +151,20 @@ $CURL -X PUT -H 'Content-Type: text/css'              --data-binary @mlips.css  
 
 (Graph names and the schema/vocab split are the blessed ingest contract; @coder finalises the per-graph file boundaries. Writes require auth; anonymous reads require the dataset to be Public.)
 
-The =…/graph/computed= graph (inferred inverses, subclass/domain/range closure, …) is *materialised by concon*, not uploaded (Epic M): each source-graph PUT above triggers an automatic recompute. Consumers must *not* PUT =computed= — it is server-derived and read-only (a PUT returns =409=). For a dataset that was *loaded before Epic M shipped* (so its source graphs are already present and no further PUT is imminent), force the first build once with an authenticated recompute:
+The =…/graph/computed= graph (inferred inverses, subclass/domain/range closure, …) is *materialised by concon*, not uploaded (Epic M): by default each source-graph write (=PUT=, =POST= or =DELETE= on =_graph=, and every =_update=) triggers a full automatic rebuild of =computed= before the response, so a single write always leaves the dataset coherent. Consumers must *not* PUT =computed= — it is server-derived and read-only (a PUT returns =409=).
+
+** Deferring the rebuild when writing several graphs
+
+A rebuild clears =computed= and re-derives it from *all* source graphs to a fixpoint, so its cost grows with the whole dataset, and a client that writes =n= graphs in a row would pay for =n= rebuilds of which only the last is useful. A =_graph= write can therefore opt out of its own rebuild, with either
+
+- the query parameter =recompute=false= (or =recompute=defer=), or
+- the request header =Concon-Recompute: defer=.
+
+(=recompute=true= / =Concon-Recompute: auto= select the default explicitly; any other value is a =400= and nothing is written, so a typo can neither silently rebuild nor silently skip. If both the parameter and the header are given they must agree.) The option is read only after the write's authorization, so it needs exactly the write permission the write itself needs. After the last deferred write the client runs =POST _recompute= once, as in the example above. Between a deferred write and that call =computed= is *stale*: it still reflects the sources as they were before the deferred writes (query =computed= directly, or the union endpoint, and you will see the old derived triples and none of the new ones). The option is per request — nothing is remembered by the server — so a later write without it, or any =_update=, rebuilds as usual.
+
+Every rebuild, automatic or explicit, is logged as =recomputed derived graph= with the dataset, the computed graph IRI, the number of derived triples (=inserted=) and its wall-clock =duration_ms=; the same =duration_ms= is in the JSON reply of =POST _recompute=. A deferred write logs =derived-graph rebuild deferred by the client= instead. Use these to find out where a slow upload spends its time.
+
+For a dataset that was *loaded before Epic M shipped* (so its source graphs are already present and no further write is imminent), force the first build once with the same authenticated recompute:
 
 #+begin_src bash
 $CURL -X POST "$BASE/_recompute"    # one-time per pre-existing dataset; returns a JSON rebuild summary

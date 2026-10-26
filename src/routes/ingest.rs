@@ -7,11 +7,19 @@
 //! - `POST <base>/_graph?graph=<iri>`  — merge into a named graph
 //! - `DELETE <base>/_graph?graph=<iri>` — clear a named graph
 //! - `PUT  <base>/_doc[/<asset>]`      — store the curated document / an asset
+//! - `POST <base>/_recompute`          — rebuild the derived `computed` graph
 //!
 //! Replace-by-named-graph is idempotent (re-running the loader fully replaces a
 //! graph's contents). All writes require authorization: a session cookie (web
 //! UI) or HTTP Basic (the non-interactive loader), and the authenticated user
 //! must be able to write the target dataset (`auth::can_write_dataset`).
+//!
+//! Every successful `_graph` write rebuilds the dataset's derived `computed`
+//! graph before replying (Epic M2), so a single write leaves the dataset
+//! coherent. A client writing several graphs in a row can skip the per-write
+//! rebuild with `?recompute=false` or the `Concon-Recompute: defer` header and
+//! call `POST _recompute` once after the last write (issue #15) — see
+//! [`RecomputeMode`].
 
 // These helpers intentionally carry a ready-to-return `Response` in their
 // `Err` variant (a 401/403/400/404 already shaped for the client); the error
@@ -160,27 +168,112 @@ fn reject_if_computed(node: &NamedNode) -> Option<Response> {
     })
 }
 
-/// Rebuild the dataset's derived `computed` graph after a source-graph write
-/// (Epic M2 auto-recompute). Best-effort: the source write already succeeded,
-/// so a rebuild failure is logged and swallowed (the derived graph is left
-/// stale until the next successful recompute) rather than failing the write.
-fn auto_recompute(store: &Store, dataset_name: &str) {
-    match inference::recompute(store) {
-        Ok(report) => {
-            if let Some(graph) = &report.computed_graph {
-                tracing::info!(
-                    dataset = dataset_name,
-                    graph = graph.as_str(),
-                    inserted = report.inserted,
-                    "recomputed derived graph"
-                );
-            }
+/// Whether a `_graph` write rebuilds the derived `computed` graph before it
+/// replies (issue #15).
+///
+/// `Auto` (the default) keeps today's behaviour: every successful write leaves
+/// `computed` coherent. `Defer` skips the rebuild for this one write, so a
+/// client loading several graphs pays for one rebuild — its own `POST
+/// _recompute` after the last write — instead of one per graph. Until that
+/// call, `computed` is stale (it still reflects the sources as they were before
+/// the deferred writes). The mode is a property of the request, never of the
+/// dataset, so nothing is remembered between requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecomputeMode {
+    /// Rebuild `computed` after the write (default).
+    Auto,
+    /// Skip the rebuild; the client will `POST _recompute` later.
+    Defer,
+}
+
+/// The request header that selects the [`RecomputeMode`] (`auto` | `defer`).
+pub const RECOMPUTE_HEADER: &str = "concon-recompute";
+
+/// Resolve the [`RecomputeMode`] of a `_graph` write from its `?recompute=`
+/// query parameter and/or its `Concon-Recompute` header. Both accept the same
+/// values: `false` or `defer` skip the rebuild, `true` or `auto` keep it
+/// (case-insensitive); any other value is a 400 so that a typo cannot silently
+/// change what the write does. Absent both → `Auto`. When both are present
+/// they must agree. Callers run this *after* `authorize_write`: the option is
+/// only honoured on an authorized write, since it only exists on one.
+pub fn recompute_mode(query: Option<&str>, headers: &HeaderMap) -> Result<RecomputeMode, Response> {
+    fn parse(source: &str, value: &str) -> Result<RecomputeMode, Response> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "auto" => Ok(RecomputeMode::Auto),
+            "false" | "defer" => Ok(RecomputeMode::Defer),
+            _ => Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Invalid {source} value; use 'auto' (or 'true') to rebuild the derived \
+                     graph after this write, or 'defer' (or 'false') to skip it"
+                ),
+            )
+                .into_response()),
         }
-        Err(e) => tracing::warn!(
+    }
+    let from_query = query
+        .map(|v| parse("'recompute' query parameter", v))
+        .transpose()?;
+    let from_header = headers
+        .get(RECOMPUTE_HEADER)
+        .map(|v| {
+            v.to_str()
+                .map_err(|_| {
+                    (StatusCode::BAD_REQUEST, "Invalid Concon-Recompute header").into_response()
+                })
+                .and_then(|v| parse("Concon-Recompute header", v))
+        })
+        .transpose()?;
+    match (from_query, from_header) {
+        (Some(q), Some(h)) if q != h => Err((
+            StatusCode::BAD_REQUEST,
+            "The 'recompute' query parameter and the Concon-Recompute header disagree",
+        )
+            .into_response()),
+        (Some(m), _) | (None, Some(m)) => Ok(m),
+        (None, None) => Ok(RecomputeMode::Auto),
+    }
+}
+
+/// Rebuild the dataset's derived `computed` graph and log the outcome with
+/// the rebuild's duration (issue #15). Shared by the per-write auto-recompute
+/// and the explicit `POST _recompute`, so both leave the same log line.
+fn recompute_and_log(
+    store: &Store,
+    dataset_name: &str,
+) -> Result<inference::RecomputeReport, String> {
+    let report = inference::recompute(store)?;
+    if let Some(graph) = &report.computed_graph {
+        tracing::info!(
+            dataset = dataset_name,
+            graph = graph.as_str(),
+            inserted = report.inserted,
+            duration_ms = report.duration_ms,
+            "recomputed derived graph"
+        );
+    }
+    Ok(report)
+}
+
+/// Rebuild the dataset's derived `computed` graph after a source-graph write
+/// (Epic M2 auto-recompute), unless the client deferred it (issue #15).
+/// Best-effort: the source write already succeeded, so a rebuild failure is
+/// logged and swallowed (the derived graph is left stale until the next
+/// successful recompute) rather than failing the write.
+fn auto_recompute(store: &Store, dataset_name: &str, mode: RecomputeMode) {
+    if mode == RecomputeMode::Defer {
+        tracing::info!(
+            dataset = dataset_name,
+            "derived-graph rebuild deferred by the client; `computed` is stale until POST _recompute"
+        );
+        return;
+    }
+    if let Err(e) = recompute_and_log(store, dataset_name) {
+        tracing::warn!(
             dataset = dataset_name,
             error = %e,
             "auto-recompute of derived graph failed; it is left stale"
-        ),
+        );
     }
 }
 
@@ -192,19 +285,21 @@ fn auto_recompute(store: &Store, dataset_name: &str) {
 /// rebuild clears and re-derives). Best-effort, like [`auto_recompute`].
 pub(crate) fn recompute_after_update(state: &AppState, dataset_name: &str) {
     if let Some(store) = state.store_manager.get_dataset(dataset_name) {
-        auto_recompute(&store, dataset_name);
+        auto_recompute(&store, dataset_name, RecomputeMode::Auto);
     }
 }
 
 /// `PUT _graph` — replace a named graph: clear it, then load the body into it.
 /// Idempotent replace-by-graph (not atomic across the clear+load; a re-PUT
-/// recovers from a mid-load failure).
+/// recovers from a mid-load failure). `mode` says whether to rebuild
+/// `computed` afterwards (see [`RecomputeMode`]).
 pub fn put_graph(
     state: &AppState,
     dataset_name: &str,
     graph: Option<&str>,
     headers: &HeaderMap,
     body: &Bytes,
+    mode: RecomputeMode,
 ) -> Response {
     let store = match dataset_store(state, dataset_name) {
         Ok(s) => s,
@@ -222,18 +317,20 @@ pub fn put_graph(
     }
     let resp = load_into_graph(&store, node, body_format(headers), body);
     if resp.status() == StatusCode::NO_CONTENT {
-        auto_recompute(&store, dataset_name);
+        auto_recompute(&store, dataset_name, mode);
     }
     resp
 }
 
-/// `POST _graph` — merge the body into a named graph (no clear).
+/// `POST _graph` — merge the body into a named graph (no clear). `mode` as
+/// for [`put_graph`].
 pub fn post_graph(
     state: &AppState,
     dataset_name: &str,
     graph: Option<&str>,
     headers: &HeaderMap,
     body: &Bytes,
+    mode: RecomputeMode,
 ) -> Response {
     let store = match dataset_store(state, dataset_name) {
         Ok(s) => s,
@@ -248,7 +345,7 @@ pub fn post_graph(
     }
     let resp = load_into_graph(&store, node, body_format(headers), body);
     if resp.status() == StatusCode::NO_CONTENT {
-        auto_recompute(&store, dataset_name);
+        auto_recompute(&store, dataset_name, mode);
     }
     resp
 }
@@ -266,8 +363,13 @@ fn load_into_graph(
     }
 }
 
-/// `DELETE _graph` — clear a named graph.
-pub fn delete_graph(state: &AppState, dataset_name: &str, graph: Option<&str>) -> Response {
+/// `DELETE _graph` — clear a named graph. `mode` as for [`put_graph`].
+pub fn delete_graph(
+    state: &AppState,
+    dataset_name: &str,
+    graph: Option<&str>,
+    mode: RecomputeMode,
+) -> Response {
     let store = match dataset_store(state, dataset_name) {
         Ok(s) => s,
         Err(r) => return r,
@@ -281,7 +383,7 @@ pub fn delete_graph(state: &AppState, dataset_name: &str, graph: Option<&str>) -
     }
     match store.clear_graph(node.as_ref()) {
         Ok(()) => {
-            auto_recompute(&store, dataset_name);
+            auto_recompute(&store, dataset_name, mode);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to clear graph").into_response(),
@@ -289,15 +391,16 @@ pub fn delete_graph(state: &AppState, dataset_name: &str, graph: Option<&str>) -
 }
 
 /// `POST _recompute` — force a full rebuild of the dataset's derived `computed`
-/// graph (Epic M2 explicit trigger), e.g. after a rule change or a missed
-/// auto-recompute. Write-authorized (checked by the caller). Returns a JSON
-/// summary of the rebuild.
+/// graph (Epic M2 explicit trigger), e.g. after a rule change, a missed
+/// auto-recompute, or a run of writes that deferred it (issue #15).
+/// Write-authorized (checked by the caller). Returns a JSON summary of the
+/// rebuild, including its `duration_ms`.
 pub fn recompute_graph(state: &AppState, dataset_name: &str) -> Response {
     let store = match dataset_store(state, dataset_name) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    match inference::recompute(&store) {
+    match recompute_and_log(&store, dataset_name) {
         Ok(report) => (StatusCode::OK, axum::Json(report)).into_response(),
         Err(e) => {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Recompute failed: {e}")).into_response()
@@ -598,5 +701,208 @@ mod tests {
             body["computed_graph"], "https://w3id.org/mlips/graph/computed",
             "summary reports the derived graph IRI"
         );
+        assert!(
+            body["duration_ms"].is_u64(),
+            "summary reports the rebuild duration (issue #15): {body}"
+        );
+    }
+
+    /// `ASK` the public union endpoint of `pubds`; `true` iff the pattern holds.
+    async fn ask(server: &TestServer, pattern: &str) -> bool {
+        let r = server
+            .get("/_ds/pubds/_sparql")
+            .add_query_param("query", format!("ASK {{ {pattern} }}"))
+            .await;
+        r.assert_status_ok();
+        r.text().contains("true")
+    }
+
+    const COMPUTED: &str = "https://w3id.org/mlips/graph/computed";
+    /// The inverse `ex:r ex:isResultOf ex:study`, which only a rebuild derives.
+    const INVERSE: &str = "GRAPH <https://w3id.org/mlips/graph/computed> { \
+         <https://w3id.org/mlips#r> <https://w3id.org/mlips#isResultOf> \
+         <https://w3id.org/mlips#study> }";
+    /// The `rdfs:subClassOf` closure `ex:A ⊑ ex:C`, which only a rebuild derives.
+    const CLOSURE: &str = "GRAPH <https://w3id.org/mlips/graph/computed> { \
+         <https://w3id.org/mlips#A> <http://www.w3.org/2000/01/rdf-schema#subClassOf> \
+         <https://w3id.org/mlips#C> }";
+
+    /// Issue #15: k `_graph` writes that defer the rebuild (query parameter on
+    /// some, header on another, across PUT, POST and DELETE), followed by one
+    /// `POST _recompute`, perform exactly one rebuild. "Exactly one" is observed
+    /// through `computed`: a rebuild would derive the inverse / the subclass
+    /// closure (or drop a stale triple), so after each deferred write `computed`
+    /// is provably untouched, and the single explicit `_recompute` is the one
+    /// rebuild that makes it coherent.
+    #[tokio::test]
+    async fn test_deferred_writes_rebuild_once_on_explicit_recompute() {
+        let server = TestServer::new(create_router(setup_state()));
+        let auth = basic_header("admin", "secret");
+
+        // Baseline (no option): a write rebuilds, so `computed` holds the closure.
+        server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/schema")
+            .add_header("authorization", &auth)
+            .add_header("content-type", "text/turtle")
+            .text(
+                "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+                 @prefix ex: <https://w3id.org/mlips#> .\n\
+                 ex:A rdfs:subClassOf ex:B . ex:B rdfs:subClassOf ex:C .",
+            )
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        assert!(
+            ask(&server, CLOSURE).await,
+            "baseline write rebuilt computed"
+        );
+
+        // Write 1 (PUT, ?recompute=false): declares the inverse property.
+        server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/vocab")
+            .add_query_param("recompute", "false")
+            .add_header("authorization", &auth)
+            .add_header("content-type", "text/turtle")
+            .text(
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+                 @prefix ex: <https://w3id.org/mlips#> .\n\
+                 ex:hasResult owl:inverseOf ex:isResultOf .",
+            )
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        // Write 2 (POST, header): the forward fact. Both are now in the sources,
+        // yet the inverse is not derived — no rebuild ran.
+        server
+            .post("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/kg")
+            .add_header("authorization", &auth)
+            .add_header("content-type", "text/turtle")
+            .add_header("concon-recompute", "defer")
+            .text(
+                "@prefix ex: <https://w3id.org/mlips#> .\n\
+                 ex:study ex:hasResult ex:r .",
+            )
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        assert!(
+            !ask(&server, INVERSE).await,
+            "deferred writes must not rebuild computed"
+        );
+        // Write 3 (DELETE, ?recompute=defer): removes the schema whose closure is
+        // in `computed`. A rebuild would drop the closure; deferral leaves it
+        // (stale, as documented).
+        server
+            .delete("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/schema")
+            .add_query_param("recompute", "defer")
+            .add_header("authorization", &auth)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        assert!(
+            ask(&server, CLOSURE).await,
+            "a deferred DELETE leaves the stale closure in computed"
+        );
+
+        // The one rebuild: the explicit `POST _recompute`.
+        let r = server
+            .post("/_ds/pubds/_recompute")
+            .add_header("authorization", &auth)
+            .await;
+        r.assert_status_ok();
+        let body: serde_json::Value = r.json();
+        assert_eq!(body["computed_graph"], COMPUTED);
+        assert!(ask(&server, INVERSE).await, "recompute derives the inverse");
+        assert!(
+            !ask(&server, CLOSURE).await,
+            "recompute drops the closure of the deleted schema"
+        );
+    }
+
+    /// Issue #15: the option is parsed only after write authorization, so an
+    /// unauthorized request is a 401 whatever it says about recomputing — and
+    /// an invalid option value cannot be used to probe anything anonymously.
+    #[tokio::test]
+    async fn test_recompute_option_requires_write_auth() {
+        let server = TestServer::new(create_router(setup_state()));
+        server
+            .put("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/kg")
+            .add_query_param("recompute", "false")
+            .add_header("content-type", "text/turtle")
+            .text("<urn:s> <urn:p> <urn:o> .")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+        server
+            .delete("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/kg")
+            .add_header("concon-recompute", "nonsense")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+        // Wrong password, with the option → still 401 (not 400).
+        server
+            .post("/_ds/pubds/_graph")
+            .add_query_param("graph", "https://w3id.org/mlips/graph/kg")
+            .add_query_param("recompute", "false")
+            .add_header("authorization", basic_header("admin", "wrong"))
+            .add_header("content-type", "text/turtle")
+            .text("<urn:s> <urn:p> <urn:o> .")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    /// Issue #15: an unrecognised option value, or a query parameter and a
+    /// header that disagree, is a 400 — and nothing is written, so a typo can
+    /// neither silently rebuild nor silently skip.
+    #[tokio::test]
+    async fn test_recompute_option_rejects_unknown_values() {
+        let server = TestServer::new(create_router(setup_state()));
+        let auth = basic_header("admin", "secret");
+        const FACT: &str = "<urn:s> <urn:p> <urn:o>";
+        for (query, header) in [
+            (Some("maybe"), None),
+            (None, Some("later")),
+            (Some("false"), Some("auto")),
+        ] {
+            let mut req = server
+                .put("/_ds/pubds/_graph")
+                .add_query_param("graph", "https://w3id.org/mlips/graph/kg")
+                .add_header("authorization", &auth)
+                .add_header("content-type", "text/turtle");
+            if let Some(q) = query {
+                req = req.add_query_param("recompute", q);
+            }
+            if let Some(h) = header {
+                req = req.add_header("concon-recompute", h);
+            }
+            req.text(format!("{FACT} ."))
+                .await
+                .assert_status(StatusCode::BAD_REQUEST);
+            assert!(
+                !ask(&server, FACT).await,
+                "a rejected option must not write ({query:?}, {header:?})"
+            );
+        }
+        // Case-insensitive, with surrounding whitespace, both spellings.
+        for (query, header) in [
+            (Some("TRUE"), None),
+            (None, Some(" Auto ")),
+            (Some("false"), Some("DEFER")),
+        ] {
+            let mut req = server
+                .put("/_ds/pubds/_graph")
+                .add_query_param("graph", "https://w3id.org/mlips/graph/kg")
+                .add_header("authorization", &auth)
+                .add_header("content-type", "text/turtle");
+            if let Some(q) = query {
+                req = req.add_query_param("recompute", q);
+            }
+            if let Some(h) = header {
+                req = req.add_header("concon-recompute", h);
+            }
+            req.text(format!("{FACT} ."))
+                .await
+                .assert_status(StatusCode::NO_CONTENT);
+        }
     }
 }
