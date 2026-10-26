@@ -1174,15 +1174,6 @@ async fn admin_import_teams(
             Ok(bundle) => {
                 let existing_team_paths: HashSet<String> =
                     all_team_paths(&state).into_iter().collect();
-                // Validate the bundle's team names as a whole before anything
-                // is planned or written; an invalid name is a client error.
-                if let Err(e) = migrate_io::validate_teams_bundle(&bundle, &parent_segments) {
-                    let mut response = render_admin_teams(&state, username, Some(e), None);
-                    if response.status() == StatusCode::OK {
-                        *response.status_mut() = StatusCode::BAD_REQUEST;
-                    }
-                    return response;
-                }
                 let existing_usernames: HashSet<String> = auth::list_all_users(sys)
                     .into_iter()
                     .map(|u| u.username)
@@ -1206,10 +1197,17 @@ async fn admin_import_teams(
                         target_v,
                     )
                 };
+                // Plan and apply validate the bundle's team names as a whole
+                // before anything is planned or written; an invalid name is a
+                // client error, shown on the page with status 400.
                 let report = match report {
                     Ok(r) => r,
                     Err(e) => {
-                        return (StatusCode::BAD_REQUEST, e).into_response();
+                        let mut response = render_admin_teams(&state, username, Some(e), None);
+                        if response.status() == StatusCode::OK {
+                            *response.status_mut() = StatusCode::BAD_REQUEST;
+                        }
+                        return response;
                     }
                 };
                 report_ctx = Some(minijinja::context! {
@@ -1228,6 +1226,7 @@ async fn admin_import_teams(
                         target_path => r.target_path,
                         skipped_existing => r.skipped_existing,
                         rejected_root => r.rejected_root,
+                        failed => r.failed.clone(),
                         members => r.linked_members.join(", "),
                         admins => r.linked_admins.join(", "),
                     }).collect::<Vec<_>>(),
@@ -1270,10 +1269,11 @@ pub struct CreateTeamForm {
 }
 
 /// Create a sub-team under the given parent team segments (root-team admins
-/// only). The name is validated ([`auth::is_valid_team_name`]) and rejected
-/// with 400 otherwise; an unknown parent is 404; a name already used under
-/// that parent is 409. The write goes through `auth::create_team` (model
-/// API), so the name never reaches SPARQL text.
+/// only). The name is validated ([`auth::is_valid_team_name`], and the
+/// root-level reserved names) and rejected with 400 otherwise; an unknown
+/// parent is 404; a name already used under that parent is 409; a store
+/// failure is 500. The write goes through `auth::create_team` (model API),
+/// so the name never reaches SPARQL text.
 pub async fn create_team(
     state: &AppState,
     parent_segments: &[String],
@@ -1303,7 +1303,12 @@ pub async fn create_team(
         return (StatusCode::NOT_FOUND, "Team not found").into_response();
     };
     if let Err(e) = auth::create_team(system, &parent_iri, name) {
-        return (StatusCode::CONFLICT, e).into_response();
+        let status = match e {
+            auth::CreateTeamError::Invalid(_) => StatusCode::BAD_REQUEST,
+            auth::CreateTeamError::Exists(_) => StatusCode::CONFLICT,
+            auth::CreateTeamError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return (status, e.to_string()).into_response();
     }
 
     // Redirect back to the parent team page
@@ -2085,6 +2090,17 @@ mod tests {
         // `root` under the root team would collide with the root team's IRI.
         let response = server.post("/_new_team").form(&[("name", "root")]).await;
         response.assert_status(StatusCode::CONFLICT);
+        // `static` is served by the router at the top level: reserved there,
+        // an ordinary name deeper down.
+        let response = server.post("/_new_team").form(&[("name", "static")]).await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert!(response.text().contains("reserved"));
+        server
+            .post("/Az09_-.x/_new_team")
+            .form(&[("name", "static")])
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+        server.get("/Az09_-.x/static").await.assert_status_ok();
         // An unknown parent is 404, with nothing written.
         let response = server
             .post("/nope/_new_team")
@@ -2200,15 +2216,17 @@ mod tests {
             )
         };
 
-        for (rel_path, name) in [
-            ("we\"ird", "we\"ird"),
-            ("ok", "ok\" } #"),
-            ("_files", "_files"),
-            ("ok/a b", "a b"),
-            ("ok", "other"),
+        for (rel_path, name, reason) in [
+            ("we\"ird", "we\"ird", "Invalid team path segment"),
+            ("ok", "ok\" } #", "Invalid team name"),
+            ("_files", "_files", "Invalid team path segment"),
+            ("ok/a b", "a b", "Invalid team path segment"),
+            ("ok", "other", "does not match the last segment"),
+            ("static", "static", "reserved directly under the root team"),
         ] {
             let response = post(bundle(rel_path, name), "").await;
             response.assert_status(StatusCode::BAD_REQUEST);
+            assert!(response.text().contains(reason), "{rel_path:?} {name:?}");
             assert_eq!(
                 crate::auth::get_sub_teams(sys, &[]).len(),
                 0,

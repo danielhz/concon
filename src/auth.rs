@@ -176,6 +176,43 @@ pub fn is_valid_team_name(name: &str) -> bool {
     is_valid_name_segment(name) && !name.starts_with('_')
 }
 
+/// Names a team directly under the root team may not take, because the
+/// router serves that top-level path itself (`/static` is the asset
+/// directory): such a team would be created but shadowed. The names are
+/// valid team names elsewhere (`materials/static` is fine), so this is checked
+/// by [`create_team`] and the teams import, not by [`is_valid_team_name`].
+pub const RESERVED_ROOT_TEAM_NAMES: [&str; 1] = ["static"];
+
+/// Whether `name` is reserved for a team directly under the root team
+/// ([`RESERVED_ROOT_TEAM_NAMES`]).
+pub fn is_reserved_root_team_name(name: &str) -> bool {
+    RESERVED_ROOT_TEAM_NAMES.contains(&name)
+}
+
+/// Why [`create_team`] refused or failed; the HTTP layer maps the variants
+/// to 400, 409 and 500.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateTeamError {
+    /// The name does not pass [`is_valid_team_name`] (or is reserved at the
+    /// root level), or the parent IRI is not a team IRI.
+    Invalid(String),
+    /// A team with that name already exists under the parent, or the IRI the
+    /// team would get is already in use.
+    Exists(String),
+    /// The store failed (transaction, write).
+    Store(String),
+}
+
+impl std::fmt::Display for CreateTeamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(m) | Self::Exists(m) | Self::Store(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for CreateTeamError {}
+
 /// The user IRI for `username`, minted under [`USER_IRI_PREFIX`]. Fails unless
 /// the username passes [`is_valid_username`], so the IRI is always well-formed.
 pub fn user_iri_for(username: &str) -> Result<NamedNode, String> {
@@ -390,28 +427,43 @@ pub fn invalid_usernames(store: &Store) -> Vec<String> {
 /// already used under the same parent or an IRI already in use (this also
 /// keeps `root` from being re-minted under the root team), and writes through
 /// the model API in one transaction, so the name never reaches SPARQL text
-/// and a team is never half-written. Returns the new team's IRI.
-pub fn create_team(store: &Store, parent_iri: &str, name: &str) -> Result<NamedNode, String> {
+/// and a team is never half-written. Directly under the root team the
+/// [`RESERVED_ROOT_TEAM_NAMES`] are refused as invalid. Returns the new
+/// team's IRI.
+pub fn create_team(
+    store: &Store,
+    parent_iri: &str,
+    name: &str,
+) -> Result<NamedNode, CreateTeamError> {
+    use CreateTeamError::{Exists, Invalid, Store as StoreErr};
     if !is_valid_team_name(name) {
-        return Err(format!("Invalid team name '{name}'"));
+        return Err(Invalid(format!("Invalid team name '{name}'")));
     }
     let parent_iri = parent_iri.trim_matches(|c| c == '<' || c == '>');
-    let parent = NamedNode::new(parent_iri).map_err(|e| format!("Invalid parent team IRI: {e}"))?;
+    let parent = NamedNode::new(parent_iri)
+        .map_err(|e| Invalid(format!("Invalid parent team IRI: {e}")))?;
     let team_iri = if parent_iri == ROOT_TEAM_IRI {
+        if is_reserved_root_team_name(name) {
+            return Err(Invalid(format!(
+                "Team name '{name}' is reserved at the root level (/{name} is served by the site)"
+            )));
+        }
         format!("{TEAM_IRI_PREFIX}{name}")
     } else if parent_iri.starts_with(TEAM_IRI_PREFIX) {
         format!("{parent_iri}/{name}")
     } else {
-        return Err(format!(
+        return Err(Invalid(format!(
             "Parent team IRI '{parent_iri}' is not under {TEAM_IRI_PREFIX}"
-        ));
+        )));
     };
-    let team = NamedNode::new(team_iri).map_err(|e| e.to_string())?;
+    let team = NamedNode::new(team_iri).map_err(|e| Invalid(e.to_string()))?;
     let rdf_type = NamedNodeRef::new_unchecked(RDF_TYPE);
     let (c_team, p_name, p_parent) = (mlipe("Team"), mlipe("teamName"), mlipe("hasParentTeam"));
     let name_lit = Literal::new_simple_literal(name);
     let g = GraphNameRef::DefaultGraph;
-    let mut tx = store.start_transaction().map_err(|e| e.to_string())?;
+    let mut tx = store
+        .start_transaction()
+        .map_err(|e| StoreErr(e.to_string()))?;
     // Both existence checks run inside the transaction, on the same snapshot
     // the writes land on.
     let iri_taken = tx
@@ -436,12 +488,12 @@ pub fn create_team(store: &Store, parent_iri: &str, name: &str) -> Result<NamedN
             .unwrap_or(false)
         });
     if iri_taken || name_taken {
-        return Err(format!("Team '{name}' already exists here"));
+        return Err(Exists(format!("Team '{name}' already exists here")));
     }
     tx.insert(QuadRef::new(&team, rdf_type, &c_team, g));
     tx.insert(QuadRef::new(&team, &p_name, &name_lit, g));
     tx.insert(QuadRef::new(&team, &p_parent, &parent, g));
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| StoreErr(e.to_string()))?;
     Ok(team)
 }
 
@@ -1564,14 +1616,22 @@ mod tests {
             );
         }
 
-        // Invalid names and duplicates are refused; nothing is written.
+        // Invalid names and duplicates are refused, each with its own error
+        // kind; nothing is written.
+        type Created = Result<NamedNode, CreateTeamError>;
+        let invalid = |r: Created| matches!(r, Err(CreateTeamError::Invalid(_)));
+        let exists = |r: Created| matches!(r, Err(CreateTeamError::Exists(_)));
         for bad in ["x\"y", "a b", "", "_x", ".x"] {
-            assert!(create_team(&store, ROOT_TEAM_IRI, bad).is_err(), "{bad:?}");
+            assert!(invalid(create_team(&store, ROOT_TEAM_IRI, bad)), "{bad:?}");
         }
-        assert!(create_team(&store, ROOT_TEAM_IRI, "materials").is_err());
-        assert!(create_team(&store, t.as_str(), "atomistic").is_err());
-        assert!(create_team(&store, ROOT_TEAM_IRI, "root").is_err());
-        assert!(create_team(&store, "https://example.org/not-a-team", "x").is_err());
+        assert!(exists(create_team(&store, ROOT_TEAM_IRI, "materials")));
+        assert!(exists(create_team(&store, t.as_str(), "atomistic")));
+        assert!(exists(create_team(&store, ROOT_TEAM_IRI, "root")));
+        assert!(invalid(create_team(&store, "https://example.org/not-a-team", "x")));
+        // `static` is served by the router at the top level, so it is reserved
+        // directly under root only.
+        assert!(invalid(create_team(&store, ROOT_TEAM_IRI, "static")));
+        assert!(create_team(&store, t.as_str(), "static").is_ok());
         assert!(invalid_team_names(&store).is_empty());
         assert_eq!(get_sub_teams(&store, &[]).len(), 1);
     }
