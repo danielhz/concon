@@ -121,6 +121,29 @@ pub fn is_valid_dataset_name(name: &str) -> bool {
         && name.split('/').all(is_valid_name_segment)
 }
 
+/// Escape a string for use inside a SPARQL double-quoted string literal, so
+/// a user-supplied value cannot break out of the literal in a query or an
+/// INSERT. SPARQL has no parameter binding, so wherever a value must be
+/// interpolated into query text it goes through this first. Prefer the
+/// Oxigraph model API (`quads_for_pattern`, `insert`) where a lookup or write
+/// can avoid query text altogether; names that are validated by an allow-list
+/// (`is_valid_name_segment`, `auth::is_valid_username`,
+/// `auth::is_valid_team_name`) contain nothing this would change.
+pub fn escape_sparql_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// A `mlipe:` vocabulary term as a named node.
 fn mlipe_node(local: &str) -> Result<NamedNode, String> {
     NamedNode::new(format!("{MLIPE_NS}{local}")).map_err(|e| e.to_string())

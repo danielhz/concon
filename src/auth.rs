@@ -11,7 +11,7 @@ use oxigraph::model::{
 use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 
-use crate::store::{MLIPE_NS, sparql_query};
+use crate::store::{MLIPE_NS, is_valid_name_segment, sparql_query};
 
 pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
@@ -124,6 +124,10 @@ pub struct TeamInfo {
 pub const USER_IRI_PREFIX: &str = "https://mlipe.2mia.org/users/";
 /// Upper bound on a username's length, in bytes.
 pub const MAX_USERNAME_LEN: usize = 128;
+/// IRI prefix under which team IRIs are minted: `<TEAM_IRI_PREFIX><path>`,
+/// where `<path>` is the team's `/`-joined name path from the root team
+/// (`materials/atomistic`); the root team itself is [`ROOT_TEAM_IRI`].
+pub const TEAM_IRI_PREFIX: &str = "https://mlipe.2mia.org/teams/";
 /// Well-known root team IRI (created by the first-run seed).
 pub const ROOT_TEAM_IRI: &str = "https://mlipe.2mia.org/teams/root";
 
@@ -150,6 +154,26 @@ pub fn is_valid_username(u: &str) -> bool {
         && !u.starts_with('.')
         && u.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '@'))
+}
+
+/// Whether `name` is a well-formed team name. A team name is one segment of
+/// the team path: it becomes a URL path segment (`/materials/atomistic`), part
+/// of the team IRI, a prefix of its datasets' qualified names, a file-catalog
+/// directory on disk and a `mlipe:teamName` literal, so it follows the dataset
+/// segment rule (`store::is_valid_name_segment`: ASCII letters, digits, `_`,
+/// `-`, `.`; no leading `.`; length-capped) and additionally may not start
+/// with `_`, which the URL space reserves for views and actions (`_files`,
+/// `_new_team`, …) — a team named `_x` could never be addressed. None of the
+/// admitted characters needs escaping in an IRI, a SPARQL or Turtle literal,
+/// or a URL path.
+///
+/// Enforced on every path that *creates* a team (sub-team form, teams
+/// import) and on every lookup by path ([`resolve_team_path`]): a URL
+/// segment that is not a valid team name is "not found" before the store is
+/// consulted. [`invalid_team_names`] reports stored teams that predate the
+/// rule, which are therefore unreachable by URL until renamed.
+pub fn is_valid_team_name(name: &str) -> bool {
+    is_valid_name_segment(name) && !name.starts_with('_')
 }
 
 /// The user IRI for `username`, minted under [`USER_IRI_PREFIX`]. Fails unless
@@ -351,6 +375,90 @@ pub fn invalid_usernames(store: &Store) -> Vec<String> {
             _ => None,
         })
         .filter(|n| !is_valid_username(n))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Create a sub-team `name` under the team `parent_iri`: `<team> a
+/// mlipe:Team ; mlipe:teamName "<name>" ; mlipe:hasParentTeam <parent>`. The
+/// one creation path shared by the sub-team form and the teams import. The
+/// team IRI is minted from the parent's path (`<TEAM_IRI_PREFIX><name>` under
+/// the root team, `<parent>/<name>` elsewhere), so it stays the `/`-joined
+/// name path. Validates the name ([`is_valid_team_name`]), refuses a name
+/// already used under the same parent or an IRI already in use (this also
+/// keeps `root` from being re-minted under the root team), and writes through
+/// the model API in one transaction, so the name never reaches SPARQL text
+/// and a team is never half-written. Returns the new team's IRI.
+pub fn create_team(store: &Store, parent_iri: &str, name: &str) -> Result<NamedNode, String> {
+    if !is_valid_team_name(name) {
+        return Err(format!("Invalid team name '{name}'"));
+    }
+    let parent_iri = parent_iri.trim_matches(|c| c == '<' || c == '>');
+    let parent = NamedNode::new(parent_iri).map_err(|e| format!("Invalid parent team IRI: {e}"))?;
+    let team_iri = if parent_iri == ROOT_TEAM_IRI {
+        format!("{TEAM_IRI_PREFIX}{name}")
+    } else if parent_iri.starts_with(TEAM_IRI_PREFIX) {
+        format!("{parent_iri}/{name}")
+    } else {
+        return Err(format!(
+            "Parent team IRI '{parent_iri}' is not under {TEAM_IRI_PREFIX}"
+        ));
+    };
+    let team = NamedNode::new(team_iri).map_err(|e| e.to_string())?;
+    let rdf_type = NamedNodeRef::new_unchecked(RDF_TYPE);
+    let (c_team, p_name, p_parent) = (mlipe("Team"), mlipe("teamName"), mlipe("hasParentTeam"));
+    let name_lit = Literal::new_simple_literal(name);
+    let g = GraphNameRef::DefaultGraph;
+    let mut tx = store.start_transaction().map_err(|e| e.to_string())?;
+    // Both existence checks run inside the transaction, on the same snapshot
+    // the writes land on.
+    let iri_taken = tx
+        .quads_for_pattern(Some(team.as_ref().into()), None, None, None)
+        .next()
+        .is_some();
+    let name_taken = tx
+        .quads_for_pattern(
+            None,
+            Some(p_name.as_ref()),
+            Some(TermRef::from(name_lit.as_ref())),
+            None,
+        )
+        .filter_map(Result::ok)
+        .any(|q| {
+            tx.contains(QuadRef::new(
+                q.subject.as_ref(),
+                p_parent.as_ref(),
+                parent.as_ref(),
+                g,
+            ))
+            .unwrap_or(false)
+        });
+    if iri_taken || name_taken {
+        return Err(format!("Team '{name}' already exists here"));
+    }
+    tx.insert(QuadRef::new(&team, rdf_type, &c_team, g));
+    tx.insert(QuadRef::new(&team, &p_name, &name_lit, g));
+    tx.insert(QuadRef::new(&team, &p_parent, &parent, g));
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(team)
+}
+
+/// Stored team names that do not pass [`is_valid_team_name`] — teams created
+/// before the rule existed. Such a team cannot be reached by URL (its path
+/// segment is rejected before lookup), re-created or imported as it is; the
+/// operator should rename it. Sorted, deduplicated. Reported at startup.
+pub fn invalid_team_names(store: &Store) -> Vec<String> {
+    let p_name = mlipe("teamName");
+    let mut names: Vec<String> = store
+        .quads_for_pattern(None, Some(p_name.as_ref()), None, None)
+        .filter_map(Result::ok)
+        .filter_map(|q| match q.object {
+            Term::Literal(l) => Some(l.value().to_string()),
+            _ => None,
+        })
+        .filter(|n| !is_valid_team_name(n))
         .collect();
     names.sort();
     names.dedup();
@@ -570,7 +678,7 @@ pub fn get_user_admin_teams(store: &Store, user_iri: &str) -> Vec<TeamInfo> {
             if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
                 teams.push(TeamInfo {
                     iri: iri.to_string(),
-                    name: strip_literal(&name.to_string()),
+                    name: literal_value(name),
                 });
             }
         }
@@ -635,7 +743,7 @@ pub fn get_user_member_teams(store: &Store, user_iri: &str) -> Vec<TeamInfo> {
             if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
                 teams.push(TeamInfo {
                     iri: iri.to_string(),
-                    name: strip_literal(&name.to_string()),
+                    name: literal_value(name),
                 });
             }
         }
@@ -917,11 +1025,26 @@ pub fn get_team_members(store: &Store, team_iri: &str) -> Vec<UserInfo> {
     users
 }
 
-/// Resolve a team path (e.g., ["materials", "atomistic"]) to a team IRI.
-/// Walks the hierarchy: root → materials → atomistic.
-/// Returns None if any segment doesn't resolve.
+/// Resolve a team path (e.g., `["materials", "atomistic"]`) to a team IRI in
+/// its `<…>` display form, walking the hierarchy root → materials →
+/// atomistic by `mlipe:teamName` + `mlipe:hasParentTeam`. Returns `None` if
+/// any segment does not resolve — and, before the store is consulted, if any
+/// segment is not a valid team name ([`is_valid_team_name`]): a URL segment
+/// that could not name a team is simply not found. Each segment is matched as
+/// a literal *value* through the model API; no query text is built from it.
 pub fn resolve_team_path(store: &Store, segments: &[String]) -> Option<String> {
-    // Find root team (no parent)
+    if !segments.iter().all(|s| is_valid_team_name(s)) {
+        return None;
+    }
+    let mut current = root_team(store)?;
+    for segment in segments {
+        current = child_team_named(store, &current, segment)?;
+    }
+    Some(current.to_string())
+}
+
+/// The root team: the one `mlipe:Team` without a `mlipe:hasParentTeam`.
+fn root_team(store: &Store) -> Option<NamedOrBlankNode> {
     let root_query = r#"
         PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
         SELECT ?team WHERE {
@@ -930,43 +1053,51 @@ pub fn resolve_team_path(store: &Store, segments: &[String]) -> Option<String> {
         }
         LIMIT 1
     "#;
+    let QueryResults::Solutions(solutions) = sparql_query(store, root_query).ok()? else {
+        return None;
+    };
+    solutions.flatten().find_map(|sol| match sol.get("team") {
+        Some(Term::NamedNode(n)) => Some(NamedOrBlankNode::from(n.clone())),
+        Some(Term::BlankNode(b)) => Some(NamedOrBlankNode::from(b.clone())),
+        _ => None,
+    })
+}
 
-    let mut current_iri = None;
-    if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store, root_query) {
-        for solution in solutions.flatten() {
-            current_iri = solution.get("team").map(|v| v.to_string());
-        }
-    }
-
-    let mut current_iri = current_iri?;
-
-    for segment in segments {
-        let parent_clean = current_iri
-            .trim_matches(|c| c == '<' || c == '>')
-            .to_string();
-        let query = format!(
-            r#"
-            PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            SELECT ?team WHERE {{
-                ?team a mlipe:Team ;
-                      mlipe:teamName "{segment}" ;
-                      mlipe:hasParentTeam <{parent_clean}> .
-            }}
-            LIMIT 1
-            "#,
-        );
-
-        let mut found = None;
-        if let Ok(QueryResults::Solutions(solutions)) = sparql_query(store, &query) {
-            for solution in solutions.flatten() {
-                found = solution.get("team").map(|v| v.to_string());
-            }
-        }
-
-        current_iri = found?;
-    }
-
-    Some(current_iri)
+/// The `mlipe:Team` whose `mlipe:teamName` is exactly `name` and whose
+/// `mlipe:hasParentTeam` is `parent`. Model-API lookup: the name is a literal
+/// value, never query text.
+fn child_team_named(
+    store: &Store,
+    parent: &NamedOrBlankNode,
+    name: &str,
+) -> Option<NamedOrBlankNode> {
+    let rdf_type = NamedNodeRef::new_unchecked(RDF_TYPE);
+    let (c_team, p_name, p_parent) = (mlipe("Team"), mlipe("teamName"), mlipe("hasParentTeam"));
+    let name_lit = Literal::new_simple_literal(name);
+    let g = GraphNameRef::DefaultGraph;
+    store
+        .quads_for_pattern(
+            None,
+            Some(p_name.as_ref()),
+            Some(TermRef::from(name_lit.as_ref())),
+            None,
+        )
+        .filter_map(Result::ok)
+        .map(|q| q.subject)
+        .find(|team| {
+            let parent_term = TermRef::from(parent.as_ref());
+            store
+                .contains(QuadRef::new(
+                    team.as_ref(),
+                    p_parent.as_ref(),
+                    parent_term,
+                    g,
+                ))
+                .unwrap_or(false)
+                && store
+                    .contains(QuadRef::new(team.as_ref(), rdf_type, c_team.as_ref(), g))
+                    .unwrap_or(false)
+        })
 }
 
 /// Get direct sub-teams of a team identified by path segments.
@@ -1003,7 +1134,7 @@ pub fn get_sub_teams(store: &Store, parent_segments: &[String]) -> Vec<TeamInfo>
             if let (Some(iri), Some(name)) = (solution.get("team"), solution.get("name")) {
                 teams.push(TeamInfo {
                     iri: iri.to_string(),
-                    name: strip_literal(&name.to_string()),
+                    name: literal_value(name),
                 });
             }
         }
@@ -1349,5 +1480,99 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn is_valid_team_name_matches_the_segment_rule_minus_views() {
+        for ok in ["materials", "MetaLearn", "Az09_-.x", "a.b", "x_y", "sub.1"] {
+            assert!(is_valid_team_name(ok), "{ok} should be valid");
+        }
+        for bad in [
+            "",
+            " ",
+            "a b",
+            "a/b",
+            "a\"b",
+            "a\\b",
+            "a'b",
+            "a\nb",
+            ".hidden",
+            "..",
+            "_files",
+            "_new_team",
+            "ünïcode",
+            "a{b",
+            "a#b",
+            "a<b>",
+            "a}b",
+        ] {
+            assert!(!is_valid_team_name(bad), "{bad:?} should be invalid");
+        }
+        let max = "a".repeat(crate::store::MAX_NAME_SEGMENT_LEN);
+        assert!(is_valid_team_name(&max));
+        assert!(!is_valid_team_name(&format!("{max}a")));
+    }
+
+    fn seeded_store() -> Store {
+        let store = Store::new().unwrap();
+        crate::store::sparql_update(
+            &store,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+            }"#,
+        )
+        .unwrap();
+        store
+    }
+
+    #[test]
+    fn create_team_and_resolve_team_path_treat_names_as_data() {
+        let store = seeded_store();
+        let root = resolve_team_path(&store, &[]).unwrap();
+        assert_eq!(root, format!("<{ROOT_TEAM_IRI}>"));
+
+        let t = create_team(&store, ROOT_TEAM_IRI, "materials").unwrap();
+        assert_eq!(t.as_str(), "https://mlipe.2mia.org/teams/materials");
+        let sub = create_team(&store, t.as_str(), "atomistic").unwrap();
+        assert_eq!(
+            sub.as_str(),
+            "https://mlipe.2mia.org/teams/materials/atomistic"
+        );
+        // The `<…>` display form the callers expect.
+        assert_eq!(
+            create_team(&store, &format!("<{}>", t.as_str()), "sub.2")
+                .unwrap()
+                .as_str(),
+            "https://mlipe.2mia.org/teams/materials/sub.2"
+        );
+
+        let seg = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resolve_team_path(&store, &seg(&["materials", "atomistic"])).unwrap(),
+            "<https://mlipe.2mia.org/teams/materials/atomistic>"
+        );
+        assert!(resolve_team_path(&store, &seg(&["atomistic"])).is_none());
+        assert!(resolve_team_path(&store, &seg(&["materials", "nope"])).is_none());
+        // Unusual segments are not found, including ones that would have
+        // altered the old query text.
+        for bad in ["materials\"", "x\" } #", "a b", "_files", ".", ""] {
+            assert!(resolve_team_path(&store, &seg(&[bad])).is_none(), "{bad:?}");
+            assert!(
+                resolve_team_path(&store, &seg(&["materials", bad])).is_none(),
+                "{bad:?}"
+            );
+        }
+
+        // Invalid names and duplicates are refused; nothing is written.
+        for bad in ["x\"y", "a b", "", "_x", ".x"] {
+            assert!(create_team(&store, ROOT_TEAM_IRI, bad).is_err(), "{bad:?}");
+        }
+        assert!(create_team(&store, ROOT_TEAM_IRI, "materials").is_err());
+        assert!(create_team(&store, t.as_str(), "atomistic").is_err());
+        assert!(create_team(&store, ROOT_TEAM_IRI, "root").is_err());
+        assert!(create_team(&store, "https://example.org/not-a-team", "x").is_err());
+        assert!(invalid_team_names(&store).is_empty());
+        assert_eq!(get_sub_teams(&store, &[]).len(), 1);
     }
 }
