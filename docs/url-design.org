@@ -79,6 +79,8 @@ See =file-sharing.org= for details.
 | =/A/_ds/D/_query=         | YASGUI query editor for dataset D        |
 | =/A/_ds/D/_sparql=        | SPARQL endpoint for dataset D            |
 | =/A/_ds/D/_update=        | SPARQL Update endpoint for dataset D     |
+| =/A/_ds/D/_graph?graph=G= | Replace (PUT), merge (POST) or clear (DELETE) named graph G of D; add =&recompute=false= to defer the derived-graph rebuild |
+| =/A/_ds/D/_recompute=     | Rebuild the derived =computed= graph of D (POST) |
 | =/A/B/_ds/D/_query=       | Dataset D in team B (child of A)         |
 
 ** File sharing (via =_files=)

@@ -67,6 +67,9 @@ pub struct RecomputeReport {
     pub sources: Vec<String>,
     /// Triples in the computed graph after the rebuild.
     pub inserted: usize,
+    /// Wall-clock time the rebuild took, in milliseconds (issue #15: lets a
+    /// slow upload be diagnosed from the log line or the `_recompute` reply).
+    pub duration_ms: u64,
 }
 
 /// The graph layout of a dataset: the computed target and its source graphs.
@@ -282,12 +285,14 @@ fn transitive_properties(store: &Store, graphs: &[NamedNode]) -> Result<Vec<Name
 /// entailments included). Returns a report (with `computed_graph: None` when the
 /// dataset has no `…/graph/` layout, in which case nothing is done).
 pub fn recompute(store: &Store) -> Result<RecomputeReport, String> {
+    let started = std::time::Instant::now();
     let graphs = named_graphs(store)?;
     let Some(layout) = derive_layout(&graphs) else {
         return Ok(RecomputeReport {
             computed_graph: None,
             sources: Vec::new(),
             inserted: 0,
+            duration_ms: elapsed_ms(started),
         });
     };
     let computed = layout.computed.as_str().to_string();
@@ -305,6 +310,7 @@ pub fn recompute(store: &Store) -> Result<RecomputeReport, String> {
             computed_graph: Some(computed),
             sources: Vec::new(),
             inserted: 0,
+            duration_ms: elapsed_ms(started),
         });
     }
 
@@ -355,7 +361,14 @@ pub fn recompute(store: &Store) -> Result<RecomputeReport, String> {
         computed_graph: Some(computed),
         sources: layout.sources.iter().map(|g| g.as_str().to_string()).collect(),
         inserted,
+        duration_ms: elapsed_ms(started),
     })
+}
+
+/// Milliseconds since `started`, saturating (a rebuild will not run 584 million
+/// years, but `u128 → u64` still needs a conversion).
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Count the triples in a named graph.

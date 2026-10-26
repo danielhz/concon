@@ -18,6 +18,9 @@ use super::web;
 pub struct GraphParams {
     pub graph: Option<String>,
     pub iri: Option<String>,
+    /// `_graph` writes only: `false`/`defer` skips the derived-graph rebuild
+    /// for this write (issue #15); see `ingest::recompute_mode`.
+    pub recompute: Option<String>,
 }
 
 /// The note form body shared by the `_entity` and `_view` annotation POST
@@ -781,7 +784,19 @@ async fn content_post(
                     {
                         return r;
                     }
-                    ingest::post_graph(&state, &qualified, gparams.graph.as_deref(), &headers, &body)
+                    let mode =
+                        match ingest::recompute_mode(gparams.recompute.as_deref(), &headers) {
+                            Ok(m) => m,
+                            Err(r) => return r,
+                        };
+                    ingest::post_graph(
+                        &state,
+                        &qualified,
+                        gparams.graph.as_deref(),
+                        &headers,
+                        &body,
+                        mode,
+                    )
                 }
                 Some("_recompute") => {
                     if let Err(r) =
@@ -935,7 +950,18 @@ async fn content_put(
             if let Err(r) = ingest::authorize_write(&state, &headers, &cookies, &qualified) {
                 return r;
             }
-            ingest::put_graph(&state, &qualified, gparams.graph.as_deref(), &headers, &body)
+            let mode = match ingest::recompute_mode(gparams.recompute.as_deref(), &headers) {
+                Ok(m) => m,
+                Err(r) => return r,
+            };
+            ingest::put_graph(
+                &state,
+                &qualified,
+                gparams.graph.as_deref(),
+                &headers,
+                &body,
+                mode,
+            )
         }
         Some("_doc") => {
             if let Err(r) = ingest::authorize_write(&state, &headers, &cookies, &qualified) {
@@ -966,7 +992,11 @@ async fn content_delete(
             if let Err(r) = ingest::authorize_write(&state, &headers, &cookies, &qualified) {
                 return r;
             }
-            ingest::delete_graph(&state, &qualified, gparams.graph.as_deref())
+            let mode = match ingest::recompute_mode(gparams.recompute.as_deref(), &headers) {
+                Ok(m) => m,
+                Err(r) => return r,
+            };
+            ingest::delete_graph(&state, &qualified, gparams.graph.as_deref(), mode)
         }
         _ => {
             (StatusCode::METHOD_NOT_ALLOWED, "DELETE not supported for this view").into_response()
