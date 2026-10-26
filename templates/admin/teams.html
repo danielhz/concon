@@ -57,7 +57,7 @@
       {% for r in import_report.rows %}
       <tr>
         <td><code>{{ r.target_path }}</code></td>
-        <td>{% if r.rejected_root %}refused (root){% elif r.skipped_existing %}skipped (exists — untouched){% elif import_report.applied %}created{% else %}to create{% endif %}</td>
+        <td>{% if r.rejected_root %}refused (root){% elif r.skipped_existing %}skipped (exists — untouched){% elif r.failed %}not created ({{ r.failed }}){% elif import_report.applied %}created{% else %}to create{% endif %}</td>
         <td>{{ r.members }}</td>
         <td>{% if r.admins %}<strong>{{ r.admins }}</strong>{% endif %}</td>
       </tr>

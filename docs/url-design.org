@@ -42,7 +42,7 @@ ambiguity.
 | =/materials/_ds/atomistic/_query=  | Dataset =atomistic= of materials   |
 
 Because =_ds= is a reserved =_=-prefixed segment, it is structurally
-distinct from team names, which never start with =_=.
+distinct from team names, which never start with =_= (the full team-name rule — one segment of ASCII letters, digits, =_=, =-= and =.=, no leading =.= or =_=, at most 128 bytes, and =static= reserved directly under the root team — is in =deployment.org=, "Team names").
 
 * File catalogs use the =_files= segment
 

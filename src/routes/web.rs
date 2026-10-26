@@ -526,13 +526,20 @@ pub async fn team_page(
     let team_path = team_segments.join("/");
     let team_name = team_segments.last().map(|s| s.as_str()).unwrap_or("Root");
 
+    // Resolve the team IRI. A path that does not name a team — including one
+    // with a segment that could not be a team name, which the resolver rejects
+    // before touching the store — is 404.
+    let team_iri = auth::resolve_team_path(&state.store_manager.system, team_segments);
+    if team_iri.is_none() {
+        return Err((StatusCode::NOT_FOUND, "Team not found".into()));
+    }
+
     // Check team visibility. Logged-in users must be able to see the team;
     // anonymous visitors are allowed here only when the caller established the
     // team has a Public dataset (content::team_has_public_dataset), and they see
     // a public-only view (datasets/files filtered, no admin controls) below.
     if !team_segments.is_empty() {
-        let team_iri_check = auth::resolve_team_path(&state.store_manager.system, team_segments);
-        if let (Some(iri), Some(s)) = (team_iri_check.as_ref(), session.as_ref()) {
+        if let (Some(iri), Some(s)) = (team_iri.as_ref(), session.as_ref()) {
             if !auth::can_see_team(&state.store_manager.system, &s.user_iri, iri) {
                 return Err((
                     StatusCode::FORBIDDEN,
@@ -551,9 +558,6 @@ pub async fn team_page(
             minijinja::context! { name => name, url => url }
         })
         .collect();
-
-    // Resolve team IRI for permission checks
-    let team_iri = auth::resolve_team_path(&state.store_manager.system, team_segments);
 
     // Check if current user is admin of this specific team
     let is_team_admin = admin
@@ -1037,7 +1041,7 @@ fn all_team_paths(state: &AppState) -> Vec<String> {
                 let iri = t.to_string();
                 if let Some(p) = iri
                     .trim_matches(|c| c == '<' || c == '>')
-                    .strip_prefix("https://mlipe.2mia.org/teams/")
+                    .strip_prefix(auth::TEAM_IRI_PREFIX)
                 {
                     if p != "root" {
                         paths.push(p.to_string());
@@ -1193,6 +1197,19 @@ async fn admin_import_teams(
                         target_v,
                     )
                 };
+                // Plan and apply validate the bundle's team names as a whole
+                // before anything is planned or written; an invalid name is a
+                // client error, shown on the page with status 400.
+                let report = match report {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let mut response = render_admin_teams(&state, username, Some(e), None);
+                        if response.status() == StatusCode::OK {
+                            *response.status_mut() = StatusCode::BAD_REQUEST;
+                        }
+                        return response;
+                    }
+                };
                 report_ctx = Some(minijinja::context! {
                     applied => report.applied,
                     dry_run => !report.applied,
@@ -1209,6 +1226,7 @@ async fn admin_import_teams(
                         target_path => r.target_path,
                         skipped_existing => r.skipped_existing,
                         rejected_root => r.rejected_root,
+                        failed => r.failed.clone(),
                         members => r.linked_members.join(", "),
                         admins => r.linked_admins.join(", "),
                     }).collect::<Vec<_>>(),
@@ -1250,7 +1268,12 @@ pub struct CreateTeamForm {
     pub name: String,
 }
 
-/// Create a sub-team under the given parent team segments.
+/// Create a sub-team under the given parent team segments (root-team admins
+/// only). The name is validated ([`auth::is_valid_team_name`], and the
+/// root-level reserved names) and rejected with 400 otherwise; an unknown
+/// parent is 404; a name already used under that parent is 409; a store
+/// failure is 500. The write goes through `auth::create_team` (model API),
+/// so the name never reaches SPARQL text.
 pub async fn create_team(
     state: &AppState,
     parent_segments: &[String],
@@ -1262,38 +1285,34 @@ pub async fn create_team(
         return Redirect::to("/").into_response();
     }
 
-    let name = form.name.trim().to_string();
-    if name.is_empty() {
-        return Redirect::to("/_teams").into_response();
+    let name = form.name.trim();
+    if !auth::is_valid_team_name(name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Invalid team name '{name}': use ASCII letters, digits, '_', '-' and '.', \
+                 not starting with '.' or '_', at most {} characters.",
+                crate::store::MAX_NAME_SEGMENT_LEN
+            ),
+        )
+            .into_response();
     }
 
-    let parent_iri = match auth::resolve_team_path(&state.store_manager.system, parent_segments) {
-        Some(iri) => iri,
-        None => return Redirect::to("/_teams").into_response(),
+    let system = &state.store_manager.system;
+    let Some(parent_iri) = auth::resolve_team_path(system, parent_segments) else {
+        return (StatusCode::NOT_FOUND, "Team not found").into_response();
     };
-    let parent_clean = parent_iri.trim_matches(|c| c == '<' || c == '>');
-
-    let parent_path = parent_segments.join("/");
-    let team_path = if parent_path.is_empty() {
-        name.clone()
-    } else {
-        format!("{}/{}", parent_path, name)
-    };
-    let team_iri = format!("https://mlipe.2mia.org/teams/{}", team_path);
-
-    let insert = format!(
-        r#"
-        PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-        INSERT DATA {{
-            <{team_iri}> a mlipe:Team ;
-                mlipe:teamName "{name}" ;
-                mlipe:hasParentTeam <{parent_clean}> .
-        }}
-        "#,
-    );
-    let _ = sparql_update(&state.store_manager.system, &insert);
+    if let Err(e) = auth::create_team(system, &parent_iri, name) {
+        let status = match e {
+            auth::CreateTeamError::Invalid(_) => StatusCode::BAD_REQUEST,
+            auth::CreateTeamError::Exists(_) => StatusCode::CONFLICT,
+            auth::CreateTeamError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return (status, e.to_string()).into_response();
+    }
 
     // Redirect back to the parent team page
+    let parent_path = parent_segments.join("/");
     if parent_path.is_empty() {
         Redirect::to("/").into_response()
     } else {
@@ -2003,5 +2022,227 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// The sub-team form validates the name (400, nothing written), creates a
+    /// valid one through the model API (reachable at its URL, listed as a
+    /// sub-team), and refuses a duplicate under the same parent (409) — which
+    /// also keeps `root` from being re-minted under the root team.
+    #[tokio::test]
+    async fn create_team_validates_name_and_refuses_duplicates() {
+        let state = setup_state();
+        let server = server_for(state.clone());
+        login(&server).await.assert_status(StatusCode::SEE_OTHER);
+        let sys = &state.store_manager.system;
+
+        for bad in [
+            "bad\"name",
+            "a b",
+            "a/b",
+            ".hidden",
+            "_files",
+            "",
+            "x\" } #",
+            "x\\y",
+        ] {
+            let response = server.post("/_new_team").form(&[("name", bad)]).await;
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert!(response.text().contains("Invalid team name"), "{bad:?}");
+            assert!(
+                crate::auth::invalid_team_names(sys).is_empty(),
+                "{bad:?} was stored"
+            );
+        }
+        // Nothing but the root team exists.
+        assert_eq!(crate::auth::get_sub_teams(sys, &[]).len(), 0);
+
+        let response = server
+            .post("/_new_team")
+            .form(&[("name", "Az09_-.x")])
+            .await;
+        response.assert_status(StatusCode::SEE_OTHER);
+        let iri = crate::auth::resolve_team_path(sys, &["Az09_-.x".to_string()]).unwrap();
+        assert_eq!(iri, "<https://mlipe.2mia.org/teams/Az09_-.x>");
+        server.get("/Az09_-.x").await.assert_status_ok();
+
+        // A nested team under it, then the same name again: conflict.
+        let response = server
+            .post("/Az09_-.x/_new_team")
+            .form(&[("name", "sub")])
+            .await;
+        response.assert_status(StatusCode::SEE_OTHER);
+        server.get("/Az09_-.x/sub").await.assert_status_ok();
+        let response = server
+            .post("/Az09_-.x/_new_team")
+            .form(&[("name", "sub")])
+            .await;
+        response.assert_status(StatusCode::CONFLICT);
+        assert_eq!(
+            crate::auth::get_sub_teams(sys, &["Az09_-.x".to_string()]).len(),
+            1
+        );
+        // The same name under a different parent is fine (distinct IRI).
+        server
+            .post("/_new_team")
+            .form(&[("name", "sub")])
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+        // `root` under the root team would collide with the root team's IRI.
+        let response = server.post("/_new_team").form(&[("name", "root")]).await;
+        response.assert_status(StatusCode::CONFLICT);
+        // `static` is served by the router at the top level: reserved there,
+        // an ordinary name deeper down.
+        let response = server.post("/_new_team").form(&[("name", "static")]).await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert!(response.text().contains("reserved"));
+        server
+            .post("/Az09_-.x/_new_team")
+            .form(&[("name", "static")])
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+        server.get("/Az09_-.x/static").await.assert_status_ok();
+        // An unknown parent is 404, with nothing written.
+        let response = server
+            .post("/nope/_new_team")
+            .form(&[("name", "sub")])
+            .await;
+        response.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// Team URLs with segments that could not be team names are 404 — the
+    /// store is not consulted — and so are valid-looking unknown teams; an
+    /// existing team keeps working, including the deployed-style names.
+    #[tokio::test]
+    async fn team_page_with_unusual_url_is_not_found() {
+        let state = setup_state();
+        let server = server_for(state.clone());
+        login(&server).await.assert_status(StatusCode::SEE_OTHER);
+        let sys = &state.store_manager.system;
+        crate::auth::create_team(sys, crate::auth::ROOT_TEAM_IRI, "MetaLearn").unwrap();
+        crate::auth::create_team(sys, "https://mlipe.2mia.org/teams/MetaLearn", "sub.1").unwrap();
+
+        server.get("/MetaLearn").await.assert_status_ok();
+        server.get("/MetaLearn/sub.1").await.assert_status_ok();
+        for bad in [
+            "/we%22ird",
+            "/MetaLearn/a%20b",
+            "/MetaLearn/x%22%20%7D%20%23",
+            "/.hidden",
+            "/MetaLearn/%E2%9C%93",
+            "/nope",
+            "/MetaLearn/nope",
+        ] {
+            let response = server.get(bad).await;
+            response.assert_status(StatusCode::NOT_FOUND);
+        }
+        // A new-sub-team POST on such a URL is 404 as well.
+        server
+            .post("/we%22ird/_new_team")
+            .form(&[("name", "x")])
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// A legacy team whose stored name would not pass the rule is matched as a
+    /// literal value by the resolver (no query text), so its name cannot
+    /// alter a query; it is reported at startup and is not reachable by URL.
+    #[tokio::test]
+    async fn legacy_team_name_is_data_and_reported() {
+        let state = setup_state();
+        let sys = &state.store_manager.system;
+        {
+            use oxigraph::model::{GraphNameRef, Literal, NamedNode, QuadRef};
+            let team = NamedNode::new("https://mlipe.2mia.org/teams/legacy").unwrap();
+            let rdf_type =
+                NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").unwrap();
+            let c_team = NamedNode::new("https://mlipe.2mia.org/ontology#Team").unwrap();
+            let p_name = NamedNode::new("https://mlipe.2mia.org/ontology#teamName").unwrap();
+            let p_parent = NamedNode::new("https://mlipe.2mia.org/ontology#hasParentTeam").unwrap();
+            let root = NamedNode::new(crate::auth::ROOT_TEAM_IRI).unwrap();
+            let name = Literal::new_simple_literal("we\"ird } #");
+            let g = GraphNameRef::DefaultGraph;
+            sys.insert(QuadRef::new(&team, &rdf_type, &c_team, g))
+                .unwrap();
+            sys.insert(QuadRef::new(&team, &p_name, &name, g)).unwrap();
+            sys.insert(QuadRef::new(&team, &p_parent, &root, g))
+                .unwrap();
+        }
+        assert_eq!(crate::auth::invalid_team_names(sys), vec!["we\"ird } #"]);
+        assert!(crate::auth::resolve_team_path(sys, &["we\"ird } #".to_string()]).is_none());
+        // It is still listed as a sub-team of root, by value, unescaped.
+        let subs = crate::auth::get_sub_teams(sys, &[]);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].name, "we\"ird } #");
+        let server = server_for(state.clone());
+        login(&server).await.assert_status(StatusCode::SEE_OTHER);
+        server
+            .get("/we%22ird%20%7D%20%23")
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// The teams import rejects a bundle with an invalid team name as a
+    /// whole (400, nothing written) and imports a valid one.
+    #[tokio::test]
+    async fn admin_import_teams_validates_names() {
+        let state = setup_state();
+        let server = server_for(state.clone());
+        login(&server).await.assert_status(StatusCode::SEE_OTHER);
+        let sys = &state.store_manager.system;
+
+        let bundle = |rel_path: &str, name: &str| {
+            serde_json::to_vec(&crate::migrate_io::TeamsBundle::new(
+                crate::migration::get_schema_version(sys),
+                rel_path.to_string(),
+                vec![crate::migrate_io::TeamRecord {
+                    rel_path: rel_path.to_string(),
+                    name: name.to_string(),
+                    members: vec![],
+                    admins: vec!["admin".to_string()],
+                }],
+            ))
+            .unwrap()
+        };
+        let post = |bytes: Vec<u8>, parent: &str| {
+            server.post("/_admin/teams/import").multipart(
+                axum_test::multipart::MultipartForm::new()
+                    .add_part(
+                        "bundle",
+                        axum_test::multipart::Part::bytes(bytes)
+                            .file_name("b.json")
+                            .mime_type("application/json"),
+                    )
+                    .add_text("parent", parent.to_string()),
+            )
+        };
+
+        for (rel_path, name, reason) in [
+            ("we\"ird", "we\"ird", "Invalid team path segment"),
+            ("ok", "ok\" } #", "Invalid team name"),
+            ("_files", "_files", "Invalid team path segment"),
+            ("ok/a b", "a b", "Invalid team path segment"),
+            ("ok", "other", "does not match the last segment"),
+            ("static", "static", "reserved directly under the root team"),
+        ] {
+            let response = post(bundle(rel_path, name), "").await;
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert!(response.text().contains(reason), "{rel_path:?} {name:?}");
+            assert_eq!(
+                crate::auth::get_sub_teams(sys, &[]).len(),
+                0,
+                "{rel_path:?} {name:?}"
+            );
+            assert!(crate::auth::invalid_team_names(sys).is_empty());
+        }
+        // An unusual target parent is "no such team", nothing written.
+        let response = post(bundle("ok", "ok"), "we\"ird").await;
+        response.assert_status_ok();
+        assert!(response.text().contains("No such target parent team"));
+        assert_eq!(crate::auth::get_sub_teams(sys, &[]).len(), 0);
+
+        let response = post(bundle("ok.1", "ok.1"), "").await;
+        response.assert_status_ok();
+        assert!(crate::auth::resolve_team_path(sys, &["ok.1".to_string()]).is_some());
+        server.get("/ok.1").await.assert_status_ok();
     }
 }

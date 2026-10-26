@@ -50,6 +50,17 @@ async fn main() {
             auth::MAX_USERNAME_LEN
         );
     }
+    // Likewise for team names: a team whose name predates the rule cannot be
+    // reached by URL (its path segment is rejected before lookup) and should
+    // be renamed.
+    for name in auth::invalid_team_names(&app_state.store_manager.system) {
+        tracing::warn!(
+            "stored team name {name:?} does not pass the team-name rule \
+             (ASCII letters, digits, '_', '-', '.'; no leading '.' or '_'; at most {} bytes); \
+             the team is unreachable by URL until renamed",
+            concon::store::MAX_NAME_SEGMENT_LEN
+        );
+    }
 
     app_state
         .store_manager

@@ -24,7 +24,10 @@ use serde::Serialize;
 
 use super::ontology;
 use crate::state::AppState;
-use crate::store::{QUERY_TIMEOUT, sparql_query_union, sparql_query_union_timeout, sparql_update};
+use crate::store::{
+    QUERY_TIMEOUT, escape_sparql_literal, sparql_query_union, sparql_query_union_timeout,
+    sparql_update,
+};
 
 // Epic H — annotations. An `oa:Annotation` per note, targeting the resource
 // IRI, kept in its own named graph (out of the ontology/KG graphs).
@@ -402,25 +405,6 @@ fn lookup_label(store: &Store, subject_iri: &str) -> Option<String> {
         return None;
     };
     literal_value(sols.next()?.ok()?.get("l"))
-}
-
-/// Escape a string for use inside a SPARQL double-quoted string literal, so
-/// user-supplied note text (and the creator name) cannot break out of the
-/// literal in an INSERT. (No parameter binding exists in SPARQL Update, so the
-/// value must be escaped before interpolation.)
-fn escape_sparql_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// A fresh note id: the `<uuid>` of `…/annotation/<uuid>` and of the

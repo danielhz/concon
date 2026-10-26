@@ -20,7 +20,10 @@ use oxigraph::sparql::QueryResults;
 use oxigraph::store::Store;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{self, ROOT_TEAM_IRI, is_valid_username};
+use crate::auth::{
+    self, ROOT_TEAM_IRI, TEAM_IRI_PREFIX, is_reserved_root_team_name, is_valid_team_name,
+    is_valid_username,
+};
 use crate::migration;
 use crate::store::{sparql_query, sparql_update};
 
@@ -119,24 +122,6 @@ pub fn plan_users_import(
     }
 }
 
-/// Escape a string for a SPARQL double-quoted literal (see also the annotation
-/// path in `routes::entity`). Kept local to avoid a cross-module dependency.
-/// Used for team names; users are written through `auth::create_user`.
-fn escape_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 /// Build the users bundle from the system store, stamped with its current
 /// schema version.
 pub fn export_users(store: &Store) -> UsersBundle {
@@ -215,8 +200,6 @@ pub fn apply_users_import(
 // memberships/roles, which is the structural core migration reuses.
 // ---------------------------------------------------------------------------
 
-const TEAM_PREFIX: &str = "https://mlipe.2mia.org/teams/";
-
 /// One team in a subtree bundle. `rel_path` is the team's path **relative to
 /// (and including) the exported subtree root** — e.g. root "materials" has
 /// `rel_path = "materials"`, its child "atomistic" has `"materials/atomistic"`.
@@ -269,6 +252,11 @@ pub struct TeamPlanRow {
     /// (present users only); empty for skipped/refused rows.
     pub linked_members: Vec<String>,
     pub linked_admins: Vec<String>,
+    /// Set by apply when a team the plan meant to create could not be
+    /// written after all — a team appeared at that path since the plan, or
+    /// the store failed — with the reason. Nothing is linked on such a row,
+    /// and it is not counted as created.
+    pub failed: Option<String>,
 }
 
 /// The plan/outcome of a teams import.
@@ -292,7 +280,7 @@ pub struct TeamsImportReport {
 /// The path part of a team IRI (`…/teams/<path>`), or `None` if not a team IRI.
 fn team_path_from_iri(iri: &str) -> Option<String> {
     iri.trim_matches(|c| c == '<' || c == '>')
-        .strip_prefix(TEAM_PREFIX)
+        .strip_prefix(TEAM_IRI_PREFIX)
         .map(|s| s.to_string())
 }
 
@@ -302,7 +290,7 @@ fn team_iri_for(segments: &[String]) -> String {
     if segments.is_empty() {
         ROOT_TEAM_IRI.to_string()
     } else {
-        format!("{TEAM_PREFIX}{}", segments.join("/"))
+        format!("{TEAM_IRI_PREFIX}{}", segments.join("/"))
     }
 }
 
@@ -372,17 +360,65 @@ fn target_segments_for(target_parent_segments: &[String], rel_path: &str) -> Vec
     segs
 }
 
+/// Check that every team in `bundle` can be created on a target: each
+/// `rel_path` is one or more valid team names ([`is_valid_team_name`]) and
+/// `name` is its last segment (the team IRI is minted from the path, so the
+/// two must agree), and no team would land directly under the root team with
+/// a [`auth::RESERVED_ROOT_TEAM_NAMES`] name. Also checks
+/// `target_parent_segments`. The first offender is named in the error. A
+/// bundle is validated as a whole, before anything is planned or written: an
+/// invalid name anywhere rejects the import.
+pub fn validate_teams_bundle(
+    bundle: &TeamsBundle,
+    target_parent_segments: &[String],
+) -> Result<(), String> {
+    if let Some(bad) = target_parent_segments
+        .iter()
+        .find(|s| !is_valid_team_name(s))
+    {
+        return Err(format!("Invalid target parent team segment {bad:?}"));
+    }
+    for team in &bundle.teams {
+        let segs: Vec<&str> = team.rel_path.split('/').collect();
+        if let Some(bad) = segs.iter().find(|s| !is_valid_team_name(s)) {
+            return Err(format!(
+                "Invalid team path segment {bad:?} in team path {:?}",
+                team.rel_path
+            ));
+        }
+        if !is_valid_team_name(&team.name) {
+            return Err(format!("Invalid team name {:?}", team.name));
+        }
+        if segs.last().copied() != Some(team.name.as_str()) {
+            return Err(format!(
+                "Team name {:?} does not match the last segment of its path {:?}",
+                team.name, team.rel_path
+            ));
+        }
+        let target = target_segments_for(target_parent_segments, &team.rel_path);
+        if target.len() == 1 && is_reserved_root_team_name(&target[0]) {
+            return Err(format!(
+                "Team name {:?} is reserved directly under the root team",
+                target[0]
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Plan a teams import under `target_parent_segments` (empty = root): resolve
 /// each team's target path, decide create-vs-skip (merge-not-replace), and note
 /// which referenced users are missing on the target. Pure — shared by dry-run
-/// and apply.
+/// and apply. Fails, without a plan, when the bundle or the target parent
+/// does not pass [`validate_teams_bundle`].
 pub fn plan_teams_import(
     bundle: &TeamsBundle,
     target_parent_segments: &[String],
     existing_team_paths: &HashSet<String>,
     existing_usernames: &HashSet<String>,
     target_schema_version: u32,
-) -> TeamsImportReport {
+) -> Result<TeamsImportReport, String> {
+    validate_teams_bundle(bundle, target_parent_segments)?;
     let mut rows = Vec::new();
     let mut missing = HashSet::new();
     let mut rejected_root = Vec::new();
@@ -433,12 +469,13 @@ pub fn plan_teams_import(
             rejected_root: is_root,
             linked_members,
             linked_admins,
+            failed: None,
         });
     }
 
     let mut missing_users: Vec<String> = missing.into_iter().collect();
     missing_users.sort();
-    TeamsImportReport {
+    Ok(TeamsImportReport {
         bundle_schema_version: bundle.schema_version,
         target_schema_version,
         version_mismatch: bundle.schema_version != target_schema_version,
@@ -449,12 +486,13 @@ pub fn plan_teams_import(
         created_count: created,
         skipped_count: skipped,
         applied: false,
-    }
+    })
 }
 
 /// Apply a teams import: create each not-yet-existing team under its resolved
 /// parent (merge-not-replace) and link the members/admins whose users exist on
-/// the target. Never modifies an existing team's own triples.
+/// the target. Never modifies an existing team's own triples. Fails, without
+/// writing anything, when the bundle does not pass [`validate_teams_bundle`].
 pub fn apply_teams_import(
     store: &Store,
     bundle: &TeamsBundle,
@@ -462,19 +500,19 @@ pub fn apply_teams_import(
     existing_team_paths: &HashSet<String>,
     existing_usernames: &HashSet<String>,
     target_schema_version: u32,
-) -> TeamsImportReport {
+) -> Result<TeamsImportReport, String> {
     let mut report = plan_teams_import(
         bundle,
         target_parent_segments,
         existing_team_paths,
         existing_usernames,
         target_schema_version,
-    );
+    )?;
     // Recompute the ordered list identically to the plan.
     let mut ordered = bundle.teams.clone();
     ordered.sort_by_key(|t| (t.rel_path.matches('/').count(), t.rel_path.clone()));
 
-    for (team, row) in ordered.iter().zip(&report.rows) {
+    for (team, row) in ordered.iter().zip(report.rows.iter_mut()) {
         // Only teams this import creates are written. Pre-existing (skipped) and
         // root-refused rows are left completely untouched — including their
         // memberships/roles — so an import can neither clobber an existing team
@@ -484,18 +522,26 @@ pub fn apply_teams_import(
             continue;
         }
         let segs = target_segments_for(target_parent_segments, &team.rel_path);
-        let team_iri = team_iri_for(&segs);
         let parent_iri = team_iri_for(&segs[..segs.len() - 1]);
-        let name = escape_literal(&team.name);
-        let insert = format!(
-            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
-            INSERT DATA {{
-                <{team_iri}> a mlipe:Team ;
-                    mlipe:teamName "{name}" ;
-                    mlipe:hasParentTeam <{parent_iri}> .
-            }}"#
-        );
-        let _ = sparql_update(store, &insert);
+        // Model-API write (the name is a literal value, never query text). The
+        // plan found no team at this path; if one appeared since (the IRI or
+        // the name under this parent is taken), or the store fails, do not
+        // link roles onto it — that would be the role grant on a pre-existing
+        // team the plan refuses — and say so in the report.
+        let team_iri = match auth::create_team(store, &parent_iri, &team.name) {
+            Ok(team) => team.into_string(),
+            Err(e) => {
+                tracing::warn!(
+                    "teams import: could not create {:?} planned for creation: {e}",
+                    row.target_path
+                );
+                row.failed = Some(e.to_string());
+                row.linked_members.clear();
+                row.linked_admins.clear();
+                report.created_count -= 1;
+                continue;
+            }
+        };
 
         // Link members/admins (present users only) — created teams only.
         for (pred, names) in [("hasMember", &row.linked_members), ("hasAdmin", &row.linked_admins)] {
@@ -517,7 +563,7 @@ pub fn apply_teams_import(
         }
     }
     report.applied = true;
-    report
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -666,7 +712,8 @@ mod tests {
             &HashSet::new(),
             &existing_users,
             bundle.schema_version,
-        );
+        )
+        .unwrap();
         assert!(r.applied);
         assert_eq!(r.created_count, 2);
         assert!(r.missing_users.is_empty());
@@ -680,7 +727,8 @@ mod tests {
         // Re-import is idempotent (all paths now exist → skipped).
         let existing_teams: HashSet<String> =
             ["materials".to_string(), "materials/atomistic".to_string()].into_iter().collect();
-        let r2 = plan_teams_import(&bundle, &[], &existing_teams, &existing_users, bundle.schema_version);
+        let r2 = plan_teams_import(&bundle, &[], &existing_teams, &existing_users, bundle.schema_version)
+            .unwrap();
         assert_eq!(r2.created_count, 0);
         assert_eq!(r2.skipped_count, 2);
     }
@@ -704,7 +752,8 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(), // ghost absent
             2,
-        );
+        )
+        .unwrap();
         assert!(r.version_mismatch); // bundle v1 vs target v2
         assert_eq!(r.missing_users, vec!["ghost"]);
         assert_eq!(r.rows[0].target_path, "org/materials"); // re-parented
@@ -740,7 +789,7 @@ mod tests {
         );
         let existing_users: HashSet<String> = ["alice".to_string()].into_iter().collect();
 
-        let plan = plan_teams_import(&bundle, &[], &HashSet::new(), &existing_users, 2);
+        let plan = plan_teams_import(&bundle, &[], &HashSet::new(), &existing_users, 2).unwrap();
         assert_eq!(plan.created_count, 0);
         assert!(plan.rejected_root.contains(&"root".to_string()));
         assert!(plan.rows[0].rejected_root);
@@ -756,7 +805,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        apply_teams_import(&store, &bundle, &[], &HashSet::new(), &existing_users, 2);
+        apply_teams_import(&store, &bundle, &[], &HashSet::new(), &existing_users, 2).unwrap();
         assert!(
             !team_has_role(
                 &store,
@@ -797,7 +846,8 @@ mod tests {
         .unwrap();
         let existing_teams: HashSet<String> = ["materials".to_string()].into_iter().collect();
         let existing_users: HashSet<String> = ["alice".to_string()].into_iter().collect();
-        let r = apply_teams_import(&store, &bundle, &[], &existing_teams, &existing_users, 2);
+        let r =
+            apply_teams_import(&store, &bundle, &[], &existing_teams, &existing_users, 2).unwrap();
         assert_eq!(r.created_count, 0);
         assert_eq!(r.skipped_count, 1);
         assert!(
@@ -809,5 +859,188 @@ mod tests {
             ),
             "import must not grant admin on a pre-existing team"
         );
+    }
+
+    fn team_record(rel_path: &str, name: &str) -> TeamRecord {
+        TeamRecord {
+            rel_path: rel_path.into(),
+            name: name.into(),
+            members: vec![],
+            admins: vec!["alice".into()],
+        }
+    }
+
+    /// A bundle carrying a team name (or path segment) that is not a valid
+    /// team name is refused as a whole, before planning or writing: nothing is
+    /// created, no role is granted, and the offender is named.
+    #[test]
+    fn teams_import_rejects_invalid_names_before_writing() {
+        let store = Store::new().unwrap();
+        sparql_update(
+            &store,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+              <https://mlipe.2mia.org/users/alice> a mlipe:User ; mlipe:username "alice" .
+            }"#,
+        )
+        .unwrap();
+        let existing_users: HashSet<String> = ["alice".to_string()].into_iter().collect();
+        let bad_bundles = [
+            // a quote that would end a SPARQL literal
+            TeamsBundle::new(2, "x".into(), vec![team_record("x\"y", "x\"y")]),
+            // an injection attempt in the name only
+            TeamsBundle::new(2, "ok".into(), vec![team_record("ok", "ok\" } #")]),
+            // a path segment that is not a team name
+            TeamsBundle::new(
+                2,
+                "ok".into(),
+                vec![team_record("ok", "ok"), team_record("ok/a b", "a b")],
+            ),
+            // a reserved `_` view prefix and a hidden `.` name
+            TeamsBundle::new(2, "_files".into(), vec![team_record("_files", "_files")]),
+            TeamsBundle::new(2, ".hidden".into(), vec![team_record(".hidden", ".hidden")]),
+            // a name that disagrees with its path (the IRI is minted from the path)
+            TeamsBundle::new(2, "ok".into(), vec![team_record("ok", "other")]),
+        ];
+        for bundle in &bad_bundles {
+            let plan = plan_teams_import(bundle, &[], &HashSet::new(), &existing_users, 2);
+            assert!(plan.is_err(), "{:?}", bundle.teams);
+            let r = apply_teams_import(&store, bundle, &[], &HashSet::new(), &existing_users, 2);
+            assert!(r.is_err(), "{:?}", bundle.teams);
+        }
+        // An invalid target parent segment is refused the same way.
+        let ok = TeamsBundle::new(2, "ok".into(), vec![team_record("ok", "ok")]);
+        let r = apply_teams_import(
+            &store,
+            &ok,
+            &["a\"b".to_string()],
+            &HashSet::new(),
+            &existing_users,
+            2,
+        );
+        assert!(r.is_err());
+        // Nothing but the seed is in the store: exactly one team, no admin role.
+        let teams = store
+            .quads_for_pattern(
+                None,
+                Some(
+                    oxigraph::model::NamedNode::new("https://mlipe.2mia.org/ontology#teamName")
+                        .unwrap()
+                        .as_ref(),
+                ),
+                None,
+                None,
+            )
+            .count();
+        assert_eq!(teams, 1);
+        let roles = store
+            .quads_for_pattern(
+                None,
+                Some(
+                    oxigraph::model::NamedNode::new("https://mlipe.2mia.org/ontology#hasAdmin")
+                        .unwrap()
+                        .as_ref(),
+                ),
+                None,
+                None,
+            )
+            .count();
+        assert_eq!(roles, 0);
+    }
+
+    /// A team that appears at a planned path between plan and apply (here:
+    /// it exists but was absent from the caller's path set) is not created,
+    /// is reported as failed rather than created, and gets no role linked.
+    #[test]
+    fn teams_import_reports_a_team_it_could_not_create() {
+        let bundle = TeamsBundle::new(
+            2,
+            "materials".into(),
+            vec![team_record("materials", "materials"), team_record("materials/sub", "sub")],
+        );
+        let store = Store::new().unwrap();
+        sparql_update(
+            &store,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+              <https://mlipe.2mia.org/teams/materials> a mlipe:Team ; mlipe:teamName "materials" ;
+                  mlipe:hasParentTeam <https://mlipe.2mia.org/teams/root> .
+              <https://mlipe.2mia.org/users/alice> a mlipe:User ; mlipe:username "alice" .
+            }"#,
+        )
+        .unwrap();
+        let existing_users: HashSet<String> = ["alice".to_string()].into_iter().collect();
+        let r = apply_teams_import(&store, &bundle, &[], &HashSet::new(), &existing_users, 2)
+            .unwrap();
+        assert_eq!(r.created_count, 1, "only the sub-team was created");
+        let mat = r.rows.iter().find(|x| x.target_path == "materials").unwrap();
+        assert!(mat.failed.as_deref().unwrap_or("").contains("already exists"));
+        assert!(mat.linked_admins.is_empty());
+        assert!(
+            !team_has_role(
+                &store,
+                "https://mlipe.2mia.org/teams/materials",
+                "hasAdmin",
+                "https://mlipe.2mia.org/users/alice"
+            ),
+            "no role may be granted on a team the import did not create"
+        );
+        let sub = r.rows.iter().find(|x| x.target_path == "materials/sub").unwrap();
+        assert!(sub.failed.is_none());
+        assert_eq!(sub.linked_admins, vec!["alice"]);
+    }
+
+    /// `static` is refused directly under the root team (the router serves
+    /// `/static`), with the bundle as a whole; deeper it is an ordinary name.
+    #[test]
+    fn teams_import_refuses_reserved_root_level_name() {
+        let users: HashSet<String> = HashSet::new();
+        let at_root = TeamsBundle::new(2, "static".into(), vec![team_record("static", "static")]);
+        assert!(plan_teams_import(&at_root, &[], &HashSet::new(), &users, 2).is_err());
+        // The same bundle re-parented under "org" is fine …
+        let under_org = ["org".to_string()];
+        assert!(plan_teams_import(&at_root, &under_org, &HashSet::new(), &users, 2).is_ok());
+        // … and so is a nested `static`.
+        let nested = TeamsBundle::new(
+            2,
+            "materials".into(),
+            vec![team_record("materials", "materials"), team_record("materials/static", "static")],
+        );
+        assert!(plan_teams_import(&nested, &[], &HashSet::new(), &users, 2).is_ok());
+    }
+
+    /// Valid names with every admitted character import and come back the
+    /// same, through the model API, and are reachable by path.
+    #[test]
+    fn teams_import_accepts_every_admitted_character() {
+        let store = Store::new().unwrap();
+        sparql_update(
+            &store,
+            r#"PREFIX mlipe: <https://mlipe.2mia.org/ontology#>
+            INSERT DATA {
+              <https://mlipe.2mia.org/teams/root> a mlipe:Team ; mlipe:teamName "root" .
+            }"#,
+        )
+        .unwrap();
+        let name = "Az09_-.x";
+        let bundle = TeamsBundle::new(
+            2,
+            name.into(),
+            vec![
+                team_record(name, name),
+                team_record(&format!("{name}/sub.1"), "sub.1"),
+            ],
+        );
+        let r =
+            apply_teams_import(&store, &bundle, &[], &HashSet::new(), &HashSet::new(), 2).unwrap();
+        assert_eq!(r.created_count, 2);
+        let sub =
+            auth::resolve_team_path(&store, &[name.to_string(), "sub.1".to_string()]).unwrap();
+        assert_eq!(sub, format!("<{TEAM_IRI_PREFIX}{name}/sub.1>"));
+        let after = export_teams(&store, &format!("{TEAM_IRI_PREFIX}{name}"));
+        assert_eq!(after.teams.len(), 2);
+        assert_eq!(after.teams[0].name, name);
     }
 }
